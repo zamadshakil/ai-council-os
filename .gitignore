@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+venv/
+.venv/
+council.db
+*.db
+.streamlit/secrets.toml
+dist/
+build/
+*.egg-info/
