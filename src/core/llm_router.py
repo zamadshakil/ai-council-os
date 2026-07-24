@@ -121,44 +121,45 @@ async def call_llm(
     max_tokens: int = 4096,
 ) -> dict:
     """
-    Call an LLM through OpenRouter.
-
-    Returns:
-        - content: str (the response text)
-        - model: str (which model was used)
-        - input_tokens: int
-        - output_tokens: int
-        - cost_usd: float (estimated cost)
+    Call an LLM through OpenRouter with retries for network resilience.
     """
+    import asyncio
     model_tier = MODEL_TIERS.get(tier, MODEL_TIERS["fast"])
     model_id = model_override or model_tier.model_id
     client = get_client()
 
-    response = await client.chat.completions.create(
-        model=model_id,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = await client.chat.completions.create(
+                model=model_id,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
 
-    # Extract usage
-    usage = response.usage
-    input_tokens = usage.prompt_tokens if usage else 0
-    output_tokens = usage.completion_tokens if usage else 0
+            usage = response.usage
+            input_tokens = usage.prompt_tokens if usage else 0
+            output_tokens = usage.completion_tokens if usage else 0
 
-    # Calculate cost
-    cost_usd = (
-        (input_tokens / 1_000_000) * model_tier.input_cost_per_m
-        + (output_tokens / 1_000_000) * model_tier.output_cost_per_m
-    )
+            cost_usd = (
+                (input_tokens / 1_000_000) * model_tier.input_cost_per_m
+                + (output_tokens / 1_000_000) * model_tier.output_cost_per_m
+            )
 
-    return {
-        "content": response.choices[0].message.content,
-        "model": model_id,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cost_usd": round(cost_usd, 6),
-    }
+            return {
+                "content": response.choices[0].message.content or "",
+                "model": model_id,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost_usd": round(cost_usd, 6),
+            }
+        except Exception as e:
+            last_error = e
+            print(f"[OpenRouter Retry {attempt + 1}/3] {e}")
+            await asyncio.sleep(2 ** attempt)
+
+    raise last_error
 
 
 def list_available_models() -> list[dict]:
