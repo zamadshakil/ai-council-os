@@ -69,6 +69,13 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+@app.get("/healthz")
+async def health_check():
+    return {"status": "online", "system": "AI Council OS", "version": "0.2.0"}
+
+
+
 # ── Request/Response Models ──────────────────────────────────────────────
 
 class RunCouncilRequest(BaseModel):
