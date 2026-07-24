@@ -1,13 +1,21 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+  --shadow-premium: 0 2px 4px -1px rgb(0 0 0 / 0.02), 0 12px 24px -4px rgb(0 0 0 / 0.03), 0 24px 48px -12px rgb(0 0 0 / 0.04);
+  --shadow-floating: 0 8px 16px -4px rgb(0 0 0 / 0.04), 0 24px 48px -12px rgb(0 0 0 / 0.08), 0 48px 96px -24px rgb(0 0 0 / 0.12);
+}
 
 :root {
-  --background: #FAFAFA;
-  --foreground: #09090B;
+  --bg-app: #F5F7FA;
+  --bg-surface-secondary: #FCFCFD;
+  --bg-card: #FFFFFF;
+  --bg-sidebar: #FAFAFC;
+  
+  --foreground: #111827;
+  --foreground-muted: #6B7280;
 }
 
 body {
   color: var(--foreground);
-  background: var(--background);
+  background-color: var(--bg-app);
 }

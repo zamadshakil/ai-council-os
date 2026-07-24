@@ -1,7 +1,7 @@
 export interface Task {
   task_id: string;
   council: string;
-  status: 'pending' | 'awaiting_approval' | 'approved' | 'rejected' | 'failed';
+  status: 'pending' | 'awaiting_approval' | 'approved' | 'rejected' | 'failed' | 'published';
   task_description: string;
   final_output: string;
   confidence_score: number;
@@ -10,6 +10,8 @@ export interface Task {
   debate_history: DebateMessage[];
   created_at: string;
   context: Record<string, any>;
+  feedback_notes?: string;
+  error?: string;
 }
 
 export interface DebateMessage {
@@ -28,4 +30,17 @@ export interface Stats {
   total_cost_usd: number;
   avg_confidence: number;
   councils: Record<string, { tasks: number; cost: number; avg_confidence: number }>;
+}
+
+export interface KillSwitchStatus {
+  is_active: boolean;
+  toggled_by: string;
+  toggled_at: string;
+  reason: string;
+}
+
+export interface WorkflowResult {
+  status: string;
+  error?: string;
+  [key: string]: any;
 }

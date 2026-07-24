@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: council_os_db
+    environment:
+      POSTGRES_USER: council_user
+      POSTGRES_PASSWORD: council_pass
+      POSTGRES_DB: council_os
+    ports:
+      - "5432:5432"
+    volumes:
+      - council_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U council_user -d council_os"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  council_data:

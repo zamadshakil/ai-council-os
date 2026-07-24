@@ -1,11 +1,38 @@
+# Environment & Keys
 .env
+.env.*
+!.env.example
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
 venv/
 .venv/
-council.db
-*.db
-.streamlit/secrets.toml
+env/
+*.egg-info/
 dist/
 build/
-*.egg-info/
+
+# Databases & Data
+data/
+council.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Credentials & Scratch
+credentials/
+scratch/
+
+# Next.js / Node
+node_modules/
+.next/
+out/
+.vercel
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

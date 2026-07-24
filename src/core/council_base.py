@@ -54,7 +54,7 @@ class BaseCouncil(ABC):
     max_iterations: int = 3
 
     def __init__(self):
-        self.graph = self._build_graph()
+        self.graph = self._build_graph().compile()
 
     # ── Abstract Methods (subclasses MUST implement) ─────────────────
 
@@ -289,10 +289,7 @@ class BaseCouncil(ABC):
         if checkpointer is None:
             checkpointer = MemorySaver()
 
-        return self.graph.compile(
-            checkpointer=checkpointer,
-            interrupt_before=["approve"],  # Pause here for human review
-        )
+        return self._build_graph().compile()
 
     # ── Helpers ──────────────────────────────────────────────────────
 

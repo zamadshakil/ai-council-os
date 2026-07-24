@@ -1,0 +1,11 @@
+# Replace 'your-domain.com' with your actual domain name pointing to the VM's IP address.
+# Caddy will automatically request and renew free SSL certificates from Let's Encrypt.
+your-domain.com {
+    reverse_proxy api:8000
+}
+
+# (Optional) If you are testing without a domain and just want to access it via IP,
+# comment out the block above, and uncomment the block below:
+# :80 {
+#     reverse_proxy api:8000
+# }

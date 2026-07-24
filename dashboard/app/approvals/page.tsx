@@ -1,71 +1,92 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { TaskCard } from '../components/task-card';
 import { fetchTasks } from '../lib/api';
 import { Task } from '../lib/types';
+import { Loader2 } from 'lucide-react';
+
+const TABS = [
+  { id: 'all', label: 'All Tasks' },
+  { id: 'awaiting_approval', label: 'Pending' },
+  { id: 'approved', label: 'Approved' },
+  { id: 'rejected', label: 'Rejected' },
+];
 
 export default function ApprovalsPage() {
+  const [filter, setFilter] = useState('awaiting_approval');
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<'all' | 'awaiting_approval' | 'approved' | 'rejected'>('awaiting_approval');
 
-  useEffect(() => {
-    async function loadTasks() {
-      setLoading(true);
-      try {
-        const data = await fetchTasks(filter === 'all' ? undefined : filter);
-        setTasks(data);
-      } catch (error) {
-        console.error('Failed to fetch tasks', error);
-      } finally {
-        setLoading(false);
-      }
+  const loadTasks = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await fetchTasks(filter === 'all' ? undefined : filter);
+      setTasks(data);
+    } catch (err) {
+      console.error('Failed to fetch tasks:', err);
+      setTasks([]);
+    } finally {
+      setLoading(false);
     }
-    loadTasks();
   }, [filter]);
 
+  useEffect(() => {
+    loadTasks();
+  }, [loadTasks]);
+
+  // Auto-refresh every 15 seconds
+  useEffect(() => {
+    const interval = setInterval(loadTasks, 15000);
+    return () => clearInterval(interval);
+  }, [loadTasks]);
+
   return (
-    <div className="space-y-8 animate-in fade-in duration-500">
-      <div>
-        <h1 className="text-2xl font-semibold text-zinc-900 tracking-tight">Approval Queue</h1>
-        <p className="text-sm text-zinc-500 mt-1">Review and manage council outputs.</p>
+    <div className="space-y-12 pb-20 animate-in fade-in duration-300 ease-out fill-mode-both">
+      <div className="mb-8">
+        <h1 className="text-[40px] font-bold text-[#111827] tracking-tight leading-none mb-3">Approval Queue</h1>
+        <p className="text-[15px] text-zinc-500 font-medium">Review, edit, and approve/reject AI council outputs before they go live.</p>
       </div>
 
-      <div className="flex space-x-1 border-b border-zinc-200 pb-px">
-        {[
-          { id: 'all', label: 'All Tasks' },
-          { id: 'awaiting_approval', label: 'Pending' },
-          { id: 'approved', label: 'Approved' },
-          { id: 'rejected', label: 'Rejected' },
-        ].map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setFilter(tab.id as any)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-              filter === tab.id
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-zinc-500 hover:text-zinc-700 hover:border-zinc-300'
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
+      <div className="flex space-x-2">
+        {TABS.map((tab) => {
+          const isActive = filter === tab.id;
+          const count = tab.id === 'all' ? tasks.length : 
+            tab.id === filter ? tasks.length : undefined;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setFilter(tab.id)}
+              className={`px-5 py-2.5 text-[14px] font-bold rounded-full transition-all duration-200 active:scale-[0.98] ${
+                isActive
+                  ? 'bg-zinc-900 text-white shadow-md'
+                  : 'bg-white text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 shadow-sm border border-zinc-200/80'
+              }`}
+            >
+              {tab.label}
+              {isActive && count !== undefined && (
+                <span className="ml-2 text-[12px] opacity-70">{count}</span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {loading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {[1,2,3,4,5,6].map(i => <div key={i} className="h-48 bg-zinc-100 rounded-lg animate-pulse"></div>)}
-        </div>
-      ) : tasks.length > 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {tasks.map((task) => (
-            <TaskCard key={task.task_id} task={task} />
+        <div className="flex flex-col gap-4">
+          {[1, 2, 3].map(i => (
+            <div key={i} className="h-32 bg-zinc-200/50 rounded-[24px] animate-pulse" />
           ))}
         </div>
+      ) : tasks.length === 0 ? (
+        <div className="py-32 text-center bg-transparent rounded-[24px] border border-zinc-200/60 border-dashed">
+          <p className="text-[15px] text-zinc-500 font-medium">No tasks found in this view.</p>
+        </div>
       ) : (
-        <div className="py-24 text-center bg-white border border-zinc-200 rounded-lg border-dashed">
-          <p className="text-zinc-500">No tasks found for this filter.</p>
+        <div className="flex flex-col gap-4 animate-in fade-in duration-500">
+          {tasks.map((task) => (
+            <TaskCard key={task.task_id} task={task} onStatusChange={loadTasks} />
+          ))}
         </div>
       )}
     </div>
