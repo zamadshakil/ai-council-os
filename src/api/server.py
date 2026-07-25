@@ -209,14 +209,29 @@ async def root():
 @app.get("/api/tasks")
 async def api_list_tasks(status: str | None = None, council: str | None = None):
     """List all tasks, optionally filtered by status or council."""
-    tasks = await db_list_tasks(status=status, council=council)
-    return {"tasks": tasks, "total": len(tasks)}
+    db_tasks = await db_list_tasks(status=status, council=council)
+    
+    # Merge with in-memory tasks_store to ensure zero data loss
+    combined = {t["task_id"]: t for t in db_tasks}
+    for tid, tdict in tasks_store.items():
+        if tid not in combined:
+            if status and status != "all" and tdict.get("status") != status:
+                continue
+            if council and tdict.get("council") != council:
+                continue
+            combined[tid] = tdict
+
+    tasks_list = list(combined.values())
+    tasks_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return {"tasks": tasks_list, "total": len(tasks_list)}
 
 
 @app.get("/api/tasks/{task_id}")
 async def api_get_task(task_id: str):
-    """Get a specific task by ID."""
+    """Get a specific task by ID with in-memory fallback."""
     task = await get_task(task_id)
+    if not task:
+        task = tasks_store.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
