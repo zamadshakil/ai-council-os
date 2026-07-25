@@ -319,25 +319,55 @@ async def _process_council_task(task_id: str, council_name: str, description: st
             from src.councils.sales.council import SalesCouncil
             council = SalesCouncil()
 
-        res = await council.graph.ainvoke({
+        final_state = {}
+        async for chunk in council.graph.astream({
             "task_description": description,
             "context": context,
             "priority": priority,
-        })
+        }):
+            for node_name, node_state in chunk.items():
+                final_state.update(node_state)
+                
+                # Determine current status based on node
+                step_status = "generating"
+                if node_name == "_critique" or node_name == "critique":
+                    step_status = "critiquing"
+                elif node_name == "_synthesize" or node_name == "synthesize":
+                    step_status = "awaiting_approval"
+                elif node_state.get("final_output"):
+                    step_status = "awaiting_approval"
 
-        updates = {
+                partial_updates = {
+                    "status": step_status,
+                    "final_output": node_state.get("final_output", final_state.get("final_output", "")),
+                    "confidence_score": float(node_state.get("confidence_score", final_state.get("confidence_score", 0.0))),
+                    "iterations": int(node_state.get("iteration", final_state.get("iteration", 1))),
+                    "total_cost_usd": float(node_state.get("total_cost_usd", final_state.get("total_cost_usd", 0.01))),
+                    "debate_history": node_state.get("debate_history", final_state.get("debate_history", [])),
+                }
+
+                try:
+                    await update_task(task_id, partial_updates)
+                except Exception as stream_db_err:
+                    print(f"[DB Stream Error] {stream_db_err}")
+
+                if task_id in tasks_store:
+                    tasks_store[task_id].update(partial_updates)
+
+        # Final guarantee update
+        final_updates = {
             "status": "awaiting_approval",
-            "final_output": res.get("final_output", ""),
-            "confidence_score": float(res.get("confidence_score", 90.0)),
-            "iterations": int(res.get("iteration", 1)),
-            "total_cost_usd": float(res.get("total_cost_usd", 0.02)),
-            "debate_history": res.get("debate_history", []),
+            "final_output": final_state.get("final_output", final_state.get("current_draft", "")),
+            "confidence_score": float(final_state.get("confidence_score", 90.0)),
+            "iterations": int(final_state.get("iteration", 1)),
+            "total_cost_usd": float(final_state.get("total_cost_usd", 0.02)),
+            "debate_history": final_state.get("debate_history", []),
         }
 
-        await update_task(task_id, updates)
+        await update_task(task_id, final_updates)
         if task_id in tasks_store:
-            tasks_store[task_id].update(updates)
-        print(f"[Council Success] Task {task_id} processed by {council_name} council.")
+            tasks_store[task_id].update(final_updates)
+        print(f"[Council Success] Task {task_id} completed streaming by {council_name} council.")
 
     except Exception as e:
         print(f"[Council Error] Task {task_id} failed: {e}")

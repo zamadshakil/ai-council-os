@@ -50,8 +50,9 @@ class BaseCouncil(ABC):
     """
 
     council_name: str = "base"
-    confidence_threshold: float = 85.0
-    max_iterations: int = 3
+    min_iterations: int = 2
+    confidence_threshold: float = 92.0
+    max_iterations: int = 4
 
     def __init__(self):
         self.graph = self._build_graph().compile()
@@ -198,9 +199,14 @@ class BaseCouncil(ABC):
             - "force_end"  → max iterations hit, use best draft
         """
         confidence = state.get("confidence_score", 0)
-        iteration = state.get("iteration", 0)
+        iteration = state.get("iteration", 1)
         max_iter = state.get("max_iterations", self.max_iterations)
+        min_iter = state.get("min_iterations", self.min_iterations)
         threshold = state.get("confidence_threshold", self.confidence_threshold)
+
+        # Enforce minimum debate rounds so Generator & Critic iterate at least twice
+        if iteration < min_iter:
+            return "generate"
 
         if confidence >= threshold:
             return "synthesize"

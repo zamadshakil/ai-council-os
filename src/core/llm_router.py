@@ -85,7 +85,11 @@ def get_client() -> AsyncOpenAI:
         _client = AsyncOpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
-            timeout=60.0,
+            timeout=30.0,
+            default_headers={
+                "HTTP-Referer": "https://councilos.ai",
+                "X-Title": "AI Council OS",
+            },
         )
     return _client
 
@@ -125,43 +129,52 @@ async def call_llm(
     max_tokens: int = 4096,
 ) -> dict:
     """
-    Call an LLM through OpenRouter with retries for network resilience.
+    Call an LLM through OpenRouter with model fallbacks for network resilience.
     """
     import asyncio
     model_tier = MODEL_TIERS.get(tier, MODEL_TIERS["fast"])
-    model_id = model_override or model_tier.model_id
+    primary_model = model_override or model_tier.model_id
+    
+    # Resilient model fallback queue
+    candidate_models = [primary_model]
+    if primary_model != "openai/gpt-4o-mini":
+        candidate_models.append("openai/gpt-4o-mini")
+    if "google/gemini-2.5-flash" not in candidate_models:
+        candidate_models.append("google/gemini-2.5-flash")
+
     client = get_client()
-
     last_error = None
-    for attempt in range(3):
-        try:
-            response = await client.chat.completions.create(
-                model=model_id,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
 
-            usage = response.usage
-            input_tokens = usage.prompt_tokens if usage else 0
-            output_tokens = usage.completion_tokens if usage else 0
+    for model_id in candidate_models:
+        for attempt in range(2):
+            try:
+                response = await client.chat.completions.create(
+                    model=model_id,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
 
-            cost_usd = (
-                (input_tokens / 1_000_000) * model_tier.input_cost_per_m
-                + (output_tokens / 1_000_000) * model_tier.output_cost_per_m
-            )
+                usage = response.usage
+                input_tokens = usage.prompt_tokens if usage else 0
+                output_tokens = usage.completion_tokens if usage else 0
 
-            return {
-                "content": response.choices[0].message.content or "",
-                "model": model_id,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cost_usd": round(cost_usd, 6),
-            }
-        except Exception as e:
-            last_error = e
-            print(f"[OpenRouter Retry {attempt + 1}/3] {e}")
-            await asyncio.sleep(2 ** attempt)
+                cost_usd = (
+                    (input_tokens / 1_000_000) * model_tier.input_cost_per_m
+                    + (output_tokens / 1_000_000) * model_tier.output_cost_per_m
+                )
+
+                return {
+                    "content": response.choices[0].message.content or "",
+                    "model": model_id,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cost_usd": round(cost_usd, 6),
+                }
+            except Exception as e:
+                last_error = e
+                print(f"[OpenRouter Retry {attempt + 1}/2 for {model_id}] {e}")
+                await asyncio.sleep(1)
 
     raise last_error
 
