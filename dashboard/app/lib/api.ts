@@ -1,14 +1,47 @@
-import { Task, Stats, KillSwitchStatus, WorkflowResult } from './types';
+import { Task, Stats, KillSwitchStatus, WorkflowResult, User, LoginResponse } from './types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
+function getAuthHeader(): Record<string, string> {
+  if (typeof window !== 'undefined') {
+    const token = localStorage.getItem('council_os_auth_token');
+    if (token) {
+      return { 'Authorization': `Bearer ${token}` };
+    }
+  }
+  return {};
+}
+
 async function apiFetch(url: string, options?: RequestInit) {
-  const res = await fetch(url, { cache: 'no-store', ...options });
+  const headers = {
+    ...getAuthHeader(),
+    ...(options?.headers || {}),
+  };
+
+  const res = await fetch(url, { cache: 'no-store', ...options, headers });
   if (!res.ok) {
     const err = await res.text().catch(() => 'Unknown error');
     throw new Error(err);
   }
   return res.json();
+}
+
+// ── Auth ─────────────────────────────
+export async function loginUser(username: string, password: string): Promise<LoginResponse> {
+  const res = await fetch(`${API_BASE}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Invalid credentials' }));
+    throw new Error(err.detail || 'Authentication failed');
+  }
+  return res.json();
+}
+
+export async function fetchCurrentUser(): Promise<User> {
+  return apiFetch(`${API_BASE}/api/auth/me`);
 }
 
 // ── Tasks ───────────────────────────

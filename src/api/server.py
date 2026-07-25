@@ -76,7 +76,64 @@ async def health_check():
 
 
 
+import os
+import hmac
+import hashlib
+import json
+import base64
+from fastapi import Header, Depends
+
+
+# ── Security & Authentication Config ────────────────────────────────────
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "zakaria")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "councils@2026")
+JWT_SECRET = os.getenv("JWT_SECRET", "ai-council-os-secure-token-secret-2026")
+
+
+def create_auth_token(username: str) -> str:
+    """Create a signed HMAC token for authenticated user session."""
+    payload = {
+        "username": username,
+        "exp": int(datetime.now(timezone.utc).timestamp()) + 86400 * 30  # 30 days valid
+    }
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+    sig = hmac.new(JWT_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{sig}"
+
+
+def verify_auth_token(authorization: Optional[str] = Header(None)) -> dict:
+    """Verify Authorization Bearer token."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authentication token required")
+    
+    token = authorization.replace("Bearer ", "").strip()
+    try:
+        parts = token.split(".")
+        if len(parts) != 2:
+            raise HTTPException(status_code=401, detail="Invalid token format")
+        
+        payload_b64, sig = parts[0], parts[1]
+        expected_sig = hmac.new(JWT_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected_sig):
+            raise HTTPException(status_code=401, detail="Invalid token signature")
+        
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode()).decode())
+        if payload.get("exp", 0) < int(datetime.now(timezone.utc).timestamp()):
+            raise HTTPException(status_code=401, detail="Token has expired")
+        
+        return payload
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=401, detail="Token verification failed")
+
+
 # ── Request/Response Models ──────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 
 class RunCouncilRequest(BaseModel):
     council: str
@@ -96,6 +153,43 @@ class ContentEngineRequest(BaseModel):
     transcript: str
     video_id: str = ""
     metadata: dict = Field(default_factory=dict)
+
+
+# ── Auth Endpoints ───────────────────────────────────────────────────────
+
+@app.post("/api/auth/login")
+async def api_login(request: LoginRequest):
+    """Authenticate user with username and password."""
+    env_user = os.getenv("ADMIN_USERNAME", "zakaria")
+    env_pass = os.getenv("ADMIN_PASSWORD", "councils@2026")
+    
+    if request.username == env_user and request.password == env_pass:
+        token = create_auth_token(request.username)
+        return {
+            "status": "success",
+            "token": token,
+            "user": {
+                "username": request.username,
+                "name": "Zakaria",
+                "role": "Admin",
+                "email": "zakaria@councilos.ai",
+                "avatar": "/avatar-zakaria.png"
+            }
+        }
+    
+    raise HTTPException(status_code=401, detail="Invalid username or password")
+
+
+@app.get("/api/auth/me")
+async def api_get_current_user(token_data: dict = Depends(verify_auth_token)):
+    """Return authenticated user profile."""
+    return {
+        "username": token_data.get("username", "zakaria"),
+        "name": "Zakaria",
+        "role": "Admin",
+        "email": "zakaria@councilos.ai",
+        "status": "authenticated"
+    }
 
 
 # ── Core Task Endpoints ─────────────────────────────────────────────────

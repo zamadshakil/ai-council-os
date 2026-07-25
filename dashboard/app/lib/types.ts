@@ -1,3 +1,17 @@
+export interface User {
+  username: string;
+  name: string;
+  role: string;
+  email: string;
+  avatar?: string;
+}
+
+export interface LoginResponse {
+  status: string;
+  token: string;
+  user: User;
+}
+
 export interface Task {
   task_id: string;
   council: string;
@@ -43,4 +57,14 @@ export interface WorkflowResult {
   status: string;
   error?: string;
   [key: string]: any;
+}
+
+export interface AppNotification {
+  id: string;
+  title: string;
+  message: string;
+  time: string;
+  type: 'approval' | 'system' | 'workflow';
+  read: boolean;
+  link?: string;
 }
