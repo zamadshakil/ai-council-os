@@ -79,7 +79,9 @@ def get_client() -> AsyncOpenAI:
     """Get the OpenRouter client (OpenAI-compatible)."""
     global _client
     if _client is None:
-        api_key = os.getenv("OPENROUTER_API_KEY", "").strip() or "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"
+        api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY environment variable is not set on the server.")
         _client = AsyncOpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
