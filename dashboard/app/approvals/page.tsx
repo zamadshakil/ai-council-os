@@ -19,27 +19,46 @@ export default function ApprovalsPage() {
   const [loading, setLoading] = useState(true);
 
   const loadTasks = useCallback(async () => {
-    setLoading(true);
     try {
-      const data = await fetchTasks(filter === 'all' ? undefined : filter);
-      setTasks(data);
+      // Fetch all tasks and filter in memory so pending/debating tasks also show up
+      const data = await fetchTasks();
+      let filtered = data;
+
+      if (filter === 'awaiting_approval') {
+        filtered = data.filter(t => 
+          t.status === 'awaiting_approval' || 
+          t.status === 'pending' || 
+          t.status === 'generating' || 
+          t.status === 'critiquing' || 
+          t.status === 'refining'
+        );
+      } else if (filter !== 'all') {
+        filtered = data.filter(t => t.status === filter);
+      }
+
+      setTasks(filtered);
     } catch (err) {
       console.error('Failed to fetch tasks:', err);
-      setTasks([]);
     } finally {
       setLoading(false);
     }
   }, [filter]);
 
   useEffect(() => {
+    setLoading(true);
     loadTasks();
   }, [loadTasks]);
 
-  // Auto-refresh every 15 seconds
+  // Fast auto-refresh (every 3 seconds) when tasks are in progress/debating
   useEffect(() => {
-    const interval = setInterval(loadTasks, 15000);
+    const hasActiveDebate = tasks.some(t => 
+      t.status === 'pending' || t.status === 'generating' || t.status === 'critiquing' || t.status === 'refining'
+    );
+    const intervalTime = hasActiveDebate ? 3000 : 10000;
+    const interval = setInterval(loadTasks, intervalTime);
     return () => clearInterval(interval);
-  }, [loadTasks]);
+  }, [tasks, loadTasks]);
+
 
   return (
     <div className="space-y-12 pb-20 animate-in fade-in duration-300 ease-out fill-mode-both">

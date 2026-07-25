@@ -15,7 +15,7 @@ export interface LoginResponse {
 export interface Task {
   task_id: string;
   council: string;
-  status: 'pending' | 'awaiting_approval' | 'approved' | 'rejected' | 'failed' | 'published';
+  status: 'pending' | 'generating' | 'critiquing' | 'refining' | 'awaiting_approval' | 'approved' | 'rejected' | 'failed' | 'published';
   task_description: string;
   final_output: string;
   confidence_score: number;

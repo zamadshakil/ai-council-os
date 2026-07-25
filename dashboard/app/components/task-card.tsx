@@ -26,6 +26,16 @@ const workflowLabels: Record<string, { label: string; icon: any; color: string }
   content_engine: { label: 'Content Engine', icon: Share2, color: 'text-violet-600' },
 };
 
+function parseTaskDate(dateStr: string): Date {
+  if (!dateStr) return new Date();
+  let s = dateStr.trim();
+  if (!s.endsWith('Z') && !s.includes('+') && !s.includes('-', 10)) {
+    s += 'Z';
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? new Date() : d;
+}
+
 export function TaskCard({ task, onStatusChange }: { task: Task; onStatusChange?: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [actionLoading, setActionLoading] = useState<'approve' | 'reject' | null>(null);
@@ -44,6 +54,8 @@ export function TaskCard({ task, onStatusChange }: { task: Task; onStatusChange?
   const circumference = 2 * Math.PI * radius;
   const offset = circumference - (task.confidence_score / 100) * circumference;
   const confidenceColor = task.confidence_score >= 80 ? 'text-emerald-600' : task.confidence_score >= 60 ? 'text-amber-500' : 'text-red-600';
+
+  const isDebating = task.status === 'pending' || task.status === 'generating' || task.status === 'critiquing' || task.status === 'refining';
 
   const handleApprove = async () => {
     setActionLoading('approve');
@@ -95,6 +107,13 @@ export function TaskCard({ task, onStatusChange }: { task: Task; onStatusChange?
             <div className="flex items-center flex-wrap gap-2.5">
               <span className={`text-[12px] font-bold uppercase tracking-widest ${config.text} shrink-0`}>{task.council}</span>
               
+              {isDebating && (
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider bg-blue-100 text-blue-700 flex items-center gap-1.5 animate-pulse">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span>AI Agents Debating...</span>
+                </span>
+              )}
+
               {wfInfo && (
                 <>
                   <span className="w-1 h-1 rounded-full bg-zinc-300 shrink-0" />
@@ -116,7 +135,7 @@ export function TaskCard({ task, onStatusChange }: { task: Task; onStatusChange?
               
               <span className="w-1 h-1 rounded-full bg-zinc-300 shrink-0" />
               <span className="text-[13px] font-medium text-zinc-500 shrink-0 truncate">
-                {formatDistanceToNow(new Date(task.created_at))} ago
+                {formatDistanceToNow(parseTaskDate(task.created_at))} ago
               </span>
             </div>
             
