@@ -29,12 +29,16 @@ export default function CouncilsPage() {
     e.preventDefault();
     setLoading(true);
     try {
-      await runCouncil({
+      const res = await runCouncil({
         council: selected,
         task_description: taskDesc,
         context: { priority }
       });
-      router.push('/approvals');
+      if (res && res.task_id) {
+        router.push(`/approvals/${res.task_id}`);
+      } else {
+        router.push('/approvals');
+      }
     } catch (error) {
       console.error('Failed to run council', error);
       setLoading(false);

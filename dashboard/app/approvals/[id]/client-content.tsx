@@ -1,13 +1,23 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { fetchTask, approveTask } from '../../lib/api';
-import { ArrowLeft, Check, X, Clock, Target, DollarSign, RotateCcw } from 'lucide-react';
+import { ArrowLeft, Check, X, Clock, Target, DollarSign, RotateCcw, Loader2, Sparkles } from 'lucide-react';
 import { DebateTrace } from '../../components/debate-trace';
 import { Task } from '../../lib/types';
 import { formatDistanceToNow } from 'date-fns';
+
+function parseTaskDate(dateStr: string): Date {
+  if (!dateStr) return new Date();
+  let s = dateStr.trim();
+  if (!s.endsWith('Z') && !s.includes('+') && !s.includes('-', 10)) {
+    s += 'Z';
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? new Date() : d;
+}
 
 export function TaskDetailContent({ id }: { id: string }) {
   const router = useRouter();
@@ -16,15 +26,38 @@ export function TaskDetailContent({ id }: { id: string }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Using useEffect instead of async server component due to PPR issues with client components internally
-  useState(() => {
-    fetchTask(id)
-      .then(setTask)
-      .finally(() => setLoading(false));
-  });
+  const loadTaskData = useCallback(async () => {
+    try {
+      const data = await fetchTask(id);
+      setTask(data);
+    } catch (err) {
+      console.error('Failed to fetch task details:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    loadTaskData();
+  }, [loadTaskData]);
+
+  // Fast auto-polling every 2 seconds while the AI debate is running in the background
+  useEffect(() => {
+    if (!task) return;
+    const isDebating = task.status === 'pending' || task.status === 'generating' || task.status === 'critiquing' || task.status === 'refining';
+    if (!isDebating) return;
+
+    const interval = setInterval(loadTaskData, 2000);
+    return () => clearInterval(interval);
+  }, [task, loadTaskData]);
 
   if (loading || !task) {
-    return <div className="p-8 animate-pulse text-zinc-400">Loading task details...</div>;
+    return (
+      <div className="min-h-[400px] flex flex-col items-center justify-center gap-3 text-zinc-400">
+        <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
+        <p className="text-sm font-semibold">Loading task details...</p>
+      </div>
+    );
   }
 
   const handleAction = async (approved: boolean) => {
@@ -38,6 +71,7 @@ export function TaskDetailContent({ id }: { id: string }) {
     }
   };
 
+  const isDebating = task.status === 'pending' || task.status === 'generating' || task.status === 'critiquing' || task.status === 'refining';
   const confidenceColor = task.confidence_score >= 80 ? 'text-[#10B981]' : task.confidence_score >= 60 ? 'text-[#F59E0B]' : 'text-[#F43F5E]';
 
   return (
@@ -50,12 +84,14 @@ export function TaskDetailContent({ id }: { id: string }) {
           </Link>
           <div className="flex items-center space-x-4">
             <h1 className="text-[32px] font-bold text-[#111827] tracking-tight leading-none">Task Details</h1>
-            <span className={`px-4 py-1.5 rounded-full text-[12px] font-bold uppercase tracking-wider shadow-sm ${
+            <span className={`px-4 py-1.5 rounded-full text-[12px] font-bold uppercase tracking-wider shadow-sm flex items-center gap-2 ${
+              isDebating ? 'bg-blue-100 text-blue-700 animate-pulse' :
               task.status === 'awaiting_approval' ? 'bg-amber-100 text-amber-700' :
               task.status === 'approved' ? 'bg-emerald-100 text-emerald-700' :
               'bg-zinc-100 text-zinc-700'
             }`}>
-              {task.status.replace('_', ' ')}
+              {isDebating && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              <span>{isDebating ? 'AI DEBATE IN PROGRESS' : task.status.replace('_', ' ')}</span>
             </span>
           </div>
         </div>
@@ -76,19 +112,34 @@ export function TaskDetailContent({ id }: { id: string }) {
               <h3 className="text-[16px] font-bold text-[#111827] flex items-center">
                 <Check className="w-5 h-5 mr-2 text-zinc-400" /> Final Output
               </h3>
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(task.final_output);
-                  alert('Copied output to clipboard!');
-                }}
-                className="px-3.5 py-1.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer"
-              >
-                <span>Copy Output</span>
-              </button>
+              {task.final_output && (
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(task.final_output);
+                    alert('Copied output to clipboard!');
+                  }}
+                  className="px-3.5 py-1.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer"
+                >
+                  <span>Copy Output</span>
+                </button>
+              )}
             </div>
-            <div className="prose prose-zinc max-w-none text-[15px] p-6 bg-[#F8FAFC] rounded-[20px] whitespace-pre-wrap leading-relaxed shadow-inner">
-              {task.final_output}
-            </div>
+
+            {isDebating || !task.final_output ? (
+              <div className="p-8 bg-blue-50/50 border border-blue-100 rounded-[20px] flex flex-col items-center justify-center gap-3 text-center">
+                <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center animate-pulse">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className="text-sm font-bold text-zinc-900">AI Council is executing multi-agent debate...</p>
+                  <p className="text-xs text-zinc-500 mt-1">Generator, Critic, and Synthesizer agents are working. Results will appear automatically in ~15-20s.</p>
+                </div>
+              </div>
+            ) : (
+              <div className="prose prose-zinc max-w-none text-[15px] p-6 bg-[#F8FAFC] rounded-[20px] whitespace-pre-wrap leading-relaxed shadow-inner">
+                {task.final_output}
+              </div>
+            )}
           </div>
 
           {task.status === 'awaiting_approval' && (
@@ -141,14 +192,21 @@ export function TaskDetailContent({ id }: { id: string }) {
                 <span className={`font-bold ${confidenceColor}`}>{task.confidence_score.toFixed(1)}%</span>
               </div>
               <div className="text-center pt-2">
-                 <span className="text-[12px] font-semibold text-zinc-400">Created {formatDistanceToNow(new Date(task.created_at))} ago</span>
+                 <span className="text-[12px] font-semibold text-zinc-400">Created {formatDistanceToNow(parseTaskDate(task.created_at))} ago</span>
               </div>
             </div>
           </div>
 
           <div className="bg-white p-8 rounded-[32px] shadow-[0_8px_30px_rgb(0,0,0,0.03)]">
-            <h3 className="text-[16px] font-bold text-[#111827] mb-6">Debate Trace</h3>
-            <DebateTrace history={task.debate_history} />
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-[16px] font-bold text-[#111827]">Debate Trace</h3>
+              {isDebating && (
+                <span className="text-[11px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full animate-pulse flex items-center gap-1">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Live
+                </span>
+              )}
+            </div>
+            <DebateTrace history={task.debate_history || []} isDebating={isDebating} />
           </div>
         </div>
       </div>
