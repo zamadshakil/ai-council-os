@@ -1,14 +1,17 @@
 import { DebateMessage } from '../lib/types';
-import { User, ShieldAlert, Cpu, Loader2, Sparkles, CheckCircle2 } from 'lucide-react';
+import { User, ShieldAlert, Cpu, Loader2, CheckCircle2 } from 'lucide-react';
 
 export function DebateTrace({ 
-  history, 
+  history = [], 
   isDebating = false 
 }: { 
-  history: DebateMessage[];
+  history?: DebateMessage[];
   isDebating?: boolean;
 }) {
-  if (history.length === 0 || isDebating) {
+  const hasHistory = Array.isArray(history) && history.length > 0;
+
+  // Case 1: Empty history AND still waiting for first agent message
+  if (!hasHistory && isDebating) {
     return (
       <div className="space-y-6 pt-2">
         <div className="p-4 rounded-[16px] bg-blue-50/80 border border-blue-200/80 text-blue-900 text-xs flex items-start gap-3">
@@ -16,15 +19,13 @@ export function DebateTrace({
           <div>
             <p className="font-bold text-[13px] text-blue-950">AI Council Debate in Progress</p>
             <p className="text-blue-700/90 mt-0.5 leading-relaxed">
-              Multiple specialized AI models are debating, critiquing, and synthesizing consensus output.
+              Multiple specialized AI models are executing the debate loop via OpenRouter...
             </p>
           </div>
         </div>
 
         {/* Live Step Timeline */}
         <div className="relative pl-6 space-y-6 before:absolute before:inset-0 before:ml-[1.4rem] before:-translate-x-px before:h-full before:w-0.5 before:bg-blue-200/60">
-          
-          {/* Step 1: Generator */}
           <div className="relative flex items-start group">
             <div className="absolute -left-6 w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center ring-4 ring-white shadow-md z-10 animate-pulse">
               <User className="w-3 h-3" />
@@ -38,12 +39,11 @@ export function DebateTrace({
                 </span>
               </div>
               <div className="bg-white border border-blue-200 rounded-[12px] p-3 text-xs text-zinc-600 shadow-sm animate-pulse">
-                Analyzing request constraints and drafting initial multi-platform variant...
+                Analyzing prompt constraints and drafting initial variant...
               </div>
             </div>
           </div>
 
-          {/* Step 2: Critic */}
           <div className="relative flex items-start group opacity-75">
             <div className="absolute -left-6 w-5 h-5 rounded-full bg-amber-500 text-white flex items-center justify-center ring-4 ring-white shadow-sm z-10">
               <ShieldAlert className="w-3 h-3" />
@@ -55,32 +55,27 @@ export function DebateTrace({
                 <span className="text-[10px] text-amber-600 font-semibold">Evaluating Quality</span>
               </div>
               <div className="bg-zinc-50 border border-zinc-200 rounded-[12px] p-3 text-xs text-zinc-500">
-                Awaiting draft... Will review hook quality, platform fit, and assign confidence score.
+                Awaiting draft... Will score hook quality, tone, and platform fit.
               </div>
             </div>
           </div>
-
-          {/* Step 3: Synthesizer */}
-          <div className="relative flex items-start group opacity-50">
-            <div className="absolute -left-6 w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center ring-4 ring-white shadow-sm z-10">
-              <Cpu className="w-3 h-3" />
-            </div>
-            <div className="ml-4 w-full">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-xs font-bold text-zinc-900">Synthesizer Agent</span>
-                <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded text-[10px] font-bold">Consensus</span>
-              </div>
-              <div className="bg-zinc-50 border border-zinc-200 rounded-[12px] p-3 text-xs text-zinc-400">
-                Merges generator draft & critic revisions into final approved output.
-              </div>
-            </div>
-          </div>
-
         </div>
       </div>
     );
   }
 
+  // Case 2: Empty history and NOT debating (e.g. legacy/mock data without history)
+  if (!hasHistory && !isDebating) {
+    return (
+      <div className="py-8 text-center bg-zinc-50 rounded-[16px] border border-zinc-200/80 p-4">
+        <CheckCircle2 className="w-6 h-6 text-zinc-400 mx-auto mb-2" />
+        <p className="text-xs font-semibold text-zinc-600">Single-pass Output Generated</p>
+        <p className="text-[11px] text-zinc-400 mt-0.5">No multi-step debate logs recorded for this item.</p>
+      </div>
+    );
+  }
+
+  // Case 3: We HAVE real history messages to display!
   return (
     <div className="relative pl-6 space-y-6 before:absolute before:inset-0 before:ml-[1.4rem] before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-0.5 before:bg-zinc-200 before:bg-gradient-to-b before:from-transparent before:via-zinc-200 before:to-transparent pt-2">
       {history.map((msg, idx) => {
@@ -129,6 +124,18 @@ export function DebateTrace({
           </div>
         );
       })}
+
+      {/* If still actively debating, show next agent working spinner at bottom */}
+      {isDebating && (
+        <div className="relative flex items-start group animate-pulse">
+          <div className="absolute -left-6 w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center ring-4 ring-white shadow-md z-10">
+            <Loader2 className="w-3 h-3 animate-spin" />
+          </div>
+          <div className="ml-4 text-xs font-bold text-blue-600 flex items-center gap-1.5 py-1">
+            <span>Next AI Agent is evaluating & synthesizing...</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
