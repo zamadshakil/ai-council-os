@@ -74,6 +74,13 @@ class TaskModel(Base):
     )
 
     def to_dict(self) -> dict:
+        created_iso = ""
+        if self.created_at:
+            dt = self.created_at if self.created_at.tzinfo else self.created_at.replace(tzinfo=timezone.utc)
+            created_iso = dt.isoformat()
+            if not created_iso.endswith("Z") and "+" not in created_iso:
+                created_iso += "Z"
+
         return {
             "task_id": self.task_id,
             "council": self.council,
@@ -87,7 +94,7 @@ class TaskModel(Base):
             "context": self.context or {},
             "feedback_notes": self.feedback_notes or "",
             "error": self.error or "",
-            "created_at": self.created_at.isoformat() if self.created_at else "",
+            "created_at": created_iso,
         }
 
 

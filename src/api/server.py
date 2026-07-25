@@ -229,8 +229,9 @@ async def approve_task(task_id: str, request: ApprovalRequest):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    if task["status"] != "awaiting_approval":
-        raise HTTPException(status_code=400, detail="Task is not pending approval")
+    allowed_statuses = {"pending", "generating", "critiquing", "refining", "awaiting_approval"}
+    if task["status"] not in allowed_statuses and task["status"] != "approved" and task["status"] != "rejected":
+        raise HTTPException(status_code=400, detail="Task cannot be modified")
 
     new_status = "approved" if request.approved else "rejected"
     updates = {"status": new_status, "feedback_notes": request.notes}
@@ -276,6 +277,9 @@ async def approve_task(task_id: str, request: ApprovalRequest):
 
 
 import asyncio
+
+_background_tasks: set[asyncio.Task] = set()
+
 
 async def _process_council_task(task_id: str, council_name: str, description: str, context: dict, priority: str):
     """Executes the multi-agent debate loop via OpenRouter in the background."""
@@ -350,7 +354,7 @@ async def run_council(request: RunCouncilRequest):
     tasks_store[task_id] = saved
 
     # Trigger background multi-agent AI debate via OpenRouter
-    asyncio.create_task(
+    bg_task = asyncio.create_task(
         _process_council_task(
             task_id=task_id,
             council_name=request.council,
@@ -359,6 +363,8 @@ async def run_council(request: RunCouncilRequest):
             priority=request.priority,
         )
     )
+    _background_tasks.add(bg_task)
+    bg_task.add_done_callback(_background_tasks.discard)
 
     return {"task_id": task_id, "status": "pending", "message": "Council AI agents are executing debate loop..."}
 
