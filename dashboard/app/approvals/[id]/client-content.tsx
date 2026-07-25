@@ -9,6 +9,8 @@ import { DebateTrace } from '../../components/debate-trace';
 import { Task } from '../../lib/types';
 import { formatDistanceToNow } from 'date-fns';
 
+import { Toast } from '../../components/toast';
+
 function parseTaskDate(dateStr: string): Date {
   if (!dateStr) return new Date();
   let s = dateStr.trim();
@@ -25,6 +27,15 @@ export function TaskDetailContent({ id }: { id: string }) {
   const [feedback, setFeedback] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const [toast, setToast] = useState<{ show: boolean; type?: 'success' | 'error' | 'info'; title: string; message?: string }>({
+    show: false,
+    title: '',
+  });
+
+  const showToast = (title: string, message?: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setToast({ show: true, type, title, message });
+  };
 
   const loadTaskData = useCallback(async () => {
     try {
@@ -68,6 +79,7 @@ export function TaskDetailContent({ id }: { id: string }) {
     } catch (error) {
       console.error('Failed to submit approval', error);
       setIsSubmitting(false);
+      showToast('Action Failed', 'Could not update task approval status.', 'error');
     }
   };
 
@@ -76,6 +88,13 @@ export function TaskDetailContent({ id }: { id: string }) {
 
   return (
     <div className="space-y-8 animate-in fade-in duration-700 ease-out fill-mode-both pb-20 max-w-[1200px] mx-auto">
+      <Toast
+        show={toast.show}
+        type={toast.type}
+        title={toast.title}
+        message={toast.message}
+        onClose={() => setToast((prev) => ({ ...prev, show: false }))}
+      />
       
       <div className="flex items-center justify-between mb-8">
         <div>
@@ -116,11 +135,18 @@ export function TaskDetailContent({ id }: { id: string }) {
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(task.final_output);
-                    alert('Copied output to clipboard!');
+                    setCopied(true);
+                    showToast('Copied to Clipboard!', 'Final output copied to clipboard.');
+                    setTimeout(() => setCopied(false), 2500);
                   }}
-                  className="px-3.5 py-1.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer"
+                  className={`px-3.5 py-1.5 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer ${
+                    copied
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                      : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700'
+                  }`}
                 >
-                  <span>Copy Output</span>
+                  <Check className={`w-3.5 h-3.5 ${copied ? 'text-emerald-600' : 'text-zinc-500'}`} />
+                  <span>{copied ? 'Copied!' : 'Copy Output'}</span>
                 </button>
               )}
             </div>
@@ -146,10 +172,10 @@ export function TaskDetailContent({ id }: { id: string }) {
                         task_description: task.task_description,
                         context: task.context || {}
                       });
-                      alert('Task re-submitted for AI debate!');
+                      showToast('Task Resubmitted', 'AI debate loop has restarted.', 'info');
                       loadTaskData();
                     } catch (e) {
-                      alert('Failed to retry task.');
+                      showToast('Retry Failed', 'Failed to resubmit task.', 'error');
                       setLoading(false);
                     }
                   }}
