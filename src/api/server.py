@@ -326,7 +326,16 @@ async def _process_council_task(task_id: str, council_name: str, description: st
 
     except Exception as e:
         print(f"[Council Error] Task {task_id} failed: {e}")
-        await update_task(task_id, {"status": "failed", "error": str(e)})
+        try:
+            await update_task(task_id, {"status": "failed", "error": str(e)})
+        except Exception as db_e:
+            print(f"[DB Error] Failed to update error column (schema might be old): {db_e}")
+            try:
+                # Fallback: just update status if 'error' column doesn't exist
+                await update_task(task_id, {"status": "failed"})
+            except Exception as inner_db_e:
+                print(f"[DB Error] Critical failure updating task status: {inner_db_e}")
+        
         if task_id in tasks_store:
             tasks_store[task_id]["status"] = "failed"
             tasks_store[task_id]["error"] = str(e)
