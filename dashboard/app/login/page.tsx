@@ -3,14 +3,14 @@
 import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useRouter } from 'next/navigation';
-import { Sparkles, Shield, Lock, User as UserIcon, ArrowRight, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Sparkles, Shield, Lock, User as UserIcon, ArrowRight, AlertCircle } from 'lucide-react';
 
 export default function LoginPage() {
   const { login } = useAuth();
   const router = useRouter();
 
-  const [username, setUsername] = useState('zakaria');
-  const [password, setPassword] = useState('councils@2026');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -23,14 +23,14 @@ export default function LoginPage() {
       await login(username, password);
       router.push('/');
     } catch (err: any) {
-      setError(err.message || 'Invalid credentials. Please try again.');
+      setError(err.message || 'Invalid credentials. Access denied.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen w-full bg-[#090D16] text-white flex items-center justify-center p-6 relative overflow-hidden font-sans">
+    <div className="min-h-screen w-full bg-[#090D16] text-white flex items-center justify-center p-6 relative overflow-hidden font-sans selection:bg-blue-600">
       {/* Ambient background glows */}
       <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-blue-600/15 rounded-full blur-[140px] pointer-events-none" />
       <div className="absolute bottom-10 right-10 w-[400px] h-[400px] bg-purple-600/15 rounded-full blur-[120px] pointer-events-none" />
@@ -52,7 +52,7 @@ export default function LoginPage() {
         </div>
 
         {/* Security Badge */}
-        <div className="mb-6 p-3 rounded-[12px] bg-blue-500/10 border border-blue-500/20 flex items-center gap-3 text-blue-300 text-xs">
+        <div className="mb-6 p-3 rounded-[12px] bg-blue-500/10 border border-blue-500/20 flex items-center justify-center gap-2 text-blue-300 text-xs font-medium">
           <Shield className="w-4 h-4 shrink-0 text-blue-400" />
           <span>Encrypted Session • HMAC SHA-256 Auth</span>
         </div>
@@ -78,9 +78,10 @@ export default function LoginPage() {
               <input
                 type="text"
                 required
+                autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="Enter username"
+                placeholder="Enter your username"
                 className="w-full h-11 pl-10 pr-4 bg-white/[0.06] border border-white/[0.1] rounded-[12px] text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
               />
             </div>
@@ -97,9 +98,10 @@ export default function LoginPage() {
               <input
                 type="password"
                 required
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
+                placeholder="Enter your password"
                 className="w-full h-11 pl-10 pr-4 bg-white/[0.06] border border-white/[0.1] rounded-[12px] text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
               />
             </div>
@@ -108,7 +110,7 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full h-11 mt-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium text-sm rounded-[12px] shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition-all active:scale-[0.98] disabled:opacity-50"
+            className="w-full h-11 mt-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium text-sm rounded-[12px] shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition-all active:scale-[0.98] disabled:opacity-50 cursor-pointer"
           >
             {loading ? (
               <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -120,13 +122,6 @@ export default function LoginPage() {
             )}
           </button>
         </form>
-
-        {/* Demo Credentials Info */}
-        <div className="mt-8 pt-6 border-t border-white/[0.08] text-center">
-          <p className="text-xs text-zinc-500">
-            Admin Access: <span className="text-zinc-300 font-mono">zakaria</span> / <span className="text-zinc-300 font-mono">councils@2026</span>
-          </p>
-        </div>
 
       </div>
     </div>
