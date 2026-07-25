@@ -27,6 +27,7 @@ export function TaskDetailContent({ id }: { id: string }) {
   const [feedback, setFeedback] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [toast, setToast] = useState<{ show: boolean; type?: 'success' | 'error' | 'info'; title: string; message?: string }>({
     show: false,
@@ -40,9 +41,13 @@ export function TaskDetailContent({ id }: { id: string }) {
   const loadTaskData = useCallback(async () => {
     try {
       const data = await fetchTask(id);
-      setTask(data);
-    } catch (err) {
+      if (data && data.task_id) {
+        setTask(data);
+        setFetchError(null);
+      }
+    } catch (err: any) {
       console.error('Failed to fetch task details:', err);
+      setFetchError(err.message || 'Task not found or server busy.');
     } finally {
       setLoading(false);
     }
@@ -52,21 +57,50 @@ export function TaskDetailContent({ id }: { id: string }) {
     loadTaskData();
   }, [loadTaskData]);
 
-  // Fast auto-polling every 2 seconds while the AI debate is running in the background
+  // Fast auto-polling every 2 seconds while AI debate is active OR while task is initializing
   useEffect(() => {
-    if (!task) return;
-    const isDebating = task.status === 'pending' || task.status === 'generating' || task.status === 'critiquing' || task.status === 'refining';
+    const isDebating = !task || task.status === 'pending' || task.status === 'generating' || task.status === 'critiquing' || task.status === 'refining';
     if (!isDebating) return;
 
     const interval = setInterval(loadTaskData, 2000);
     return () => clearInterval(interval);
   }, [task, loadTaskData]);
 
-  if (loading || !task) {
+  if (loading && !task) {
     return (
       <div className="min-h-[400px] flex flex-col items-center justify-center gap-3 text-zinc-400">
         <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
         <p className="text-sm font-semibold">Loading task details...</p>
+      </div>
+    );
+  }
+
+  if (!task) {
+    return (
+      <div className="min-h-[400px] flex flex-col items-center justify-center gap-4 text-center max-w-md mx-auto p-8 bg-white rounded-3xl border border-zinc-200 shadow-sm my-12">
+        <div className="w-12 h-12 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center">
+          <Loader2 className="w-6 h-6 animate-spin text-amber-600" />
+        </div>
+        <div>
+          <h3 className="text-base font-bold text-zinc-900">Task Initializing...</h3>
+          <p className="text-xs text-zinc-500 mt-1">
+            {fetchError || 'Connecting to Council OS backend server. Stand by...'}
+          </p>
+        </div>
+        <div className="flex gap-3">
+          <button
+            onClick={loadTaskData}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs rounded-xl shadow-sm transition-all active:scale-95 cursor-pointer"
+          >
+            Retry Loading
+          </button>
+          <Link
+            href="/approvals"
+            className="px-4 py-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-semibold text-xs rounded-xl transition-all active:scale-95"
+          >
+            Back to Queue
+          </Link>
+        </div>
       </div>
     );
   }
