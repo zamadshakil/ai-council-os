@@ -181,6 +181,7 @@ class BaseCouncil(ABC):
 
         return {
             "current_draft": result["content"],
+            "final_output": result["content"],
             "debate_history": history,
             "total_cost_usd": state.get("total_cost_usd", 0) + result["cost_usd"],
             "total_input_tokens": state.get("total_input_tokens", 0) + result["input_tokens"],
@@ -218,7 +219,7 @@ class BaseCouncil(ABC):
     def _prepare_approval(self, state: dict) -> dict:
         """Mark the state as ready for human review."""
         return {
-            "final_output": state.get("current_draft", ""),
+            "final_output": state.get("final_output") or state.get("current_draft", ""),
             "status": CouncilStatus.AWAITING_APPROVAL.value,
         }
 
