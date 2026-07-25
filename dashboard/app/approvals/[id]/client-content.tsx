@@ -72,9 +72,20 @@ export function TaskDetailContent({ id }: { id: string }) {
           </div>
           
           <div className="bg-white p-10 rounded-[32px] shadow-[0_8px_30px_rgb(0,0,0,0.03)] hover:shadow-[0_12px_40px_rgb(0,0,0,0.06)] transition-shadow duration-500">
-            <h3 className="text-[16px] font-bold text-[#111827] mb-4 flex items-center">
-              <Check className="w-5 h-5 mr-2 text-zinc-400" /> Final Output
-            </h3>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-[16px] font-bold text-[#111827] flex items-center">
+                <Check className="w-5 h-5 mr-2 text-zinc-400" /> Final Output
+              </h3>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(task.final_output);
+                  alert('Copied output to clipboard!');
+                }}
+                className="px-3.5 py-1.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer"
+              >
+                <span>Copy Output</span>
+              </button>
+            </div>
             <div className="prose prose-zinc max-w-none text-[15px] p-6 bg-[#F8FAFC] rounded-[20px] whitespace-pre-wrap leading-relaxed shadow-inner">
               {task.final_output}
             </div>
