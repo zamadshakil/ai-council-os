@@ -125,7 +125,40 @@ export function TaskDetailContent({ id }: { id: string }) {
               )}
             </div>
 
-            {isDebating || !task.final_output ? (
+            {task.status === 'failed' || task.error ? (
+              <div className="p-8 bg-red-50 border border-red-200 rounded-[20px] flex flex-col items-center justify-center gap-4 text-center">
+                <div className="w-10 h-10 rounded-full bg-red-100 text-red-600 flex items-center justify-center">
+                  <X className="w-5 h-5" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm font-bold text-red-950">AI Council Execution Failed</p>
+                  <p className="text-xs text-red-700 max-w-md font-mono bg-red-100/60 p-2.5 rounded-lg border border-red-200/60 text-left overflow-x-auto">
+                    {task.error || 'The OpenRouter API call or debate loop encountered an error.'}
+                  </p>
+                </div>
+                <button
+                  onClick={async () => {
+                    setLoading(true);
+                    try {
+                      const { runCouncil } = await import('../../lib/api');
+                      await runCouncil({
+                        council: task.council,
+                        task_description: task.task_description,
+                        context: task.context || {}
+                      });
+                      alert('Task re-submitted for AI debate!');
+                      loadTaskData();
+                    } catch (e) {
+                      alert('Failed to retry task.');
+                      setLoading(false);
+                    }
+                  }}
+                  className="px-5 py-2 bg-red-600 hover:bg-red-700 text-white font-semibold text-xs rounded-xl shadow-sm transition-all active:scale-95 cursor-pointer"
+                >
+                  Retry Task Execution
+                </button>
+              </div>
+            ) : isDebating || !task.final_output ? (
               <div className="p-8 bg-blue-50/50 border border-blue-100 rounded-[20px] flex flex-col items-center justify-center gap-3 text-center">
                 <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center animate-pulse">
                   <Sparkles className="w-5 h-5" />
