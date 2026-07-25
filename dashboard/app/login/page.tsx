@@ -80,7 +80,10 @@ export default function LoginPage() {
                 required
                 autoComplete="username"
                 value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                onChange={(e) => {
+                  setError('');
+                  setUsername(e.target.value);
+                }}
                 placeholder="Enter your username"
                 className="w-full h-11 pl-10 pr-4 bg-white/[0.06] border border-white/[0.1] rounded-[12px] text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
               />
@@ -100,10 +103,14 @@ export default function LoginPage() {
                 required
                 autoComplete="current-password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  setError('');
+                  setPassword(e.target.value);
+                }}
                 placeholder="Enter your password"
                 className="w-full h-11 pl-10 pr-4 bg-white/[0.06] border border-white/[0.1] rounded-[12px] text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
               />
+
             </div>
           </div>
 

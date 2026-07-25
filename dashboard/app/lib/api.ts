@@ -28,17 +28,36 @@ async function apiFetch(url: string, options?: RequestInit) {
 
 // ── Auth ─────────────────────────────
 export async function loginUser(username: string, password: string): Promise<LoginResponse> {
-  const res = await fetch(`${API_BASE}/api/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Invalid credentials' }));
-    throw new Error(err.detail || 'Authentication failed');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout max
+
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => null);
+      const message = errData?.detail || 'Invalid username or password.';
+      throw new Error(message);
+    }
+    return await res.json();
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error('Connection timed out. Please verify backend server URL.');
+    }
+    if (err.message && err.message !== 'Failed to fetch') {
+      throw err;
+    }
+    throw new Error('Unable to connect to backend server. Please check your network or API URL.');
   }
-  return res.json();
 }
+
 
 export async function fetchCurrentUser(): Promise<User> {
   return apiFetch(`${API_BASE}/api/auth/me`);
