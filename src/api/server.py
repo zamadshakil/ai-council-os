@@ -482,6 +482,14 @@ async def trigger_content_engine(request: ContentEngineRequest):
     return result
 
 
+@app.post("/api/workflows/instagram-comments")
+async def trigger_instagram_commenter():
+    """Manually trigger Instagram Comment Auto-Reply workflow (Client Priority #1)."""
+    from src.integrations.instagram_commenter import run_instagram_commenter
+    result = await run_instagram_commenter(tasks_store)
+    return result
+
+
 # ── Kill Switch Endpoints ────────────────────────────────────────────────
 
 @app.get("/api/kill-switch")
@@ -504,6 +512,76 @@ async def api_deactivate_kill_switch():
     await set_kill_switch_db(False, toggled_by="dashboard")
     kill_switch.deactivate(toggled_by="dashboard")
     return {"status": "deactivated", "message": "Workflows resumed."}
+
+
+# ── Knowledge Base (RAG) Endpoints ─────────────────────────────────────────
+
+@app.post("/api/knowledge/upload")
+async def upload_knowledge_document(file: "UploadFile" = "File(...)"):
+    """Upload a document to the RAG knowledge base."""
+    from fastapi import UploadFile, File
+    from src.core.rag_engine import ingest_document
+    file_bytes = await file.read()
+    result = await ingest_document(file_bytes, file.filename)
+    return result
+
+
+@app.get("/api/knowledge/search")
+async def search_knowledge(q: str = ""):
+    """Search the RAG knowledge base."""
+    from src.core.rag_engine import search_knowledge_base
+    if not q.strip():
+        return {"results": []}
+    results = await search_knowledge_base(q, top_k=5)
+    return {"results": results, "query": q}
+
+
+@app.get("/api/knowledge/documents")
+async def list_knowledge_documents():
+    """List all ingested documents."""
+    from src.core.rag_engine import get_all_documents
+    docs = await get_all_documents()
+    return {"documents": docs, "total": len(docs)}
+
+
+@app.delete("/api/knowledge/documents/{doc_hash}")
+async def delete_knowledge_document(doc_hash: str):
+    """Remove a document from the knowledge base."""
+    from src.core.rag_engine import delete_document
+    success = await delete_document(doc_hash)
+    if not success:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"status": "deleted", "doc_hash": doc_hash}
+
+
+@app.get("/api/memory/preferences")
+async def get_memory_preferences():
+    """Get stored brand guidelines and preferences."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect("./data/memory.db")
+        conn.execute("CREATE TABLE IF NOT EXISTS guidelines (id INTEGER PRIMARY KEY AUTOINCREMENT, guideline TEXT, created_at TEXT DEFAULT (datetime('now')))")
+        rows = conn.execute("SELECT id, guideline, created_at FROM guidelines ORDER BY created_at DESC").fetchall()
+        conn.close()
+        return {"guidelines": [{"id": r[0], "guideline": r[1], "created_at": r[2]} for r in rows]}
+    except Exception as e:
+        return {"guidelines": [], "error": str(e)}
+
+
+class GuidelineRequest(BaseModel):
+    guideline: str
+
+
+@app.post("/api/memory/guidelines")
+async def add_brand_guideline(request: GuidelineRequest):
+    """Add a brand guideline to the memory store."""
+    import sqlite3
+    conn = sqlite3.connect("./data/memory.db")
+    conn.execute("CREATE TABLE IF NOT EXISTS guidelines (id INTEGER PRIMARY KEY AUTOINCREMENT, guideline TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    conn.execute("INSERT INTO guidelines (guideline) VALUES (?)", (request.guideline,))
+    conn.commit()
+    conn.close()
+    return {"status": "saved", "guideline": request.guideline}
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────

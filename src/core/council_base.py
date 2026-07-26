@@ -98,6 +98,27 @@ class BaseCouncil(ABC):
 
     # ── Graph Nodes ──────────────────────────────────────────────────
 
+    async def _retrieve_context(self, state: dict) -> dict:
+        """
+        RAG context retrieval node (fires before Generator on first iteration only).
+        Fetches top-3 relevant knowledge chunks and stores them in state.
+        Gracefully no-ops if the knowledge base is empty or unavailable.
+        """
+        # Only retrieve on the first iteration to avoid re-embedding on every loop
+        if state.get("iteration", 0) > 0:
+            return {}
+
+        try:
+            from src.core.rag_engine import get_rag_context
+            task = state.get("task_description", "")
+            context = await get_rag_context(task, top_k=3)
+            if context:
+                print(f"[RAG] Injecting {len(context)} chars of context into {self.council_name} council.")
+            return {"rag_context": context}
+        except Exception as e:
+            print(f"[RAG] Context retrieval skipped (non-fatal): {e}")
+            return {"rag_context": ""}
+
     async def _generate(self, state: dict) -> dict:
         """Generator agent: creates or refines the draft."""
         priority = state.get("priority", "medium")
@@ -252,6 +273,7 @@ class BaseCouncil(ABC):
         builder = StateGraph(dict)
 
         # Add nodes
+        builder.add_node("retrieve_context", self._retrieve_context)
         builder.add_node("generate", self._generate)
         builder.add_node("critique", self._critique)
         builder.add_node("increment", self._increment_iteration)
@@ -260,7 +282,8 @@ class BaseCouncil(ABC):
         builder.add_node("force_end", self._force_end)
 
         # Define edges
-        builder.add_edge(START, "generate")
+        builder.add_edge(START, "retrieve_context")
+        builder.add_edge("retrieve_context", "generate")
         builder.add_edge("generate", "critique")
 
         # Conditional branching after critique
