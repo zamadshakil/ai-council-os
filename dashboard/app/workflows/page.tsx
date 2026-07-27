@@ -25,6 +25,17 @@ interface WorkflowDef {
 
 const WORKFLOWS: WorkflowDef[] = [
   {
+    id: 'instagram-comments',
+    name: 'Instagram Comment Auto-Reply',
+    description: 'Fetches recent posts/reels from @zamdev.me, reads comments, and uses Support Council to generate and post contextual AI replies (deduplicated).',
+    icon: MessageCircle,
+    endpoint: 'instagram-comments',
+    schedule: 'Every 30 min',
+    color: 'text-pink-600',
+    bgColor: 'bg-pink-50',
+    borderColor: 'border-pink-200',
+  },
+  {
     id: 'reddit',
     name: 'Reddit Lead Prospector',
     description: 'Scans 45+ subreddits for prospects asking questions we can answer. AI scores intent and drafts contextual replies.',
