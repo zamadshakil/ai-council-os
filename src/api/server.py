@@ -669,8 +669,9 @@ async def api_publish(request: PublishRequest):
 
 try:
     from src.core.mcp_server import mcp
-    app.mount("/mcp", mcp.sse_app())
+    app.mount("/mcp", mcp.http_app())
     print("[MCP] FastMCP server mounted at /mcp")
 except Exception as mcp_err:
     print(f"[MCP] Mount skipped (non-fatal): {mcp_err}")
+
 

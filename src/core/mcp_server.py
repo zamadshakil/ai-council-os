@@ -6,9 +6,8 @@ This allows any MCP-compatible client (Claude Desktop, Cursor, etc.) to:
   - Run councils and generate content
   - Search the knowledge base
   - Trigger social publishing workflows
-  - Read memory and analytics
 
-Mount: app.mount("/mcp", mcp.sse_app()) in server.py
+Mount: app.mount("/mcp", mcp.http_app()) in server.py
 OR run standalone: python -m src.core.mcp_server
 
 Usage with Claude Desktop (add to claude_desktop_config.json):
