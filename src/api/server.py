@@ -512,8 +512,12 @@ async def trigger_content_engine(request: ContentEngineRequest):
 async def trigger_instagram_commenter():
     """Manually trigger Instagram Comment Auto-Reply workflow (Client Priority #1)."""
     from src.integrations.instagram_commenter import run_instagram_commenter
-    result = await run_instagram_commenter(tasks_store)
-    return result
+    asyncio.create_task(run_instagram_commenter(tasks_store))
+    return {
+        "status": "started",
+        "workflow": "instagram-comments",
+        "message": "Instagram comment auto-reply workflow triggered! AI is fetching comments and generating replies."
+    }
 
 
 # ── Kill Switch Endpoints ────────────────────────────────────────────────
