@@ -100,24 +100,39 @@ class BaseCouncil(ABC):
 
     async def _retrieve_context(self, state: dict) -> dict:
         """
-        RAG context retrieval node (fires before Generator on first iteration only).
-        Fetches top-3 relevant knowledge chunks and stores them in state.
-        Gracefully no-ops if the knowledge base is empty or unavailable.
+        Context retrieval node (fires before Generator on first iteration only).
+        Fetches:
+          1. RAG knowledge chunks (relevant documents from knowledge base)
+          2. Memory context (brand guidelines, preferences, past approved examples)
+        Gracefully no-ops if either source is empty or unavailable.
         """
-        # Only retrieve on the first iteration to avoid re-embedding on every loop
         if state.get("iteration", 0) > 0:
             return {}
 
+        rag_ctx = ""
+        memory_ctx = ""
+        task = state.get("task_description", "")
+
         try:
             from src.core.rag_engine import get_rag_context
-            task = state.get("task_description", "")
-            context = await get_rag_context(task, top_k=3)
-            if context:
-                print(f"[RAG] Injecting {len(context)} chars of context into {self.council_name} council.")
-            return {"rag_context": context}
+            rag_ctx = await get_rag_context(task, top_k=3)
+            if rag_ctx:
+                print(f"[RAG] Injecting {len(rag_ctx)} chars into {self.council_name} council.")
         except Exception as e:
-            print(f"[RAG] Context retrieval skipped (non-fatal): {e}")
-            return {"rag_context": ""}
+            print(f"[RAG] Skipped (non-fatal): {e}")
+
+        try:
+            from src.core.memory_manager import get_memory_context
+            memory_ctx = await get_memory_context(task, self.council_name)
+            if memory_ctx:
+                print(f"[Memory] Injecting {len(memory_ctx)} chars into {self.council_name} council.")
+        except Exception as e:
+            print(f"[Memory] Skipped (non-fatal): {e}")
+
+        return {
+            "rag_context": rag_ctx,
+            "memory_context": memory_ctx,
+        }
 
     async def _generate(self, state: dict) -> dict:
         """Generator agent: creates or refines the draft."""

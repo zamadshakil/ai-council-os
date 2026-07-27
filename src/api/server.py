@@ -288,6 +288,32 @@ async def approve_task(task_id: str, request: ApprovalRequest):
             tasks_store[task_id]["status"] = "failed"
             return {"task_id": task_id, "status": "failed", "error": str(e)}
 
+    # Store in episodic memory (learn from this outcome)
+    try:
+        from src.core.memory_manager import store_episode
+        await store_episode(
+            council=task.get("council", "unknown"),
+            task_summary=task.get("task_description", "")[:400],
+            output_summary=(updates.get("final_output") or task.get("final_output", ""))[:400],
+            outcome=new_status,
+            feedback_notes=request.notes,
+            confidence=float(task.get("confidence_score", 0.0)),
+        )
+    except Exception as mem_err:
+        print(f"[Memory] Episode storage failed (non-fatal): {mem_err}")
+
+    # Multi-platform publishing on approval
+    if request.approved:
+        publish_platforms = request.context.get("publish_to", []) if hasattr(request, "context") else []
+        if publish_platforms:
+            try:
+                from src.integrations.publisher import publish_to_platforms
+                output = updates.get("final_output") or task.get("final_output", "")
+                media_url = task.get("context", {}).get("media_url")
+                asyncio.create_task(publish_to_platforms(output, publish_platforms, media_url))
+            except Exception as pub_err:
+                print(f"[Publisher] Publish trigger failed (non-fatal): {pub_err}")
+
     return {"task_id": task_id, "status": new_status}
 
 
@@ -586,12 +612,65 @@ async def add_brand_guideline(request: GuidelineRequest):
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-async def _sync_new_tasks_to_db():
-    """Sync any new tasks from memory cache to the database."""
-    existing_ids = {t["task_id"] for t in await db_list_tasks()}
-    for task_id, task_data in tasks_store.items():
-        if task_id not in existing_ids:
-            try:
-                await create_task(task_data)
-            except Exception:
-                pass  # Already exists or constraint error
+# ── Memory API Endpoints ─────────────────────────────────────────────────────
+
+@app.get("/api/memory/stats")
+async def api_memory_stats():
+    """Memory system statistics."""
+    from src.core.memory_manager import get_memory_stats
+    return await get_memory_stats()
+
+
+@app.get("/api/memory/episodes")
+async def api_get_episodes(council: str = "all", outcome: str = "approved", limit: int = 10):
+    """Get episodic memory entries."""
+    from src.core.memory_manager import get_recent_episodes
+    return {"episodes": await get_recent_episodes(council, outcome, limit)}
+
+
+@app.post("/api/memory/preferences")
+async def api_save_preference(key: str, value: str, council: str = "all"):
+    """Save a brand preference."""
+    from src.core.memory_manager import save_preference
+    return await save_preference(key, value, council)
+
+
+@app.delete("/api/memory/guidelines/{guideline_id}")
+async def api_delete_guideline(guideline_id: int):
+    """Delete a brand guideline."""
+    from src.core.memory_manager import delete_guideline
+    await delete_guideline(guideline_id)
+    return {"status": "deleted", "id": guideline_id}
+
+
+# ── Publisher API Endpoints ───────────────────────────────────────────────────
+
+@app.get("/api/platforms/status")
+async def api_platform_status():
+    """Check which social platforms have credentials configured."""
+    from src.integrations.publisher import get_platform_status
+    return await get_platform_status()
+
+
+class PublishRequest(BaseModel):
+    content: str
+    platforms: list[str]
+    media_url: Optional[str] = None
+
+
+@app.post("/api/publish")
+async def api_publish(request: PublishRequest):
+    """Publish content to one or more social platforms immediately."""
+    from src.integrations.publisher import publish_to_platforms
+    return await publish_to_platforms(request.content, request.platforms, request.media_url)
+
+
+# ── MCP Server Mount ────────────────────────────────────────────────────────
+
+try:
+    from src.core.mcp_server import mcp
+    app.mount("/mcp", mcp.sse_app())
+    print("[MCP] FastMCP server mounted at /mcp")
+except Exception as mcp_err:
+    print(f"[MCP] Mount skipped (non-fatal): {mcp_err}")
+
