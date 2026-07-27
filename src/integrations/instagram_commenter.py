@@ -27,6 +27,9 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────
 GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
