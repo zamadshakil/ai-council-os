@@ -73,6 +73,8 @@ def start_scheduler():
         id='instagram_comments',
         name='Instagram Comment Auto-Reply',
         replace_existing=True,
+        max_instances=3,
+        coalesce=True,
     )
 
     # Reddit Prospector — every 60 minutes
@@ -83,6 +85,8 @@ def start_scheduler():
         id='reddit_prospector',
         name='Reddit Lead Prospector',
         replace_existing=True,
+        max_instances=3,
+        coalesce=True,
     )
 
     # YouTube Comment Auto-Reply — every 30 minutes
@@ -93,6 +97,8 @@ def start_scheduler():
         id='youtube_comments',
         name='YouTube Comment Auto-Reply',
         replace_existing=True,
+        max_instances=3,
+        coalesce=True,
     )
 
     scheduler.start()
