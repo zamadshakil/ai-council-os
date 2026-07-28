@@ -20,6 +20,7 @@ Flow:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import sqlite3
@@ -194,22 +195,21 @@ async def generate_reply_for_comment(
 
     # Fast fallback: Direct LLM Call (< 2 sec)
     try:
-        from src.core.llm_router import LLMRouter
-        router = LLMRouter()
+        from src.core.llm_router import call_llm
         system_prompt = (
             "You are the official Instagram AI assistant for ZamDev.me (@zamdev.me). "
             "ZamDev provides custom AI agents, business workflow automation, web development, and digital systems. "
             "Write helpful, professional, friendly 1-2 sentence replies to Instagram comments."
         )
         user_prompt = f"Comment from @{username}: '{comment_text}'\nPost Caption: '{caption[:200]}'\nReply:"
-        res = await router.complete(
+        res = await call_llm(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             tier="fast"
         )
-        return res.content.strip()
+        return res.get("content", "").strip()
     except Exception as fallback_err:
         print(f"[Instagram AI] Fast fallback error: {fallback_err}")
         return f"Hey @{username}! Thanks for reaching out to ZamDev. How can we help automate your workflow today? 🚀"
