@@ -157,11 +157,8 @@ async def generate_reply_for_comment(
 ) -> str:
     """
     Use the Support Council AI debate loop to generate a contextual reply.
-    Returns the final approved reply text.
+    Falls back to ultra-fast direct LLM completion if Council times out or encounters errors.
     """
-    from src.councils.support.council import SupportCouncil
-
-    council = SupportCouncil()
     task_description = (
         f"Generate a friendly, engaging Instagram reply to this comment.\n\n"
         f"Post caption: {caption[:300] if caption else '(no caption)'}\n"
@@ -174,17 +171,48 @@ async def generate_reply_for_comment(
         f"- End with a CTA or question when appropriate"
     )
 
-    final_state = {}
-    async for chunk in council.graph.astream({
-        "task_description": task_description,
-        "context": {"workflow": "instagram_commenter", "username": username},
-        "priority": "medium",
-    }):
-        for _, node_state in chunk.items():
-            final_state.update(node_state)
+    try:
+        from src.councils.support.council import SupportCouncil
+        council = SupportCouncil()
 
-    reply = final_state.get("final_output") or final_state.get("current_draft", "")
-    return reply.strip()
+        async def _run_council():
+            final_state = {}
+            async for chunk in council.graph.astream({
+                "task_description": task_description,
+                "context": {"workflow": "instagram_commenter", "username": username},
+                "priority": "medium",
+            }):
+                for _, node_state in chunk.items():
+                    final_state.update(node_state)
+            return final_state.get("final_output") or final_state.get("current_draft", "")
+
+        reply = await asyncio.wait_for(_run_council(), timeout=12.0)
+        if reply and reply.strip():
+            return reply.strip()
+    except Exception as e:
+        print(f"[Instagram AI] Council loop timed out or failed ({e}), using fast direct LLM fallback...")
+
+    # Fast fallback: Direct LLM Call (< 2 sec)
+    try:
+        from src.core.llm_router import LLMRouter
+        router = LLMRouter()
+        system_prompt = (
+            "You are the official Instagram AI assistant for ZamDev.me (@zamdev.me). "
+            "ZamDev provides custom AI agents, business workflow automation, web development, and digital systems. "
+            "Write helpful, professional, friendly 1-2 sentence replies to Instagram comments."
+        )
+        user_prompt = f"Comment from @{username}: '{comment_text}'\nPost Caption: '{caption[:200]}'\nReply:"
+        res = await router.complete(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            tier="fast"
+        )
+        return res.content.strip()
+    except Exception as fallback_err:
+        print(f"[Instagram AI] Fast fallback error: {fallback_err}")
+        return f"Hey @{username}! Thanks for reaching out to ZamDev. How can we help automate your workflow today? 🚀"
 
 
 # ── Main Workflow ──────────────────────────────────────────────────────
