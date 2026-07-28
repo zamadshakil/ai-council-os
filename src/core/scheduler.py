@@ -49,11 +49,32 @@ async def _job_youtube_comments():
     print(f"📊 [Scheduler] YouTube Comments result: {result}")
 
 
+async def _job_instagram_comments():
+    """Scheduled job: Instagram Comment Auto-Reply (Client Priority #1)."""
+    if is_killed():
+        print("🛑 [Scheduler] Kill switch active. Skipping Instagram Comments.")
+        return
+
+    from src.integrations.instagram_commenter import run_instagram_commenter
+    result = await run_instagram_commenter(_tasks_store)
+    print(f"📊 [Scheduler] Instagram Comments result: {result}")
+
+
 def start_scheduler():
     """
     Start all background automation jobs.
     Called during FastAPI startup.
     """
+    # Instagram Comment Auto-Reply — every 5 minutes (Client Priority #1)
+    scheduler.add_job(
+        _job_instagram_comments,
+        'interval',
+        minutes=5,
+        id='instagram_comments',
+        name='Instagram Comment Auto-Reply',
+        replace_existing=True,
+    )
+
     # Reddit Prospector — every 60 minutes
     scheduler.add_job(
         _job_reddit_prospector,
@@ -76,6 +97,7 @@ def start_scheduler():
 
     scheduler.start()
     print("[Scheduler] Background automation scheduler started.")
+    print("   - Instagram Comments: every 5 min (ACTIVE)")
     print("   - Reddit Prospector: every 60 min")
     print("   - YouTube Comments: every 30 min")
     print("   - YouTube Descriptions: manual trigger only")
