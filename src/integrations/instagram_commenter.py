@@ -290,3 +290,61 @@ async def run_instagram_commenter(tasks_store: dict) -> dict:
     }
     print(f"[Instagram Commenter] Run complete: {total_processed} replied, {total_skipped} skipped, {total_failed} failed.")
     return summary
+
+
+# ── Instant Webhook Handler (< 5 sec reply) ────────────────────────────
+
+async def handle_instant_webhook_comment(comment_id: str, comment_text: str, username: str, media_id: str = "") -> dict:
+    """
+    Called instantly when Meta sends a real-time Webhook comment notification.
+    Generates AI reply and posts it to Instagram immediately (< 5 sec).
+    """
+    if not comment_id or not comment_text:
+        return {"status": "ignored", "reason": "empty comment or id"}
+
+    if _is_already_replied(comment_id):
+        print(f"[Instagram Webhook] Comment {comment_id} already replied — skipping.")
+        return {"status": "skipped", "reason": "already_replied"}
+
+    print(f"[Instagram Webhook] Instant comment received from @{username}: '{comment_text}'")
+
+    try:
+        caption = ""
+        if media_id:
+            try:
+                token = _get_token()
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(
+                        f"{GRAPH_API_BASE}/{media_id}",
+                        params={"fields": "caption", "access_token": token}
+                    )
+                    if resp.status_code == 200:
+                        caption = resp.json().get("caption", "")
+            except Exception:
+                pass
+
+        reply_text = await generate_reply_for_comment(
+            comment_text=comment_text,
+            caption=caption,
+            username=username,
+            tasks_store={},
+        )
+
+        if not reply_text:
+            return {"status": "failed", "reason": "empty AI reply"}
+
+        res = await post_reply(comment_id, reply_text)
+        _mark_replied(comment_id, media_id, reply_text)
+        print(f"[Instagram Webhook] Instantly replied to @{username}: '{reply_text}'")
+
+        return {
+            "status": "success",
+            "comment_id": comment_id,
+            "username": username,
+            "reply": reply_text,
+            "meta_response": res,
+        }
+    except Exception as e:
+        print(f"[Instagram Webhook] Instant reply error: {e}")
+        return {"status": "error", "error": str(e)}
+

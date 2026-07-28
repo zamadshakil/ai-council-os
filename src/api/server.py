@@ -508,6 +508,59 @@ async def trigger_content_engine(request: ContentEngineRequest):
     return result
 
 
+# ── Meta Real-Time Instagram Webhook Endpoints ─────────────────────────
+
+VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "ai_council_os_verify_token_2026")
+
+
+@app.get("/api/webhooks/instagram")
+async def verify_instagram_webhook(
+    hub_mode: Optional[str] = Query(None, alias="hub.mode"),
+    hub_challenge: Optional[str] = Query(None, alias="hub.challenge"),
+    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
+):
+    """Meta Webhook Challenge Verification."""
+    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
+        print(f"[Instagram Webhook] Successfully verified with Meta challenge: {hub_challenge}")
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(content=hub_challenge)
+    from fastapi import HTTPException
+    raise HTTPException(status_code=403, detail="Verification token mismatch")
+
+
+@app.post("/api/webhooks/instagram")
+async def receive_instagram_webhook(request: Request):
+    """Receive real-time comment notifications from Meta and reply instantly (< 5 sec)."""
+    try:
+        body = await request.json()
+        print(f"[Instagram Webhook Payload Received]: {body}")
+
+        from src.integrations.instagram_commenter import handle_instant_webhook_comment
+
+        # Parse Meta webhook entries
+        entries = body.get("entry", [])
+        for entry in entries:
+            changes = entry.get("changes", [])
+            for change in changes:
+                if change.get("field") == "comments":
+                    value = change.get("value", {})
+                    comment_id = value.get("id")
+                    comment_text = value.get("text")
+                    from_user = value.get("from", {}).get("username", "user")
+                    media_id = value.get("media", {}).get("id", "")
+
+                    if comment_id and comment_text:
+                        # Process in background task immediately so Meta gets 200 OK within 2 seconds
+                        asyncio.create_task(
+                            handle_instant_webhook_comment(comment_id, comment_text, from_user, media_id)
+                        )
+
+        return {"status": "ok", "message": "Event received"}
+    except Exception as e:
+        print(f"[Instagram Webhook Error]: {e}")
+        return {"status": "error", "error": str(e)}
+
+
 @app.post("/api/workflows/instagram-comments")
 async def trigger_instagram_commenter():
     """Manually trigger Instagram Comment Auto-Reply workflow (Client Priority #1)."""
