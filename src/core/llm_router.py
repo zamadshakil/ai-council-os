@@ -33,40 +33,40 @@ class ModelTier:
 MODEL_TIERS: dict[str, ModelTier] = {
     "cheap": ModelTier(
         name="cheap",
-        model_id="deepseek/deepseek-chat",
-        input_cost_per_m=0.14,
-        output_cost_per_m=0.28,
-        description="DeepSeek V3: SOTA intelligence, 95% cheaper than GPT-4o",
+        model_id="openrouter/free",
+        input_cost_per_m=0.00,
+        output_cost_per_m=0.00,
+        description="OpenRouter Auto-Free: Best available 100% free model",
     ),
     "fast": ModelTier(
         name="fast",
         model_id="openrouter/free",
         input_cost_per_m=0.00,
         output_cost_per_m=0.00,
-        description="OpenRouter Free Auto-Routing: Best available free model (Temporary fix for 403 Credit Limit)",
+        description="OpenRouter Auto-Free: Ultra-fast 100% free model",
     ),
     "smart": ModelTier(
         name="smart",
-        model_id="deepseek/deepseek-r1",
-        input_cost_per_m=0.55,
-        output_cost_per_m=2.19,
-        description="DeepSeek R1: Reasoning & critique engine (80% cheaper than GPT-4o)",
+        model_id="openrouter/free",
+        input_cost_per_m=0.00,
+        output_cost_per_m=0.00,
+        description="OpenRouter Auto-Free: Quality 100% free model",
     ),
     "reasoning": ModelTier(
         name="reasoning",
-        model_id="qwen/qwen-2.5-72b-instruct",
-        input_cost_per_m=0.35,
-        output_cost_per_m=0.40,
-        description="Qwen 2.5 72B: SOTA open-weights strategy model",
+        model_id="openrouter/free",
+        input_cost_per_m=0.00,
+        output_cost_per_m=0.00,
+        description="OpenRouter Auto-Free: Strategy 100% free model",
     ),
 }
 
 
 PRIORITY_TO_TIER = {
-    "low": "cheap",
+    "low": "fast",
     "medium": "fast",
-    "high": "smart",
-    "critical": "reasoning",
+    "high": "fast",
+    "critical": "fast",
 }
 
 
@@ -107,16 +107,10 @@ def get_model_for_role(role: str, priority: str = "medium") -> ModelTier:
     Get the appropriate model based on agent role and task priority.
 
     Supervisors always use cheap models (they just route).
-    Critics always use smart models (they need analytical depth).
-    Generators and Synthesizers follow the task priority.
+    Critics and Generators follow the task priority.
     """
-    role_overrides = {
-        "supervisor": "cheap",
-        "critic": "smart",
-    }
-
-    if role in role_overrides:
-        return MODEL_TIERS[role_overrides[role]]
+    if role == "supervisor":
+        return MODEL_TIERS["cheap"]
 
     return get_model_for_priority(priority)
 
