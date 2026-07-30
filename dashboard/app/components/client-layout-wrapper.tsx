@@ -45,16 +45,24 @@ export function ClientLayoutWrapper({ children }: { children: React.ReactNode })
   }
 
   return (
-    <div className="flex min-h-screen relative w-full">
+    <div className="min-h-screen bg-[#FAFAFA]">
       <Sidebar />
-      <Suspense fallback={<div className="h-20 fixed top-0 right-0 left-[280px] bg-white/60 backdrop-blur-2xl border-b border-black/[0.08] z-40" />}>
+      <div
+        className={`transition-all duration-300 ease-in-out flex flex-col min-h-screen ${
+          isCollapsed ? 'pl-20' : 'pl-64'
+        }`}
+      >
         <TopNav />
-      </Suspense>
-      <main className={`flex-1 transition-all duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)] pt-28 px-8 lg:px-16 pb-24 ${isCollapsed ? 'ml-[72px]' : 'ml-[280px]'}`}>
-        <div className="max-w-[1600px] mx-auto w-full">
-          {children}
-        </div>
-      </main>
+        <main className="p-8 flex-1">
+          <Suspense fallback={
+            <div className="flex items-center justify-center p-12 text-zinc-500 font-medium">
+              Loading Page Content...
+            </div>
+          }>
+            {children}
+          </Suspense>
+        </main>
+      </div>
     </div>
   );
 }
