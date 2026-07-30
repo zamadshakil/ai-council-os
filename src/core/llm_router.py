@@ -40,10 +40,10 @@ MODEL_TIERS: dict[str, ModelTier] = {
     ),
     "fast": ModelTier(
         name="fast",
-        model_id="google/gemini-2.5-flash",
-        input_cost_per_m=0.10,
-        output_cost_per_m=0.40,
-        description="Gemini 2.5 Flash: Sub-second speed & 1M context",
+        model_id="openrouter/free",
+        input_cost_per_m=0.00,
+        output_cost_per_m=0.00,
+        description="OpenRouter Free Auto-Routing: Best available free model (Temporary fix for 403 Credit Limit)",
     ),
     "smart": ModelTier(
         name="smart",
