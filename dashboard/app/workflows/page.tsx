@@ -7,6 +7,7 @@ import {
   Clock, TrendingUp, AlertTriangle, Activity, Pause, RefreshCw,
   ExternalLink, ChevronDown, ChevronUp, Terminal, Layers, Sparkles
 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import { triggerWorkflow, fetchKillSwitch, fetchStats } from '../lib/api';
 import { KillSwitchStatus, Stats } from '../lib/types';
 
@@ -121,6 +122,7 @@ interface RunResult {
 }
 
 export default function WorkflowsPage() {
+  const router = useRouter();
   const [killSwitch, setKillSwitch] = useState<KillSwitchStatus | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
   const [runningWorkflows, setRunningWorkflows] = useState<Set<string>>(new Set());
@@ -346,16 +348,14 @@ export default function WorkflowsPage() {
 
                   {/* Actions */}
                   <div className="flex items-center gap-2 shrink-0">
-                    {/* View Logs Drawer Button */}
-                    {result && (
-                      <button
-                        onClick={() => setActiveLogModal(activeLogModal === wf.id ? null : wf.id)}
-                        className="flex items-center gap-1.5 h-10 px-3.5 rounded-[10px] text-[13px] font-semibold text-zinc-700 bg-zinc-100 hover:bg-zinc-200 transition-all"
-                      >
-                        <Terminal className="w-4 h-4 text-zinc-500" />
-                        <span>Logs</span>
-                      </button>
-                    )}
+                    {/* View Details Page Button */}
+                    <button
+                      onClick={() => router.push(`/workflows/${wf.id}`)}
+                      className="flex items-center gap-1.5 h-10 px-4 rounded-[10px] text-[13px] font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 transition-all shadow-sm"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>View Activity & Details</span>
+                    </button>
 
                     {/* Run Now Button */}
                     <button

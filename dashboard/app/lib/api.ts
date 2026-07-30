@@ -111,11 +111,15 @@ export async function deactivateKillSwitch(): Promise<any> {
   return apiFetch(`${API_BASE}/api/kill-switch/deactivate`, { method: 'POST' });
 }
 
-// ── Workflow Triggers ───────────────
+// ── Workflow Triggers & Details ─────
 export async function triggerWorkflow(workflow: string, body?: any): Promise<WorkflowResult> {
   return apiFetch(`${API_BASE}/api/workflows/${workflow}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
+}
+
+export async function fetchWorkflowDetails(workflowId: string): Promise<any> {
+  return apiFetch(`${API_BASE}/api/workflows/${workflowId}/details`);
 }

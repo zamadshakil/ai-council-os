@@ -561,6 +561,23 @@ async def receive_instagram_webhook(request: Request):
         return {"status": "error", "error": str(e)}
 
 
+@app.get("/api/workflows/{workflow_id}/details")
+async def get_workflow_details_endpoint(workflow_id: str):
+    """Get live connected account details and execution history for a workflow."""
+    if workflow_id == "instagram-comments":
+        from src.integrations.instagram_commenter import get_instagram_workflow_details
+        return get_instagram_workflow_details()
+    
+    # Generic default for other workflows
+    return {
+        "id": workflow_id,
+        "name": workflow_id.replace("-", " ").title(),
+        "status": "active",
+        "total_replied": 0,
+        "activity_history": [],
+    }
+
+
 @app.post("/api/workflows/instagram-comments")
 async def trigger_instagram_commenter():
     """Manually trigger Instagram Comment Auto-Reply workflow (Client Priority #1)."""
