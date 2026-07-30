@@ -12,6 +12,8 @@ export const metadata: Metadata = {
   description: 'AI Council OS Management Dashboard',
 };
 
+import { Suspense } from 'react';
+
 export default function RootLayout({
   children,
 }: {
@@ -22,9 +24,11 @@ export default function RootLayout({
       <body className={`${inter.className} bg-app text-foreground antialiased selection:bg-[#111827] selection:text-white`}>
         <AuthProvider>
           <SidebarProvider>
-            <ClientLayoutWrapper>
-              {children}
-            </ClientLayoutWrapper>
+            <Suspense fallback={<div className="min-h-screen bg-[#090D16]" />}>
+              <ClientLayoutWrapper>
+                {children}
+              </ClientLayoutWrapper>
+            </Suspense>
           </SidebarProvider>
         </AuthProvider>
       </body>
