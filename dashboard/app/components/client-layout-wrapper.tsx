@@ -53,7 +53,7 @@ export function ClientLayoutWrapper({ children }: { children: React.ReactNode })
         }`}
       >
         <TopNav />
-        <main className="p-8 flex-1">
+        <main className="pt-28 px-8 pb-8 flex-1">
           <Suspense fallback={
             <div className="flex items-center justify-center p-12 text-zinc-500 font-medium">
               Loading Page Content...

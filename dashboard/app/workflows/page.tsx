@@ -5,7 +5,7 @@ import {
   Zap, Play, Video, MessageCircle, FileText, 
   Share2, Loader2, CheckCircle2, XCircle, Shield, ShieldOff,
   Clock, TrendingUp, AlertTriangle, Activity, Pause, RefreshCw,
-  ExternalLink, ChevronDown, ChevronUp, Terminal, Layers, Sparkles
+  ExternalLink, ChevronDown, ChevronUp, Terminal, Layers, Sparkles, Settings
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { triggerWorkflow, fetchKillSwitch, fetchStats } from '../lib/api';
@@ -79,7 +79,7 @@ const WORKFLOWS: WorkflowDef[] = [
     description: 'Rewrites video descriptions: preserves video-specific opening, replaces only boilerplate blocks. Two-phase: generate → review → publish.',
     icon: FileText,
     endpoint: 'youtube-descriptions',
-    schedule: 'Manual only',
+    schedule: 'Coming Soon',
     color: 'text-blue-600',
     bgColor: 'bg-blue-50',
     borderColor: 'border-blue-200',
@@ -93,7 +93,7 @@ const WORKFLOWS: WorkflowDef[] = [
     description: 'Takes one video transcript and produces 6 unique, platform-optimized posts for X, LinkedIn, Facebook, Instagram, Reddit, and Discord.',
     icon: Share2,
     endpoint: 'content-engine',
-    schedule: 'Manual only',
+    schedule: 'Coming Soon',
     color: 'text-violet-600',
     bgColor: 'bg-violet-50',
     borderColor: 'border-violet-200',
@@ -123,19 +123,62 @@ interface RunResult {
 
 export default function WorkflowsPage() {
   const router = useRouter();
+  
+  const [settingsWorkflow, setSettingsWorkflow] = useState<string | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [availableDocs, setAvailableDocs] = useState<any[]>([]);
+  const [customPrompt, setCustomPrompt] = useState('');
+  const [selectedDocs, setSelectedDocs] = useState<string[]>([]);
+  const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+
+  const loadSettings = async (wfId: string) => {
+    setSettingsWorkflow(wfId);
+    setSettingsLoading(true);
+    try {
+      const [settingsRes, docsRes] = await Promise.all([
+        fetch(`${API_BASE}/api/workflows/${wfId}/settings`).then(r => r.json()),
+        fetch(`${API_BASE}/api/knowledge/documents`).then(r => r.json())
+      ]);
+      setCustomPrompt(settingsRes.custom_prompt || '');
+      setSelectedDocs(settingsRes.selected_docs || []);
+      setAvailableDocs(docsRes.documents || []);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
+
+  const saveSettings = async () => {
+    if (!settingsWorkflow) return;
+    setSettingsLoading(true);
+    try {
+      await fetch(`${API_BASE}/api/workflows/${settingsWorkflow}/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ custom_prompt: customPrompt, selected_docs: selectedDocs })
+      });
+      setSettingsWorkflow(null);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
+
+  const [activeLogModal, setActiveLogModal] = useState<string | null>(null);
   const [killSwitch, setKillSwitch] = useState<KillSwitchStatus | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
   const [runningWorkflows, setRunningWorkflows] = useState<Set<string>>(new Set());
   const [results, setResults] = useState<Record<string, RunResult>>({});
   const [activeWorkflowStatuses, setActiveWorkflowStatuses] = useState<Record<string, 'active' | 'paused'>>({
     'instagram-comments': 'active',
-    'reddit': 'active',
-    'youtube-comments': 'active',
+    'reddit': 'paused',
+    'youtube-comments': 'paused',
     'youtube-descriptions': 'paused',
     'content-engine': 'paused',
   });
   const [expandedWorkflow, setExpandedWorkflow] = useState<string | null>(null);
-  const [activeLogModal, setActiveLogModal] = useState<string | null>(null);
   const [inputData, setInputData] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -237,12 +280,12 @@ export default function WorkflowsPage() {
   };
 
   return (
-    <div className="max-w-[1080px] mx-auto flex flex-col gap-8 animate-in fade-in duration-300 ease-out fill-mode-both pb-16">
+    <div className="space-y-12 pb-20 animate-in fade-in duration-300 ease-out fill-mode-both">
       {/* Header */}
-      <div className="flex items-center justify-between pt-2">
+      <div className="flex items-start justify-between mb-8">
         <div>
-          <h1 className="text-[28px] font-bold text-zinc-900 tracking-tight">Automation Workflows</h1>
-          <p className="text-[15px] text-zinc-500 mt-1">Trigger, monitor live activity logs, and manage account integrations.</p>
+          <h1 className="text-[40px] font-bold text-[#111827] tracking-tight leading-none mb-3">Automation Workflows</h1>
+          <p className="text-[15px] text-zinc-500 font-medium">Trigger, monitor live activity logs, and manage account integrations.</p>
         </div>
         {killSwitch && (
           <div className={`flex items-center gap-2 px-4 py-2 rounded-[10px] border text-[13px] font-semibold ${
@@ -348,6 +391,15 @@ export default function WorkflowsPage() {
 
                   {/* Actions */}
                   <div className="flex items-center gap-2 shrink-0">
+                    {/* Settings Configuration Button */}
+                    <button
+                      onClick={() => loadSettings(wf.id)}
+                      className="flex items-center justify-center w-10 h-10 rounded-[10px] text-zinc-500 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 transition-all shadow-sm"
+                      title="Configure AI Settings"
+                    >
+                      <Settings className="w-4 h-4" />
+                    </button>
+
                     {/* View Details Page Button */}
                     <button
                       onClick={() => router.push(`/workflows/${wf.id}`)}
@@ -360,15 +412,19 @@ export default function WorkflowsPage() {
                     {/* Run Now Button */}
                     <button
                       onClick={() => wf.requiresInput ? setExpandedWorkflow(isExpanded ? null : wf.id) : handleRun(wf)}
-                      disabled={isRunning || killSwitch?.is_active}
+                      disabled={isRunning || killSwitch?.is_active || wf.schedule === 'Coming Soon'}
                       className={`flex items-center gap-2 h-10 px-6 rounded-[10px] text-[14px] font-semibold transition-all duration-200 active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed ${
                         isRunning
                           ? 'bg-blue-100 text-blue-700 border border-blue-200'
-                          : 'bg-zinc-900 text-white hover:bg-zinc-800 shadow-sm'
+                          : wf.schedule === 'Coming Soon'
+                            ? 'bg-zinc-200 text-zinc-500 shadow-none'
+                            : 'bg-zinc-900 text-white hover:bg-zinc-800 shadow-sm'
                       }`}
                     >
                       {isRunning ? (
                         <><Loader2 className="w-4 h-4 animate-spin" /> Executing...</>
+                      ) : wf.schedule === 'Coming Soon' ? (
+                        <><Clock className="w-4 h-4" /> In Development</>
                       ) : (
                         <><Play className="w-4 h-4 fill-current" /> {wf.requiresInput ? 'Configure' : 'Run Now'}</>
                       )}
@@ -482,6 +538,86 @@ export default function WorkflowsPage() {
           );
         })}
       </div>
+      {/* Settings Modal */}
+      {settingsWorkflow && (
+        <div className="fixed inset-0 bg-zinc-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="p-6 border-b border-zinc-100 flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-bold text-zinc-900 flex items-center gap-2">
+                  <Settings className="w-5 h-5 text-indigo-500" />
+                  Agentic Configuration
+                </h2>
+                <p className="text-sm text-zinc-500 mt-1">Assign specific knowledge and behavior to this workflow.</p>
+              </div>
+              <button onClick={() => setSettingsWorkflow(null)} className="p-2 hover:bg-zinc-100 rounded-lg text-zinc-400 hover:text-zinc-600">
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1 flex flex-col gap-6">
+              {settingsLoading ? (
+                <div className="py-12 flex justify-center"><Loader2 className="w-8 h-8 text-indigo-500 animate-spin" /></div>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-sm font-semibold text-zinc-900 mb-2">Custom Brand Prompt / Instructions</label>
+                    <textarea 
+                      value={customPrompt}
+                      onChange={(e) => setCustomPrompt(e.target.value)}
+                      placeholder="E.g. Always use emojis. Never mention competitors. Speak in a Gen-Z tone."
+                      className="w-full p-4 border border-zinc-200 rounded-xl min-h-[120px] text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none resize-none"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-semibold text-zinc-900 mb-2">Allowed Knowledge Documents (RAG)</label>
+                    <div className="flex flex-col gap-2 border border-zinc-200 rounded-xl p-2 max-h-[200px] overflow-y-auto">
+                      {availableDocs.length === 0 ? (
+                        <p className="text-sm text-zinc-500 text-center py-4">No documents in Knowledge Hub.</p>
+                      ) : (
+                        availableDocs.map(doc => (
+                          <label key={doc.doc_hash} className="flex items-center gap-3 p-3 hover:bg-zinc-50 rounded-lg cursor-pointer border border-transparent hover:border-zinc-200 transition-all">
+                            <input 
+                              type="checkbox" 
+                              checked={selectedDocs.includes(doc.doc_hash)}
+                              onChange={(e) => {
+                                if (e.target.checked) setSelectedDocs(prev => [...prev, doc.doc_hash]);
+                                else setSelectedDocs(prev => prev.filter(h => h !== doc.doc_hash));
+                              }}
+                              className="w-4 h-4 text-indigo-600 rounded focus:ring-indigo-500"
+                            />
+                            <div className="flex flex-col">
+                              <span className="text-sm font-medium text-zinc-900">{doc.filename}</span>
+                              <span className="text-xs text-zinc-500">{doc.chunk_count} chunks</span>
+                            </div>
+                          </label>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+            
+            <div className="p-6 border-t border-zinc-100 bg-zinc-50 flex justify-end gap-3">
+              <button 
+                onClick={() => setSettingsWorkflow(null)}
+                className="px-5 py-2.5 rounded-xl text-sm font-semibold text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={saveSettings}
+                disabled={settingsLoading}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {settingsLoading && <Loader2 className="w-4 h-4 animate-spin" />} Save Configuration
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

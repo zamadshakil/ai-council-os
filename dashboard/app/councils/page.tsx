@@ -6,10 +6,10 @@ import { runCouncil } from '../lib/api';
 import { Target, Users, BookOpen, Lightbulb, Paperclip, Send, Sparkles } from 'lucide-react';
 
 const COUNCILS = [
-  { id: 'sales', name: 'Sales Council', icon: Target, desc: 'Outbound emails & pitch decks.', agents: 3, cost: '~$0.12', time: '45s', recommended: true },
-  { id: 'content', name: 'Content Council', icon: BookOpen, desc: 'SEO blogs & social media.', agents: 4, cost: '~$0.18', time: '1m 20s' },
-  { id: 'grant', name: 'Grant Council', icon: Lightbulb, desc: 'Proposals & applications.', agents: 5, cost: '~$0.30', time: '2m 15s' },
-  { id: 'strategy', name: 'Strategy Council', icon: Users, desc: 'Market analysis & planning.', agents: 6, cost: '~$0.45', time: '3m 30s' },
+  { id: 'sales', name: 'Sales Council', icon: Target, desc: 'Outbound emails & pitch decks.', agents: 3, time: '45s', recommended: true },
+  { id: 'content', name: 'Content Council', icon: BookOpen, desc: 'SEO blogs & social media.', agents: 4, time: '1m 20s' },
+  { id: 'grant', name: 'Grant Council', icon: Lightbulb, desc: 'Proposals & applications.', agents: 5, time: '2m 15s' },
+  { id: 'strategy', name: 'Strategy Council', icon: Users, desc: 'Market analysis & planning.', agents: 6, time: '3m 30s' },
 ];
 
 const SUGGESTIONS = [
@@ -84,7 +84,6 @@ export default function CouncilsPage() {
                     <p className="text-[14px] text-zinc-600 mb-2">{c.desc}</p>
                     <div className="flex items-center gap-4 text-[13px] font-semibold text-zinc-500">
                       <span className="flex items-center"><Users className="w-4 h-4 mr-1.5 text-zinc-400"/> {c.agents} Agents</span>
-                      <span className="flex items-center"><Target className="w-4 h-4 mr-1.5 text-zinc-400"/> {c.cost}</span>
                     </div>
                   </div>
                 </div>
@@ -114,13 +113,6 @@ export default function CouncilsPage() {
             
             <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between">
               <div className="flex gap-2">
-                <button 
-                  type="button" 
-                  className="p-3 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 active:scale-[0.98] rounded-[10px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-zinc-800"
-                  aria-label="Attach file"
-                >
-                  <Paperclip className="w-5 h-5" />
-                </button>
               </div>
               <button
                 type="submit"

@@ -24,7 +24,7 @@ from typing import Optional
 DATA_DIR = Path("./data")
 LANCE_DIR = DATA_DIR / "lancedb"
 META_DB_PATH = DATA_DIR / "rag_metadata.db"
-EMBEDDING_DIM = 1536  # text-embedding-3-small dimensions
+EMBEDDING_DIM = 384  # sentence-transformers/all-MiniLM-L6-v2 dimensions
 
 # ── Lazy-loaded singletons ─────────────────────────────────────────────────
 _lance_db = None
@@ -98,42 +98,23 @@ def get_meta_conn() -> sqlite3.Connection:
 
 # ── Embedding ──────────────────────────────────────────────────────────────
 
+_embedding_model = None
+
 async def get_embedding(text: str) -> list[float]:
     """
-    Fetch a 1536-dim embedding via OpenRouter (text-embedding-3-small).
-    Falls back to OpenAI directly if OPENAI_API_KEY is set.
+    Fetch a 384-dim embedding locally using sentence-transformers.
+    Free, local, and bypasses OpenRouter API limits.
     """
-    from openai import AsyncOpenAI
-
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    
     text = text[:8000]  # safety truncate
-
-    # Try OpenRouter first
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
-    if openrouter_key:
-        try:
-            client = AsyncOpenAI(
-                api_key=openrouter_key,
-                base_url="https://openrouter.ai/api/v1",
-            )
-            resp = await client.embeddings.create(
-                model="openai/text-embedding-3-small",
-                input=text,
-            )
-            return resp.data[0].embedding
-        except Exception as e:
-            print(f"[RAG] OpenRouter embedding failed, trying OpenAI: {e}")
-
-    # Fallback: direct OpenAI
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        client = AsyncOpenAI(api_key=openai_key)
-        resp = await client.embeddings.create(
-            model="text-embedding-3-small",
-            input=text,
-        )
-        return resp.data[0].embedding
-
-    raise RuntimeError("No embedding provider available. Set OPENROUTER_API_KEY or OPENAI_API_KEY.")
+    import asyncio
+    loop = asyncio.get_event_loop()
+    embedding = await loop.run_in_executor(None, _embedding_model.encode, text)
+    return embedding.tolist()
 
 
 # ── Document Parsing ───────────────────────────────────────────────────────
@@ -278,7 +259,7 @@ def _rrf_merge(n: int, bm25_scores: list[float], k: int = 60) -> list[int]:
     return sorted(range(n), key=lambda i: rrf[i], reverse=True)
 
 
-async def search_knowledge_base(query: str, top_k: int = 5) -> list[dict]:
+async def search_knowledge_base(query: str, top_k: int = 5, doc_hashes: Optional[list[str]] = None) -> list[dict]:
     """
     Hybrid vector + keyword search with FlashRank reranking.
 
@@ -296,7 +277,12 @@ async def search_knowledge_base(query: str, top_k: int = 5) -> list[dict]:
 
     # 1. Dense vector retrieval (top 20 candidates)
     q_vec = await get_embedding(query)
-    raw_results = table.search(q_vec).limit(20).to_list()
+    query_obj = table.search(q_vec)
+    if doc_hashes:
+        hashes_str = ", ".join([f"'{h}'" for h in doc_hashes])
+        query_obj = query_obj.where(f"doc_hash IN ({hashes_str})")
+    
+    raw_results = query_obj.limit(20).to_list()
     if not raw_results:
         return []
 

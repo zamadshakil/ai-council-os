@@ -160,17 +160,36 @@ async def generate_reply_for_comment(
     Use the Support Council AI debate loop to generate a contextual reply.
     Falls back to ultra-fast direct LLM completion if Council times out or encounters errors.
     """
+    from src.core.database import get_workflow_settings
+    settings = await get_workflow_settings("instagram-comments")
+    custom_prompt = settings.get("custom_prompt", "")
+    selected_docs = settings.get("selected_docs", [])
+
+    rag_context = ""
+    if selected_docs:
+        try:
+            from src.core.rag_engine import search_knowledge_base
+            results = await search_knowledge_base(comment_text, top_k=3, doc_hashes=selected_docs)
+            if results:
+                rag_context = "\n\nKNOWLEDGE BASE CONTEXT:\n" + "\n---\n".join([r['text'] for r in results])
+        except Exception as e:
+            print(f"[Instagram AI] RAG search failed: {e}")
+
     task_description = (
         f"Generate a friendly, engaging Instagram reply to this comment.\n\n"
         f"Post caption: {caption[:300] if caption else '(no caption)'}\n"
         f"Comment from @{username}: {comment_text}\n\n"
         f"Requirements:\n"
         f"- Keep it conversational and authentic (1-3 sentences max)\n"
-        f"- Match the brand voice\n"
-        f"- Do NOT use generic responses like 'Thanks!'\n"
         f"- Address the comment specifically\n"
-        f"- End with a CTA or question when appropriate"
+        f"- End with a CTA or question when appropriate\n"
     )
+    
+    if custom_prompt:
+        task_description += f"\nCUSTOM BRAND GUIDELINES:\n{custom_prompt}\n"
+        
+    if rag_context:
+        task_description += rag_context
 
     try:
         from src.councils.support.council import SupportCouncil
@@ -201,6 +220,11 @@ async def generate_reply_for_comment(
             "ZamDev provides custom AI agents, business workflow automation, web development, and digital systems. "
             "Write helpful, professional, friendly 1-2 sentence replies to Instagram comments."
         )
+        if custom_prompt:
+            system_prompt += f"\n\nCUSTOM BRAND GUIDELINES:\n{custom_prompt}"
+        if rag_context:
+            system_prompt += f"\n\n{rag_context}"
+
         user_prompt = f"Comment from @{username}: '{comment_text}'\nPost Caption: '{caption[:200]}'\nReply:"
         res = await call_llm(
             messages=[

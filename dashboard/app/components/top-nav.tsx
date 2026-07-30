@@ -23,7 +23,6 @@ export function TopNav() {
   // Modals state
   const [isOpenGridModal, setIsOpenGridModal] = useState(false);
   const [isOpenNotifications, setIsOpenNotifications] = useState(false);
-  const [unreadCount, setUnreadCount] = useState(3);
 
   const cmdInputRef = useRef<HTMLInputElement>(null);
 
@@ -62,6 +61,8 @@ export function TopNav() {
     t.council.toLowerCase().includes(searchQuery.toLowerCase()) ||
     t.task_id.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  const pendingTasks = tasks.filter(t => t.status === 'awaiting_approval' || t.status === 'pending');
 
   const navigationPages = [
     { title: 'Overview Dashboard', path: '/', icon: LayoutGrid },
@@ -128,7 +129,7 @@ export function TopNav() {
               aria-label="View Notifications"
             >
               <Bell className="w-5 h-5 text-zinc-700" />
-              {unreadCount > 0 && (
+              {pendingTasks.length > 0 && (
                 <span className="absolute top-2 right-2 w-2.5 h-2.5 bg-blue-600 rounded-full border-2 border-white animate-pulse" />
               )}
             </button>
@@ -141,15 +142,9 @@ export function TopNav() {
                     <Bell className="w-4 h-4 text-blue-600" />
                     <h3 className="text-sm font-semibold text-zinc-900">Notifications</h3>
                     <span className="px-2 py-0.5 text-[11px] font-bold bg-blue-50 text-blue-700 rounded-full">
-                      {unreadCount} new
+                      {pendingTasks.length} new
                     </span>
                   </div>
-                  <button 
-                    onClick={() => setUnreadCount(0)}
-                    className="text-xs text-zinc-500 hover:text-zinc-900 font-medium transition-colors"
-                  >
-                    Mark read
-                  </button>
                 </div>
 
                 <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
@@ -163,27 +158,24 @@ export function TopNav() {
                     </div>
                   )}
 
-                  <div 
-                    onClick={() => { router.push('/approvals'); setIsOpenNotifications(false); }}
-                    className="p-3 bg-zinc-50 hover:bg-blue-50/50 border border-zinc-200/60 rounded-[12px] cursor-pointer transition-colors"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-zinc-900">Sales Council Approval Required</span>
-                      <span className="text-[10px] text-zinc-600">2m ago</span>
+                  {pendingTasks.map((t, idx) => (
+                    <div 
+                      key={t.task_id || idx}
+                      onClick={() => { router.push('/approvals'); setIsOpenNotifications(false); }}
+                      className="p-3 bg-zinc-50 hover:bg-blue-50/50 border border-zinc-200/60 rounded-[12px] cursor-pointer transition-colors"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-zinc-900 capitalize">{t.council} Council Task</span>
+                        <span className="text-[10px] text-zinc-600 capitalize">{t.status.replace('_', ' ')}</span>
+                      </div>
+                      <p className="text-[11px] text-zinc-600 mt-1 line-clamp-1">{t.task_description}</p>
                     </div>
-                    <p className="text-[11px] text-zinc-600 mt-1 line-clamp-1">Outbound cold email sequence generated for enterprise prospect.</p>
-                  </div>
-
-                  <div 
-                    onClick={() => { router.push('/approvals'); setIsOpenNotifications(false); }}
-                    className="p-3 bg-zinc-50 hover:bg-blue-50/50 border border-zinc-200/60 rounded-[12px] cursor-pointer transition-colors"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-zinc-900">Content Engine Published</span>
-                      <span className="text-[10px] text-zinc-600">1h ago</span>
+                  ))}
+                  {pendingTasks.length === 0 && !killActive && (
+                    <div className="p-4 text-center text-zinc-500 text-sm">
+                      No new notifications.
                     </div>
-                    <p className="text-[11px] text-zinc-600 mt-1 line-clamp-1">YouTube description update approved and formatted.</p>
-                  </div>
+                  )}
                 </div>
 
                 <div className="pt-3 border-t border-zinc-100 mt-3 text-center">

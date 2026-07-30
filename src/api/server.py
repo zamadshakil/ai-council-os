@@ -577,6 +577,24 @@ async def get_workflow_details_endpoint(workflow_id: str):
         "activity_history": [],
     }
 
+class WorkflowSettingsRequest(BaseModel):
+    custom_prompt: str
+    selected_docs: list[str]
+
+@app.get("/api/workflows/{workflow_id}/settings")
+async def get_workflow_settings_endpoint(workflow_id: str):
+    """Get custom prompt and selected docs for a workflow."""
+    from src.core.database import get_workflow_settings
+    return await get_workflow_settings(workflow_id)
+
+@app.post("/api/workflows/{workflow_id}/settings")
+async def update_workflow_settings_endpoint(workflow_id: str, settings: WorkflowSettingsRequest):
+    """Update custom prompt and selected docs for a workflow."""
+    from src.core.database import set_workflow_settings
+    await set_workflow_settings(workflow_id, settings.custom_prompt, settings.selected_docs)
+    return {"status": "success", "message": "Workflow settings saved."}
+
+
 
 @app.post("/api/workflows/instagram-comments")
 async def trigger_instagram_commenter():

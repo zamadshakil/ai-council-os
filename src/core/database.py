@@ -121,6 +121,14 @@ class KillSwitchModel(Base):
     )
     reason: Mapped[str] = mapped_column(Text, default="")
 
+class WorkflowSettingsModel(Base):
+    __tablename__ = "workflow_settings"
+
+    workflow_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    custom_prompt: Mapped[str] = mapped_column(Text, default="")
+    selected_docs: Mapped[str] = mapped_column(JSON, default="[]")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
 
 # ── Database Initialization ──────────────────────────────────────────────
 
@@ -420,19 +428,52 @@ async def get_kill_switch_db() -> dict:
         return {"is_active": False, "toggled_by": "system", "toggled_at": "", "reason": ""}
 
 
-async def set_kill_switch_db(is_active: bool, toggled_by: str = "dashboard", reason: str = ""):
-    """Set kill switch state in DB."""
-    from sqlalchemy import select
+async def set_kill_switch_db(is_active: bool, toggled_by: str = "system", reason: str = ""):
     async with async_session() as session:
-        result = await session.execute(select(KillSwitchModel).where(KillSwitchModel.id == 1))
-        ks = result.scalar_one_or_none()
-        if ks:
+        from sqlalchemy import select
+        res = await session.execute(select(KillSwitchModel).where(KillSwitchModel.id == 1))
+        ks = res.scalar_one_or_none()
+        if not ks:
+            ks = KillSwitchModel(id=1, is_active=is_active, toggled_by=toggled_by, reason=reason)
+            session.add(ks)
+        else:
             ks.is_active = is_active
             ks.toggled_by = toggled_by
             ks.toggled_at = datetime.now(timezone.utc)
             ks.reason = reason
+        await session.commit()
+
+# ── Workflow Settings ────────────────────────────────────────────────────
+
+async def get_workflow_settings(workflow_id: str) -> dict:
+    """Get settings for a specific workflow."""
+    async with async_session() as session:
+        from sqlalchemy import select
+        res = await session.execute(select(WorkflowSettingsModel).where(WorkflowSettingsModel.workflow_id == workflow_id))
+        settings = res.scalar_one_or_none()
+        if settings:
+            return {
+                "workflow_id": settings.workflow_id,
+                "custom_prompt": settings.custom_prompt,
+                "selected_docs": json.loads(settings.selected_docs) if settings.selected_docs else []
+            }
+        return {"workflow_id": workflow_id, "custom_prompt": "", "selected_docs": []}
+
+async def set_workflow_settings(workflow_id: str, custom_prompt: str, selected_docs: list[str]):
+    """Set settings for a specific workflow."""
+    async with async_session() as session:
+        from sqlalchemy import select
+        res = await session.execute(select(WorkflowSettingsModel).where(WorkflowSettingsModel.workflow_id == workflow_id))
+        settings = res.scalar_one_or_none()
+        if not settings:
+            settings = WorkflowSettingsModel(
+                workflow_id=workflow_id,
+                custom_prompt=custom_prompt,
+                selected_docs=json.dumps(selected_docs)
+            )
+            session.add(settings)
         else:
-            session.add(KillSwitchModel(
-                id=1, is_active=is_active, toggled_by=toggled_by, reason=reason
-            ))
+            settings.custom_prompt = custom_prompt
+            settings.selected_docs = json.dumps(selected_docs)
+            settings.updated_at = datetime.now(timezone.utc)
         await session.commit()
