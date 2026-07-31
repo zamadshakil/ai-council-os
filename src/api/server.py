@@ -702,10 +702,12 @@ async def get_integrations_status():
     """Report real connection status for CRM/publishing integrations (no dummy data)."""
     from src.integrations.hubspot import get_hubspot_status
     from src.integrations.publisher import get_platform_status
+    from src.core.llm_router import get_model_router_status
 
     return {
         "hubspot": get_hubspot_status(),
         "publishing": await get_platform_status(),
+        "model_router": get_model_router_status(),
     }
 
 

@@ -22,7 +22,7 @@ export default function OverviewPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [killSwitch, setKillSwitch] = useState<KillSwitchStatus | null>(null);
-  const [integrations, setIntegrations] = useState<{ hubspot: { configured: boolean }; publishing: Record<string, boolean> } | null>(null);
+  const [integrations, setIntegrations] = useState<{ hubspot: { configured: boolean }; publishing: Record<string, boolean>; model_router?: { degraded: boolean; reason: string } } | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -131,6 +131,17 @@ export default function OverviewPage() {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Model router degradation banner — tells the truth when running on the free fallback */}
+      {integrations?.model_router?.degraded && (
+        <div className="flex items-center gap-3 p-4 bg-amber-50 border border-amber-200 rounded-[16px]">
+          <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+          <div>
+            <p className="text-[14px] font-semibold text-amber-800">Running on free fallback model</p>
+            <p className="text-[13px] text-amber-600 mt-0.5">{integrations.model_router.reason}. Responses may be slower or lower quality until the OpenRouter key limit is raised.</p>
           </div>
         </div>
       )}

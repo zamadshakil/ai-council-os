@@ -131,6 +131,7 @@ export async function fetchWorkflowConfigStatus(): Promise<Record<string, { read
 export async function fetchIntegrationsStatus(): Promise<{
   hubspot: { configured: boolean; provider: string; note: string };
   publishing: Record<string, boolean>;
+  model_router: { degraded: boolean; reason: string; retry_paid_models_in_seconds: number };
 }> {
   return apiFetch(`${API_BASE}/api/integrations/status`);
 }

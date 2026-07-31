@@ -144,6 +144,15 @@ def get_model_for_role(role: str, priority: str = "medium") -> ModelTier:
     return get_model_for_priority(priority)
 
 
+# Circuit breaker: once we see the account's per-key spending limit exceeded,
+# stop wasting time (and cascading debate-loop latency) retrying paid models
+# that will just 403 again. Skip straight to the free fallback until the
+# cooldown expires, so the client's key-limit issue doesn't also make every
+# task feel broken/slow on top of costing them nothing extra to fix.
+_key_limit_exhausted_until: float = 0.0
+_KEY_LIMIT_COOLDOWN_SECONDS = 600  # retry paid tiers again every 10 minutes
+
+
 async def call_llm(
     messages: list[dict],
     tier: str = "fast",
@@ -158,6 +167,9 @@ async def call_llm(
     never escalate to a more expensive tier. Generic automatic routing is forbidden.
     """
     import asyncio
+    import time
+    global _key_limit_exhausted_until
+
     model_tier = MODEL_TIERS.get(tier, MODEL_TIERS["fast"])
     primary_model = model_override or model_tier.model_id
 
@@ -170,6 +182,10 @@ async def call_llm(
         primary_model,
         *TIER_FALLBACKS[model_tier.name],
     ]))
+
+    if time.monotonic() < _key_limit_exhausted_until:
+        # Known-exhausted right now: go straight to the guaranteed-free model.
+        candidate_models = [EMERGENCY_FREE_MODEL]
 
     client = get_client()
     last_error = None
@@ -187,6 +203,11 @@ async def call_llm(
                 content = response.choices[0].message.content or ""
                 if not content.strip():
                     raise ValueError(f"Model {model_id} returned an empty response.")
+
+                if model_id != EMERGENCY_FREE_MODEL:
+                    # A paid model just worked, so the key limit (if it was
+                    # tripped before) is no longer blocking us. Clear the breaker.
+                    _key_limit_exhausted_until = 0.0
 
                 usage = response.usage
                 input_tokens = usage.prompt_tokens if usage else 0
@@ -208,8 +229,12 @@ async def call_llm(
                 last_error = e
                 print(f"[OpenRouter Retry {attempt + 1}/2 for {model_id}] {e}")
                 # A key spending-limit 403 will not recover on retry; move straight
-                # to the next approved fallback (ultimately the free emergency model).
+                # to the next approved fallback (ultimately the free emergency model),
+                # and trip the breaker so subsequent calls skip the paid tiers
+                # entirely for a while instead of re-discovering the same 403s.
                 if getattr(e, "status_code", None) == 403:
+                    if "key limit" in str(e).lower() or "limit exceeded" in str(e).lower():
+                        _key_limit_exhausted_until = time.monotonic() + _KEY_LIMIT_COOLDOWN_SECONDS
                     break
                 await asyncio.sleep(1)
 
@@ -230,3 +255,21 @@ def list_available_models() -> list[dict]:
         }
         for t in MODEL_TIERS.values()
     ]
+
+
+def get_model_router_status() -> dict:
+    """
+    Report whether we're currently forced onto the free emergency model due
+    to the OpenRouter key's spending limit, so the dashboard/Telegram can
+    tell the client honestly why responses might be slower/lower-quality
+    right now instead of silently degrading.
+    """
+    import time
+    remaining = _key_limit_exhausted_until - time.monotonic()
+    degraded = remaining > 0
+    return {
+        "degraded": degraded,
+        "reason": "OpenRouter key spending limit exceeded — running on free fallback model only"
+        if degraded else "Normal (cost-efficient paid models)",
+        "retry_paid_models_in_seconds": max(0, int(remaining)) if degraded else 0,
+    }
