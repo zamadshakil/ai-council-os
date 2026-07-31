@@ -121,6 +121,7 @@ Every output goes through **minimum 2 debate rounds** before reaching human revi
 - Current price/performance models selected from OpenRouter's live catalog
 - DeepSeek and unapproved model overrides are rejected at runtime
 - Cheap/fast requests never escalate to the premium Pro reasoning tier
+- An explicit non-DeepSeek Nemotron free fallback keeps demos available during provider/key-limit failures
 - Explicit output caps and actual-model cost accounting prevent billing surprises
 
 ### 🛡️ Safety & Control
@@ -403,7 +404,7 @@ AI Council OS uses an intelligent cost-optimized routing system:
 | `smart` | google/gemini-3-flash-preview | $0.50 / $3.00 per 1M tokens | Critic evaluation and high-priority work |
 | `reasoning` | google/gemini-3.1-pro-preview | $2.00 / $12.00 per 1M tokens | Critical escalation only |
 
-Model prices are configured from OpenRouter's live catalog and may change. The dashboard records actual input/output token usage for the model that handled each call; configure an OpenRouter key spending limit as a final billing guardrail.
+Model prices are configured from OpenRouter's live catalog and may change. The dashboard records actual input/output token usage for the model that handled each call. Configure a deliberate OpenRouter key spending limit as a final billing guardrail, but keep it above the expected monthly usage—if the key limit is exhausted, the system falls back to the explicit non-DeepSeek emergency model at reduced consistency.
 
 ---
 

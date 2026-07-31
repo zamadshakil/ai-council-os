@@ -62,25 +62,32 @@ MODEL_TIERS: dict[str, ModelTier] = {
     ),
 }
 
+EMERGENCY_FREE_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+
 MODEL_PRICING = {
-    tier.model_id: (tier.input_cost_per_m, tier.output_cost_per_m)
-    for tier in MODEL_TIERS.values()
+    **{
+        tier.model_id: (tier.input_cost_per_m, tier.output_cost_per_m)
+        for tier in MODEL_TIERS.values()
+    },
+    EMERGENCY_FREE_MODEL: (0.0, 0.0),
 }
 
 # Fallbacks only move laterally or downward in cost/quality; a cheap or fast
 # request can never silently escalate to the Pro reasoning tier.
 TIER_FALLBACKS = {
-    "cheap": ["qwen/qwen3.7-flash", "openai/gpt-5.6-luna"],
-    "fast": ["openai/gpt-5.6-luna", "qwen/qwen3.7-flash"],
+    "cheap": ["qwen/qwen3.7-flash", EMERGENCY_FREE_MODEL],
+    "fast": ["openai/gpt-5.6-luna", "qwen/qwen3.7-flash", EMERGENCY_FREE_MODEL],
     "smart": [
         "google/gemini-3-flash-preview",
         "openai/gpt-5.6-luna",
         "qwen/qwen3.7-flash",
+        EMERGENCY_FREE_MODEL,
     ],
     "reasoning": [
         "google/gemini-3.1-pro-preview",
         "google/gemini-3-flash-preview",
         "openai/gpt-5.6-luna",
+        EMERGENCY_FREE_MODEL,
     ],
 }
 
@@ -200,6 +207,10 @@ async def call_llm(
             except Exception as e:
                 last_error = e
                 print(f"[OpenRouter Retry {attempt + 1}/2 for {model_id}] {e}")
+                # A key spending-limit 403 will not recover on retry; move straight
+                # to the next approved fallback (ultimately the free emergency model).
+                if getattr(e, "status_code", None) == 403:
+                    break
                 await asyncio.sleep(1)
 
     if last_error is not None:
