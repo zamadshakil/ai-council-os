@@ -124,17 +124,24 @@ async def call_llm(
 ) -> dict:
     """
     Call an LLM through OpenRouter with model fallbacks for network resilience.
+
+    IMPORTANT: All fallback candidates are guaranteed zero-cost. This function will
+    NEVER silently escalate to a paid model. If a caller genuinely needs a specific
+    paid model, they must pass it explicitly via `model_override` — it will still
+    only be retried against itself and the free router, never swapped for another
+    paid model behind the scenes.
     """
     import asyncio
     model_tier = MODEL_TIERS.get(tier, MODEL_TIERS["fast"])
     primary_model = model_override or model_tier.model_id
-    
-    # Resilient model fallback queue
+
+    # Resilient fallback queue — always zero-cost. "openrouter/free" is OpenRouter's
+    # own Free Models Router: it randomly selects among currently available free
+    # models, so retrying against it again after a failure gives us a different
+    # free model on the next attempt without ever touching a paid model.
     candidate_models = [primary_model]
-    if primary_model != "openai/gpt-4o-mini":
-        candidate_models.append("openai/gpt-4o-mini")
-    if "google/gemini-2.5-flash" not in candidate_models:
-        candidate_models.append("google/gemini-2.5-flash")
+    if primary_model != "openrouter/free":
+        candidate_models.append("openrouter/free")
 
     client = get_client()
     last_error = None
