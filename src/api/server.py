@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -635,9 +635,8 @@ async def api_deactivate_kill_switch():
 # ── Knowledge Base (RAG) Endpoints ─────────────────────────────────────────
 
 @app.post("/api/knowledge/upload")
-async def upload_knowledge_document(file: "UploadFile" = "File(...)"):
+async def upload_knowledge_document(file: UploadFile = File(...)):
     """Upload a document to the RAG knowledge base."""
-    from fastapi import UploadFile, File
     from src.core.rag_engine import ingest_document
     file_bytes = await file.read()
     result = await ingest_document(file_bytes, file.filename)
