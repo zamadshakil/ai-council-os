@@ -161,6 +161,19 @@ async def notify_publish_success(workflow_name: str, platform: str, details: str
 
 # ── Bot Command Handlers ────────────────────────────────────────────────
 
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start — self-report this chat's ID so the operator can configure TELEGRAM_CHAT_ID."""
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(
+        f"👋 *AI Council OS Bot*\n\n"
+        f"Your Chat ID is: `{chat_id}`\n\n"
+        f"Add this as `TELEGRAM_CHAT_ID` in the server's .env so this chat "
+        f"receives workflow notifications, draft approvals, and can use "
+        f"/kill, /resume, /status.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
 async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /kill command — activate the kill switch."""
     user = update.effective_user.username or "unknown"
@@ -245,6 +258,7 @@ def start_telegram_bot():
     _app = Application.builder().token(TOKEN).build()
 
     # Register handlers
+    _app.add_handler(CommandHandler("start", cmd_start))
     _app.add_handler(CommandHandler("kill", cmd_kill))
     _app.add_handler(CommandHandler("resume", cmd_resume))
     _app.add_handler(CommandHandler("status", cmd_status))
@@ -264,6 +278,7 @@ async def start_telegram_bot_async():
     global _app
     _app = Application.builder().token(TOKEN).build()
 
+    _app.add_handler(CommandHandler("start", cmd_start))
     _app.add_handler(CommandHandler("kill", cmd_kill))
     _app.add_handler(CommandHandler("resume", cmd_resume))
     _app.add_handler(CommandHandler("status", cmd_status))
