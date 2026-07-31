@@ -333,6 +333,17 @@ async def approve_task(task_id: str, request: ApprovalRequest):
             except Exception as pub_err:
                 print(f"[Publisher] Publish trigger failed (non-fatal): {pub_err}")
 
+        # Best-effort HubSpot sync for approved Sales Council outreach.
+        # Safe no-op until HUBSPOT_ACCESS_TOKEN is configured.
+        if task.get("council") == "sales":
+            try:
+                from src.integrations.hubspot import sync_approved_sales_task
+                sync_result = await sync_approved_sales_task({**task, **updates})
+                if sync_result.get("status") != "skipped":
+                    print(f"[HubSpot] Task {task_id} sync result: {sync_result}")
+            except Exception as hubspot_err:
+                print(f"[HubSpot] Sync failed (non-fatal): {hubspot_err}")
+
     return {"task_id": task_id, "status": new_status}
 
 
@@ -426,6 +437,7 @@ async def _process_council_task(task_id: str, council_name: str, description: st
                 context_summary=description,
                 confidence=final_updates["confidence_score"],
                 destination_chat_id=int(telegram_chat_id) if telegram_chat_id else None,
+                council=council_name,
             )
         except Exception as telegram_error:
             print(f"[Telegram] Approval delivery failed for task {task_id}: {telegram_error}")
@@ -648,6 +660,70 @@ async def get_workflow_details_endpoint(workflow_id: str):
         "total_replied": 0,
         "activity_history": [],
     }
+
+
+# Env vars each workflow genuinely needs to run for real (not just to draft
+# with the LLM). Shown to the dashboard so "Active" never lies about whether
+# a workflow can actually reach its external platform.
+WORKFLOW_REQUIRED_ENV: dict[str, list[str]] = {
+    "instagram-comments": ["INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ID"],
+    "reddit": ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"],
+    "youtube-comments": ["YOUTUBE_API_KEY", "YOUTUBE_CHANNEL_ID"],
+    "youtube-descriptions": ["YOUTUBE_API_KEY", "YOUTUBE_CHANNEL_ID"],
+    "content-engine": [],  # Drafting only needs the LLM; publishing is opt-in per platform.
+}
+
+
+@app.get("/api/tasks/{task_id}/export/docx")
+async def export_task_docx(task_id: str):
+    """Download a task's final output as a formatted Word document."""
+    task = await get_task(task_id)
+    if not task:
+        task = tasks_store.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not task.get("final_output"):
+        raise HTTPException(status_code=400, detail="Task has no final output yet")
+
+    from src.integrations.docx_export import build_task_docx, build_task_docx_filename
+    from fastapi.responses import Response
+
+    file_bytes = build_task_docx(task)
+    filename = build_task_docx_filename(task)
+    return Response(
+        content=file_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/integrations/status")
+async def get_integrations_status():
+    """Report real connection status for CRM/publishing integrations (no dummy data)."""
+    from src.integrations.hubspot import get_hubspot_status
+    from src.integrations.publisher import get_platform_status
+
+    return {
+        "hubspot": get_hubspot_status(),
+        "publishing": await get_platform_status(),
+    }
+
+
+@app.get("/api/workflows/config-status")
+async def get_workflows_config_status():
+    """
+    Report, per workflow, whether the credentials it needs to actually run
+    are configured on this server. Lets the dashboard show 'Needs Setup'
+    instead of falsely claiming a workflow is Active.
+    """
+    result = {}
+    for workflow_id, required_vars in WORKFLOW_REQUIRED_ENV.items():
+        missing = [v for v in required_vars if not os.getenv(v, "").strip()]
+        result[workflow_id] = {
+            "ready": len(missing) == 0,
+            "missing_env": missing,
+        }
+    return result
 
 class WorkflowSettingsRequest(BaseModel):
     custom_prompt: str

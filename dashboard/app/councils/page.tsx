@@ -6,10 +6,10 @@ import { runCouncil } from '../lib/api';
 import { Target, Users, BookOpen, Lightbulb, Paperclip, Send, Sparkles } from 'lucide-react';
 
 const COUNCILS = [
-  { id: 'sales', name: 'Sales Council', icon: Target, desc: 'Outbound emails & pitch decks.', agents: 3, time: '45s', recommended: true },
-  { id: 'content', name: 'Content Council', icon: BookOpen, desc: 'SEO blogs & social media.', agents: 4, time: '1m 20s' },
-  { id: 'grant', name: 'Grant Council', icon: Lightbulb, desc: 'Proposals & applications.', agents: 5, time: '2m 15s' },
-  { id: 'strategy', name: 'Strategy Council', icon: Users, desc: 'Market analysis & planning.', agents: 6, time: '3m 30s' },
+  { id: 'sales', name: 'Sales Council', icon: Target, desc: 'Personalized B2B outreach and lead qualification.', process: 'Generate → Critique → Synthesize (min. 2 debate rounds)', recommended: true },
+  { id: 'content', name: 'Content Council', icon: BookOpen, desc: 'Platform-native social posts from source material.', process: 'Generate → Critique → Synthesize (min. 2 debate rounds)' },
+  { id: 'grant', name: 'Grant Council', icon: Lightbulb, desc: 'Scientific/technical grant proposal sections, exportable as DOCX.', process: 'Generate → Critique → Synthesize (min. 2 debate rounds)' },
+  { id: 'strategy', name: 'Strategy Council', icon: Users, desc: 'Market analysis and strategic recommendations.', process: 'Generate → Critique → Synthesize (min. 2 debate rounds)' },
 ];
 
 const SUGGESTIONS = [
@@ -83,7 +83,7 @@ export default function CouncilsPage() {
                     <h3 className={`text-[16px] font-bold transition-colors ${isSelected ? 'text-zinc-900' : 'text-zinc-800'}`}>{c.name}</h3>
                     <p className="text-[14px] text-zinc-600 mb-2">{c.desc}</p>
                     <div className="flex items-center gap-4 text-[13px] font-semibold text-zinc-500">
-                      <span className="flex items-center"><Users className="w-4 h-4 mr-1.5 text-zinc-400"/> {c.agents} Agents</span>
+                      <span className="flex items-center"><Users className="w-4 h-4 mr-1.5 text-zinc-400"/> {c.process}</span>
                     </div>
                   </div>
                 </div>

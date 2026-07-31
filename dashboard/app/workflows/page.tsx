@@ -8,7 +8,7 @@ import {
   ExternalLink, ChevronDown, ChevronUp, Terminal, Layers, Sparkles, Settings
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { triggerWorkflow, fetchKillSwitch, fetchStats } from '../lib/api';
+import { triggerWorkflow, fetchKillSwitch, fetchStats, fetchWorkflowConfigStatus } from '../lib/api';
 import { KillSwitchStatus, Stats } from '../lib/types';
 
 interface WorkflowDef {
@@ -79,11 +79,11 @@ const WORKFLOWS: WorkflowDef[] = [
     description: 'Rewrites video descriptions: preserves video-specific opening, replaces only boilerplate blocks. Two-phase: generate → review → publish.',
     icon: FileText,
     endpoint: 'youtube-descriptions',
-    schedule: 'Coming Soon',
+    schedule: 'Manual trigger only',
     color: 'text-blue-600',
     bgColor: 'bg-blue-50',
     borderColor: 'border-blue-200',
-    status: 'paused',
+    status: 'active',
   },
   {
     id: 'content-engine',
@@ -93,7 +93,7 @@ const WORKFLOWS: WorkflowDef[] = [
     description: 'Takes one video transcript and produces 6 unique, platform-optimized posts for X, LinkedIn, Facebook, Instagram, Reddit, and Discord.',
     icon: Share2,
     endpoint: 'content-engine',
-    schedule: 'Coming Soon',
+    schedule: 'Manual trigger only',
     color: 'text-violet-600',
     bgColor: 'bg-violet-50',
     borderColor: 'border-violet-200',
@@ -103,9 +103,18 @@ const WORKFLOWS: WorkflowDef[] = [
       { key: 'transcript', label: 'Video Transcript', placeholder: 'Paste the video transcript here...', type: 'textarea' },
       { key: 'video_id', label: 'Video ID (optional)', placeholder: 'e.g., dQw4w9WgXcQ' },
     ],
-    status: 'paused',
+    status: 'active',
   },
 ];
+
+const WORKFLOW_ENV_LABELS: Record<string, string> = {
+  INSTAGRAM_ACCESS_TOKEN: 'Instagram Access Token',
+  INSTAGRAM_BUSINESS_ID: 'Instagram Business ID',
+  REDDIT_CLIENT_ID: 'Reddit Client ID',
+  REDDIT_CLIENT_SECRET: 'Reddit Client Secret',
+  YOUTUBE_API_KEY: 'YouTube API Key',
+  YOUTUBE_CHANNEL_ID: 'YouTube Channel ID',
+};
 
 interface LogEntry {
   timestamp: string;
@@ -180,10 +189,12 @@ export default function WorkflowsPage() {
   });
   const [expandedWorkflow, setExpandedWorkflow] = useState<string | null>(null);
   const [inputData, setInputData] = useState<Record<string, string>>({});
+  const [configStatus, setConfigStatus] = useState<Record<string, { ready: boolean; missing_env: string[] }>>({});
 
   useEffect(() => {
     fetchKillSwitch().then(setKillSwitch).catch(() => {});
     fetchStats().then(setStats).catch(() => {});
+    fetchWorkflowConfigStatus().then(setConfigStatus).catch(() => {});
   }, []);
 
   const toggleStatus = (id: string) => {
@@ -342,6 +353,9 @@ export default function WorkflowsPage() {
           const isExpanded = expandedWorkflow === wf.id;
           const status = activeWorkflowStatuses[wf.id] || 'active';
           const isPaused = status === 'paused';
+          const cfg = configStatus[wf.id];
+          const needsSetup = !!cfg && !cfg.ready;
+          const missingLabels = (cfg?.missing_env || []).map((k) => WORKFLOW_ENV_LABELS[k] || k);
 
           return (
             <div
@@ -372,20 +386,34 @@ export default function WorkflowsPage() {
                         </div>
 
                         {/* Status Toggle Badge */}
-                        <button
-                          onClick={() => toggleStatus(wf.id)}
-                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] text-[11px] font-bold uppercase tracking-wider transition-all border ${
-                            isPaused
-                              ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
-                              : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
-                          }`}
-                        >
-                          {isPaused ? <Pause className="w-3 h-3" /> : <Activity className="w-3 h-3" />}
-                          {isPaused ? 'Paused' : 'Active'}
-                        </button>
+                        {needsSetup ? (
+                          <span
+                            className="flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] text-[11px] font-bold uppercase tracking-wider border bg-red-50 text-red-700 border-red-200"
+                            title={`Missing: ${missingLabels.join(', ')}`}
+                          >
+                            <AlertTriangle className="w-3 h-3" /> Needs Setup
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => toggleStatus(wf.id)}
+                            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] text-[11px] font-bold uppercase tracking-wider transition-all border ${
+                              isPaused
+                                ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+                                : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                            }`}
+                          >
+                            {isPaused ? <Pause className="w-3 h-3" /> : <Activity className="w-3 h-3" />}
+                            {isPaused ? 'Paused' : 'Active'}
+                          </button>
+                        )}
                       </div>
 
                       <p className="text-[14px] text-zinc-500 leading-relaxed mt-1.5">{wf.description}</p>
+                      {needsSetup && (
+                        <p className="text-[12.5px] text-red-600 font-medium mt-1">
+                          Missing credentials: {missingLabels.join(', ')} — this workflow cannot reach the real platform until these are added to the server .env.
+                        </p>
+                      )}
                     </div>
                   </div>
 
@@ -412,19 +440,20 @@ export default function WorkflowsPage() {
                     {/* Run Now Button */}
                     <button
                       onClick={() => wf.requiresInput ? setExpandedWorkflow(isExpanded ? null : wf.id) : handleRun(wf)}
-                      disabled={isRunning || killSwitch?.is_active || wf.schedule === 'Coming Soon'}
+                      disabled={isRunning || killSwitch?.is_active || needsSetup}
+                      title={needsSetup ? `Add ${missingLabels.join(', ')} to .env first` : undefined}
                       className={`flex items-center gap-2 h-10 px-6 rounded-[10px] text-[14px] font-semibold transition-all duration-200 active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed ${
                         isRunning
                           ? 'bg-blue-100 text-blue-700 border border-blue-200'
-                          : wf.schedule === 'Coming Soon'
+                          : needsSetup
                             ? 'bg-zinc-200 text-zinc-500 shadow-none'
                             : 'bg-zinc-900 text-white hover:bg-zinc-800 shadow-sm'
                       }`}
                     >
                       {isRunning ? (
                         <><Loader2 className="w-4 h-4 animate-spin" /> Executing...</>
-                      ) : wf.schedule === 'Coming Soon' ? (
-                        <><Clock className="w-4 h-4" /> In Development</>
+                      ) : needsSetup ? (
+                        <><AlertTriangle className="w-4 h-4" /> Needs Setup</>
                       ) : (
                         <><Play className="w-4 h-4 fill-current" /> {wf.requiresInput ? 'Configure' : 'Run Now'}</>
                       )}
