@@ -20,7 +20,7 @@ from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Bot, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -64,8 +64,8 @@ ALLOWED_CHAT_IDS = _parse_chat_ids(
 _bot: Optional[Bot] = None
 _app: Optional[Application] = None
 
-# Chat -> selected council while waiting for the operator's task text.
-_pending_council: dict[int, str] = {}
+# Chat -> selected council/context while waiting for the operator's task text.
+_pending_task: dict[int, dict] = {}
 # Prevent duplicate callback execution during one process lifetime.
 _handled_callbacks: set[str] = set()
 
@@ -261,7 +261,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = _chat_id(update)
     if chat_id is not None:
-        _pending_council.pop(chat_id, None)
+        _pending_task.pop(chat_id, None)
     await update.effective_message.reply_text("Task entry cancelled. Use /task to start again.")
 
 
@@ -318,17 +318,18 @@ async def handle_task_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _reject_unauthorized(update)
         return
     chat_id = _chat_id(update)
-    if chat_id is None or chat_id not in _pending_council:
+    if chat_id is None or chat_id not in _pending_task:
         return
     if is_killed():
-        _pending_council.pop(chat_id, None)
+        _pending_task.pop(chat_id, None)
         await update.effective_message.reply_text("🛑 Task not submitted: kill switch is active.")
         return
 
-    council = _pending_council.pop(chat_id)
+    selection = _pending_task.pop(chat_id)
+    council = selection["council"]
     task_text = (update.effective_message.text or "").strip()
     if len(task_text) < 10:
-        _pending_council[chat_id] = council
+        _pending_task[chat_id] = selection
         await update.effective_message.reply_text("Please provide a more detailed task (at least 10 characters).")
         return
 
@@ -337,6 +338,7 @@ async def handle_task_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "task_description": task_text,
         "priority": "high",
         "context": {
+            **selection.get("context", {}),
             "source": "telegram",
             "telegram_chat_id": chat_id,
             "telegram_user": update.effective_user.username or str(update.effective_user.id),
@@ -379,13 +381,58 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Kill switch is active", show_alert=True)
             return
         chat_id = _chat_id(update)
-        if chat_id is not None:
-            _pending_council[chat_id] = council
         await query.answer()
+        if council == "content":
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Instagram", callback_data="platform:instagram"),
+                    InlineKeyboardButton("LinkedIn", callback_data="platform:linkedin"),
+                ],
+                [
+                    InlineKeyboardButton("X / Twitter", callback_data="platform:twitter"),
+                    InlineKeyboardButton("Facebook", callback_data="platform:facebook"),
+                ],
+                [
+                    InlineKeyboardButton("Reddit", callback_data="platform:reddit"),
+                    InlineKeyboardButton("Discord", callback_data="platform:discord"),
+                ],
+                [InlineKeyboardButton("All 6 platforms", callback_data="platform:all")],
+            ])
+            await query.edit_message_text(
+                "✍️ <b>Content Council selected</b>\n\nChoose the output platform:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+            return
+
+        if chat_id is not None:
+            _pending_task[chat_id] = {"council": council, "context": {}}
         await query.edit_message_text(
             f"📝 <b>{html.escape(COUNCIL_LABELS[council])} selected</b>\n\n"
             "Now send the complete task as your next Telegram message.\n\n"
-            "Example: <i>Create an Instagram caption and LinkedIn post from this product announcement: …</i>\n\n"
+            "Use /cancel to stop.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if data.startswith("platform:"):
+        platform = data.split(":", 1)[1]
+        allowed_platforms = {"all", "instagram", "linkedin", "twitter", "facebook", "reddit", "discord"}
+        if platform not in allowed_platforms:
+            await query.answer("Unknown platform", show_alert=True)
+            return
+        chat_id = _chat_id(update)
+        if chat_id is not None:
+            _pending_task[chat_id] = {
+                "council": "content",
+                "context": {"platform": platform},
+            }
+        await query.answer()
+        label = "all 6 platforms" if platform == "all" else platform.title()
+        await query.edit_message_text(
+            f"📝 <b>Content Council — {html.escape(label)}</b>\n\n"
+            "Now send the source material and what you want created as your next message.\n\n"
+            "Example: <i>Turn this product announcement into a launch post: …</i>\n\n"
             "Use /cancel to stop.",
             parse_mode=ParseMode.HTML,
         )
@@ -511,5 +558,13 @@ async def start_telegram_bot_async():
     _register_handlers(_app)
     await _app.initialize()
     await _app.start()
+    await _app.bot.set_my_commands([
+        BotCommand("task", "Assign work to Content, Sales, or Grant Council"),
+        BotCommand("status", "Check system and kill-switch status"),
+        BotCommand("kill", "Emergency stop all workflows"),
+        BotCommand("resume", "Resume workflow execution"),
+        BotCommand("help", "Show available commands"),
+        BotCommand("cancel", "Cancel current task entry"),
+    ])
     await _app.updater.start_polling()
     print("🤖 [Telegram] Bot started (async). Listening for authorized commands...")
