@@ -119,10 +119,10 @@ Every output goes through **minimum 2 debate rounds** before reaching human revi
 
 ### 💰 Cost-Optimized AI Routing
 - **100% Free** via intelligent model tier routing
-- OpenRouter Auto-Free for generation ($0.00)
-- Local / Free models for critique & reasoning ($0.00)
-- Free models for synthesis ($0.00)
-- Automatic fallback chain to ensure zero cost
+- Explicit non-DeepSeek free models for generation, critique, and synthesis ($0.00)
+- Generic `openrouter/free` routing is prohibited because it can select DeepSeek
+- Paid and DeepSeek model overrides are rejected at runtime
+- Explicit free-model fallback chain ensures zero token cost
 
 ### 🛡️ Safety & Control
 - Global kill switch with Telegram integration
@@ -399,10 +399,10 @@ AI Council OS uses an intelligent cost-optimized routing system:
 
 | Tier | Model | Input / Output Cost | Role Assignment |
 | :--- | :--- | :--- | :--- |
-| `cheap` | openrouter/free | $0.00 / $0.00 per 1M tokens | Supervisor routing, classification |
-| `fast` | openrouter/free | $0.00 / $0.00 per 1M tokens | Fast synthesis, summaries |
-| `smart` | openrouter/free | $0.00 / $0.00 per 1M tokens | Critic evaluation, deep reasoning |
-| `reasoning` | openrouter/free | $0.00 / $0.00 per 1M tokens | Complex strategy, high-stakes tasks |
+| `cheap` | inclusionai/ling-3.0-flash:free | $0.00 / $0.00 per 1M tokens | Supervisor routing, classification |
+| `fast` | inclusionai/ling-3.0-flash:free | $0.00 / $0.00 per 1M tokens | Fast synthesis, summaries |
+| `smart` | google/gemma-4-31b-it:free | $0.00 / $0.00 per 1M tokens | Critic evaluation |
+| `reasoning` | nvidia/nemotron-3-super-120b-a12b:free | $0.00 / $0.00 per 1M tokens | Complex strategy |
 
 **Cost comparison:** A full 2-round debate costs $0.00 vs. ~$0.30 with GPT-4o (**100% savings**).
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any, cast
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -33,31 +34,31 @@ class ModelTier:
 MODEL_TIERS: dict[str, ModelTier] = {
     "cheap": ModelTier(
         name="cheap",
-        model_id="openrouter/free",
+        model_id="inclusionai/ling-3.0-flash:free",
         input_cost_per_m=0.00,
         output_cost_per_m=0.00,
-        description="OpenRouter Auto-Free: Best available 100% free model",
+        description="Ling 3.0 Flash: explicit non-DeepSeek free model",
     ),
     "fast": ModelTier(
         name="fast",
-        model_id="openrouter/free",
+        model_id="inclusionai/ling-3.0-flash:free",
         input_cost_per_m=0.00,
         output_cost_per_m=0.00,
-        description="OpenRouter Auto-Free: Ultra-fast 100% free model",
+        description="Ling 3.0 Flash: explicit non-DeepSeek free model",
     ),
     "smart": ModelTier(
         name="smart",
-        model_id="openrouter/free",
+        model_id="google/gemma-4-31b-it:free",
         input_cost_per_m=0.00,
         output_cost_per_m=0.00,
-        description="OpenRouter Auto-Free: Quality 100% free model",
+        description="Gemma 4 31B: explicit non-DeepSeek free model",
     ),
     "reasoning": ModelTier(
         name="reasoning",
-        model_id="openrouter/free",
+        model_id="nvidia/nemotron-3-super-120b-a12b:free",
         input_cost_per_m=0.00,
         output_cost_per_m=0.00,
-        description="OpenRouter Auto-Free: Strategy 100% free model",
+        description="Nemotron 3 Super: explicit non-DeepSeek free model",
     ),
 }
 
@@ -125,23 +126,27 @@ async def call_llm(
     """
     Call an LLM through OpenRouter with model fallbacks for network resilience.
 
-    IMPORTANT: All fallback candidates are guaranteed zero-cost. This function will
-    NEVER silently escalate to a paid model. If a caller genuinely needs a specific
-    paid model, they must pass it explicitly via `model_override` — it will still
-    only be retried against itself and the free router, never swapped for another
-    paid model behind the scenes.
+    All candidates are explicit, zero-cost, non-DeepSeek model IDs. The generic
+    `openrouter/free` router is deliberately forbidden because it may randomly
+    select a DeepSeek model, which the client explicitly prohibited.
     """
     import asyncio
     model_tier = MODEL_TIERS.get(tier, MODEL_TIERS["fast"])
     primary_model = model_override or model_tier.model_id
 
-    # Resilient fallback queue — always zero-cost. "openrouter/free" is OpenRouter's
-    # own Free Models Router: it randomly selects among currently available free
-    # models, so retrying against it again after a failure gives us a different
-    # free model on the next attempt without ever touching a paid model.
-    candidate_models = [primary_model]
-    if primary_model != "openrouter/free":
-        candidate_models.append("openrouter/free")
+    if "deepseek" in primary_model.lower():
+        raise ValueError("DeepSeek models are prohibited by client policy.")
+    if not primary_model.endswith(":free"):
+        raise ValueError("Only explicit OpenRouter :free models are permitted.")
+
+    # Explicit fallback set checked against OpenRouter's live model catalog.
+    # Never use `openrouter/free`: it can randomly choose a prohibited DeepSeek model.
+    candidate_models = list(dict.fromkeys([
+        primary_model,
+        "inclusionai/ling-3.0-flash:free",
+        "google/gemma-4-31b-it:free",
+        "openai/gpt-oss-20b:free",
+    ]))
 
     client = get_client()
     last_error = None
@@ -151,7 +156,7 @@ async def call_llm(
             try:
                 response = await client.chat.completions.create(
                     model=model_id,
-                    messages=messages,
+                    messages=cast(Any, messages),
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
@@ -177,7 +182,9 @@ async def call_llm(
                 print(f"[OpenRouter Retry {attempt + 1}/2 for {model_id}] {e}")
                 await asyncio.sleep(1)
 
-    raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No OpenRouter model candidates were available.")
 
 
 def list_available_models() -> list[dict]:
