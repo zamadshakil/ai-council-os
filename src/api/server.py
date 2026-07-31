@@ -546,6 +546,11 @@ async def receive_instagram_webhook(request: Request):
         print(f"[Instagram Webhook Payload Received]: {body}")
 
         from src.integrations.instagram_commenter import handle_instant_webhook_comment
+        from src.core.kill_switch import is_killed
+
+        if is_killed():
+            print("🛑 [Instagram Webhook] Kill switch is active. Ignoring incoming webhook event.")
+            return {"status": "killed", "message": "Kill switch active, event ignored"}
 
         # Parse Meta webhook entries
         entries = body.get("entry", [])

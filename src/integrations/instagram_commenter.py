@@ -30,6 +30,8 @@ from typing import Optional
 import httpx
 from dotenv import load_dotenv
 
+from src.core.kill_switch import is_killed
+
 load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────
@@ -249,6 +251,10 @@ async def run_instagram_commenter(tasks_store: dict) -> dict:
     """
     print("[Instagram Commenter] Starting comment automation run...")
 
+    if is_killed():
+        print("🛑 [Instagram Commenter] Kill switch is active. Aborting.")
+        return {"status": "killed", "processed": 0}
+
     try:
         media_list = await fetch_recent_media(limit=10)
     except Exception as e:
@@ -261,6 +267,9 @@ async def run_instagram_commenter(tasks_store: dict) -> dict:
 
     for media in media_list:
         if total_processed >= MAX_COMMENTS_PER_RUN:
+            break
+        if is_killed():
+            print("🛑 [Instagram Commenter] Kill switch activated mid-run. Stopping.")
             break
 
         media_id = media["id"]
@@ -353,6 +362,10 @@ async def handle_instant_webhook_comment(comment_id: str, comment_text: str, use
     """
     if not comment_id or not comment_text:
         return {"status": "ignored", "reason": "empty comment or id"}
+
+    if is_killed():
+        print(f"🛑 [Instagram Webhook] Kill switch is active. Ignoring comment {comment_id}.")
+        return {"status": "killed", "reason": "kill_switch_active"}
 
     if _is_already_replied(comment_id):
         print(f"[Instagram Webhook] Comment {comment_id} already replied — skipping.")
