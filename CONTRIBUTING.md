@@ -49,7 +49,7 @@ npm run dev
 
 | Branch | Purpose |
 | :--- | :--- |
-| `main` | Production-ready code. Deployed to EC2. |
+| `main` | Production-ready code. Deployed to the Hostinger VPS. |
 | `dev` | Development branch. All PRs target this branch. |
 | `feature/*` | New features (e.g., `feature/instagram-commenter`) |
 | `fix/*` | Bug fixes (e.g., `fix/task-persistence`) |

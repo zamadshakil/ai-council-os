@@ -72,9 +72,9 @@ Every output goes through **minimum 2 debate rounds** before reaching human revi
           │                            │                            │
 ┌─────────▼──────────┐   ┌────────────▼───────────┐   ┌───────────▼──────────┐
 │   LangGraph Engine │   │   OpenRouter Gateway   │   │   Integration Layer  │
-│   Multi-Agent      │   │   DeepSeek V3/R1       │   │   YouTube • Reddit   │
-│   Debate Loop      │   │   Gemini 2.5 Flash     │   │   Telegram • Sheets  │
-│   StateGraph       │   │   Qwen 2.5 72B         │   │   Twitter • LinkedIn │
+│   Multi-Agent      │   │   OpenRouter Free      │   │   YouTube • Reddit   │
+│   Debate Loop      │   │   Local Models         │   │   Telegram • Sheets  │
+│   StateGraph       │   │                        │   │   Twitter • LinkedIn │
 └─────────┬──────────┘   └────────────────────────┘   └──────────────────────┘
           │
 ┌─────────▼──────────┐
@@ -115,14 +115,14 @@ Every output goes through **minimum 2 debate rounds** before reaching human revi
 - **YouTube** — Video listing, comment scanning, automated replies, description optimization
 - **Reddit** — Subreddit monitoring, intent scoring, lead prospecting, automated outreach
 - **Telegram** — Real-time notifications, inline approval buttons, kill-switch commands
-- **Google Sheets** — Automated logging of all processed workflow items
+- **Instagram** — Real-time webhook comment auto-replies (<5s) plus scheduled polling
 
 ### 💰 Cost-Optimized AI Routing
-- **95% cost reduction** vs. GPT-4o through intelligent model tier routing
-- DeepSeek V3 for generation ($0.14/$0.28 per 1M tokens)
-- DeepSeek R1 for critique & reasoning ($0.55/$2.19 per 1M tokens)
-- Gemini 2.5 Flash for synthesis ($0.10/$0.40 per 1M tokens)
-- Automatic fallback chain: Primary → GPT-4o Mini → Gemini Flash
+- **100% Free** via intelligent model tier routing
+- OpenRouter Auto-Free for generation ($0.00)
+- Local / Free models for critique & reasoning ($0.00)
+- Free models for synthesis ($0.00)
+- Automatic fallback chain to ensure zero cost
 
 ### 🛡️ Safety & Control
 - Global kill switch with Telegram integration
@@ -177,14 +177,14 @@ Every output goes through **minimum 2 debate rounds** before reaching human revi
 | :--- | :--- | :--- |
 | **Agent Framework** | LangGraph 0.4+ | Multi-agent state machine orchestration |
 | **LLM Gateway** | OpenRouter API | Unified access to 200+ models |
-| **Primary Models** | DeepSeek V3, DeepSeek R1, Gemini 2.5 Flash, Qwen 2.5 72B | Cost-optimized generation, critique, synthesis |
+| **Primary Models** | OpenRouter Free, Local Models | Cost-optimized generation, critique, synthesis |
 | **Backend** | FastAPI + Uvicorn | Async REST API server |
 | **Frontend** | Next.js 16 + React 19 | App Router dashboard with SSR |
 | **Styling** | Tailwind CSS v4 + Framer Motion | Dark theme glassmorphism UI with animations |
 | **Database** | PostgreSQL + pgvector / SQLite | Task persistence and vector storage |
 | **Process Manager** | PM2 (Frontend) + Systemd (Backend) | Production process management |
 | **Reverse Proxy** | Nginx | SSL termination, routing, load balancing |
-| **Infrastructure** | AWS EC2 (t3.small) | 2 vCPU, 2GB RAM + 4GB Swap |
+| **Infrastructure** | Hostinger VPS | 2 vCPU, 2GB RAM + 4GB Swap |
 
 ---
 
@@ -280,9 +280,9 @@ uvicorn src.api.server:app --host 0.0.0.0 --port 8000
 
 ## 🌐 Deployment
 
-### Production (AWS EC2)
+### Production (Hostinger VPS)
 
-AI Council OS is designed for deployment on a single EC2 instance with the following architecture:
+AI Council OS is designed for deployment on a single VPS instance with the following architecture:
 
 ```
 Internet ──▶ Nginx (80/443)
@@ -291,7 +291,7 @@ Internet ──▶ Nginx (80/443)
 ```
 
 **Minimum Requirements:**
-- EC2 `t3.small` (2 vCPU, 2 GB RAM)
+- Hostinger VPS (2 vCPU, 2 GB RAM)
 - 4 GB Swap space configured
 - Ubuntu 24.04 LTS
 - Nginx + Certbot (Let's Encrypt SSL)
@@ -312,10 +312,13 @@ AstroCouncil/
 │   │   ├── council_base.py           # LangGraph StateGraph debate engine
 │   │   ├── database.py               # SQLAlchemy async models (PostgreSQL/SQLite)
 │   │   ├── llm_router.py             # OpenRouter multi-tier model gateway
-│   │   ├── memory.py                 # ChromaDB vector store & short-term state
+│   │   ├── memory.py                 # Short-term state & episodic memory
+│   │   ├── memory_manager.py         # 3-layer memory manager (short/long/episodic)
+│   │   ├── rag_engine.py             # LanceDB + sentence-transformers knowledge hub
+│   │   ├── mcp_server.py             # FastMCP server exposing council tools
 │   │   ├── state.py                  # Pydantic schemas: CouncilState, AgentRole
 │   │   ├── dedup.py                  # SHA-256 content deduplication
-│   │   ├── kill_switch.py            # Global emergency stop controller
+│   │   ├── kill_switch.py            # Global emergency stop controller (checked by every workflow)
 │   │   └── scheduler.py              # APScheduler background cron runner
 │   ├── councils/
 │   │   ├── content/council.py        # Content repurposing & multi-platform posts
@@ -327,13 +330,19 @@ AstroCouncil/
 │   │   ├── youtube.py                # YouTube Data API v3 adapter
 │   │   ├── reddit.py                 # PRAW Reddit API adapter
 │   │   ├── telegram_bot.py           # Telegram bot notifications & approvals
-│   │   ├── google_sheets.py          # Google Sheets logging adapter
+│   │   ├── instagram.py              # Instagram Graph API publishing adapter
+│   │   ├── instagram_commenter.py    # Instagram real-time + scheduled comment auto-reply
+│   │   ├── facebook.py               # Facebook Graph API publishing adapter
+│   │   ├── linkedin.py               # LinkedIn publishing adapter
+│   │   ├── twitter.py                # X/Twitter publishing adapter
+│   │   ├── publisher.py              # Unified cross-platform publisher adapter
 │   │   └── whisper.py                # OpenAI Whisper voice-to-text
 │   └── workflows/
 │       ├── content_engine.py         # Transcript → 6 platform content variants
 │       ├── reddit_prospector.py      # Subreddit scanning → intent scoring
 │       ├── youtube_comments.py       # Comment scanning → support replies
-│       └── youtube_descriptions.py   # Video description optimization
+│       ├── youtube_descriptions.py   # Video description optimization
+│       └── config/                   # Per-workflow tunable config (subreddits, thresholds, caps)
 │
 ├── dashboard/                        # Next.js 16 Frontend
 │   └── app/
@@ -385,12 +394,12 @@ AI Council OS uses an intelligent cost-optimized routing system:
 
 | Tier | Model | Input / Output Cost | Role Assignment |
 | :--- | :--- | :--- | :--- |
-| `cheap` | DeepSeek V3 | $0.14 / $0.28 per 1M tokens | Supervisor routing, classification |
-| `fast` | Gemini 2.5 Flash | $0.10 / $0.40 per 1M tokens | Fast synthesis, summaries |
-| `smart` | DeepSeek R1 | $0.55 / $2.19 per 1M tokens | Critic evaluation, deep reasoning |
-| `reasoning` | Qwen 2.5 72B | $0.35 / $0.40 per 1M tokens | Complex strategy, high-stakes tasks |
+| `cheap` | openrouter/free | $0.00 / $0.00 per 1M tokens | Supervisor routing, classification |
+| `fast` | openrouter/free | $0.00 / $0.00 per 1M tokens | Fast synthesis, summaries |
+| `smart` | openrouter/free | $0.00 / $0.00 per 1M tokens | Critic evaluation, deep reasoning |
+| `reasoning` | openrouter/free | $0.00 / $0.00 per 1M tokens | Complex strategy, high-stakes tasks |
 
-**Cost comparison:** A full 2-round debate costs ~$0.01 vs. ~$0.30 with GPT-4o (**97% savings**).
+**Cost comparison:** A full 2-round debate costs $0.00 vs. ~$0.30 with GPT-4o (**100% savings**).
 
 ---
 

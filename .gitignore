@@ -25,6 +25,11 @@ council.db
 credentials/
 scratch/
 
+# Internal client docs / handoff notes (never push to client-visible repo)
+*.docx
+project_handoff.md
+HANDOFF_CONTEXT.md
+
 # Next.js / Node
 node_modules/
 .next/
