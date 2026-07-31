@@ -152,7 +152,7 @@ class BaseCouncil(ABC):
         )
 
         history = state.get("debate_history", [])
-        history.append(agent_msg.model_dump())
+        history.append(agent_msg.model_dump(mode="json"))
 
         return {
             "current_draft": result["content"],
@@ -185,7 +185,7 @@ class BaseCouncil(ABC):
         )
 
         history = state.get("debate_history", [])
-        history.append(agent_msg.model_dump())
+        history.append(agent_msg.model_dump(mode="json"))
 
         return {
             "confidence_score": confidence,
@@ -214,7 +214,7 @@ class BaseCouncil(ABC):
         )
 
         history = state.get("debate_history", [])
-        history.append(agent_msg.model_dump())
+        history.append(agent_msg.model_dump(mode="json"))
 
         return {
             "current_draft": result["content"],

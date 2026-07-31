@@ -33,7 +33,6 @@ export function DebateTrace({
             <div className="ml-4 w-full">
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-xs font-bold text-zinc-900">Generator Agent</span>
-                <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-bold">GPT-4o Mini</span>
                 <span className="text-[10px] text-blue-600 font-semibold flex items-center gap-1">
                   <Loader2 className="w-2.5 h-2.5 animate-spin" /> Drafting V1
                 </span>
@@ -51,7 +50,6 @@ export function DebateTrace({
             <div className="ml-4 w-full">
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-xs font-bold text-zinc-900">Critic Agent</span>
-                <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded text-[10px] font-bold">GPT-4o</span>
                 <span className="text-[10px] text-amber-600 font-semibold">Evaluating Quality</span>
               </div>
               <div className="bg-zinc-50 border border-zinc-200 rounded-[12px] p-3 text-xs text-zinc-500">
