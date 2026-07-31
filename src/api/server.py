@@ -95,9 +95,17 @@ from fastapi import Header, Depends
 
 
 # ── Security & Authentication Config ────────────────────────────────────
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "zakaria")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "councils@2026")
-JWT_SECRET = os.getenv("JWT_SECRET", "ai-council-os-secure-token-secret-2026")
+# ADMIN_PASSWORD and JWT_SECRET must be set via environment. There is no
+# hardcoded fallback for either — this codebase is on a client-visible
+# GitHub repo, so a hardcoded default here would be a public secret.
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+JWT_SECRET = os.getenv("JWT_SECRET", "").strip()
+
+if not ADMIN_PASSWORD:
+    raise ValueError("ADMIN_PASSWORD environment variable is not set on the server.")
+if not JWT_SECRET:
+    raise ValueError("JWT_SECRET environment variable is not set on the server.")
 
 
 def create_auth_token(username: str) -> str:
@@ -170,8 +178,8 @@ class ContentEngineRequest(BaseModel):
 @app.post("/api/auth/login")
 async def api_login(request: LoginRequest):
     """Authenticate user with username and password."""
-    env_user = os.getenv("ADMIN_USERNAME", "zakaria")
-    env_pass = os.getenv("ADMIN_PASSWORD", "councils@2026")
+    env_user = ADMIN_USERNAME
+    env_pass = ADMIN_PASSWORD
     
     if request.username == env_user and request.password == env_pass:
         token = create_auth_token(request.username)
@@ -520,7 +528,9 @@ async def trigger_content_engine(request: ContentEngineRequest):
 
 # ── Meta Real-Time Instagram Webhook Endpoints ─────────────────────────
 
-VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "ai_council_os_verify_token_2026")
+VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "").strip()
+if not VERIFY_TOKEN:
+    print("[WARNING] META_VERIFY_TOKEN is not set — Instagram webhook verification will always fail until it's configured.")
 
 
 @app.get("/api/webhooks/instagram")
