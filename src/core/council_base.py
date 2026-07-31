@@ -107,7 +107,7 @@ class BaseCouncil(ABC):
         Gracefully no-ops if either source is empty or unavailable.
         """
         if state.get("iteration", 0) > 0:
-            return {}
+            return {**state}
 
         rag_ctx = ""
         memory_ctx = ""
@@ -130,6 +130,7 @@ class BaseCouncil(ABC):
             print(f"[Memory] Skipped (non-fatal): {e}")
 
         return {
+            **state,
             "rag_context": rag_ctx,
             "memory_context": memory_ctx,
         }
@@ -151,10 +152,11 @@ class BaseCouncil(ABC):
             cost_usd=result["cost_usd"],
         )
 
-        history = state.get("debate_history", [])
+        history = list(state.get("debate_history", []))
         history.append(agent_msg.model_dump(mode="json"))
 
         return {
+            **state,
             "current_draft": result["content"],
             "status": CouncilStatus.GENERATING.value,
             "debate_history": history,
@@ -184,10 +186,11 @@ class BaseCouncil(ABC):
             cost_usd=result["cost_usd"],
         )
 
-        history = state.get("debate_history", [])
+        history = list(state.get("debate_history", []))
         history.append(agent_msg.model_dump(mode="json"))
 
         return {
+            **state,
             "confidence_score": confidence,
             "status": CouncilStatus.CRITIQUING.value,
             "debate_history": history,
@@ -213,10 +216,11 @@ class BaseCouncil(ABC):
             cost_usd=result["cost_usd"],
         )
 
-        history = state.get("debate_history", [])
+        history = list(state.get("debate_history", []))
         history.append(agent_msg.model_dump(mode="json"))
 
         return {
+            **state,
             "current_draft": result["content"],
             "final_output": result["content"],
             "debate_history": history,
@@ -254,6 +258,7 @@ class BaseCouncil(ABC):
     def _increment_iteration(self, state: dict) -> dict:
         """Bump the iteration counter before looping back."""
         return {
+            **state,
             "iteration": state.get("iteration", 0) + 1,
             "status": CouncilStatus.REFINING.value,
         }
@@ -261,6 +266,7 @@ class BaseCouncil(ABC):
     def _prepare_approval(self, state: dict) -> dict:
         """Mark the state as ready for human review."""
         return {
+            **state,
             "final_output": state.get("final_output") or state.get("current_draft", ""),
             "status": CouncilStatus.AWAITING_APPROVAL.value,
         }
@@ -268,6 +274,7 @@ class BaseCouncil(ABC):
     def _force_end(self, state: dict) -> dict:
         """Max retries exceeded — use the best available draft."""
         return {
+            **state,
             "final_output": state.get("current_draft", ""),
             "status": CouncilStatus.CONSENSUS.value,
             "error": f"Max iterations ({self.max_iterations}) reached. Using best available draft.",
