@@ -118,11 +118,10 @@ Every output goes through **minimum 2 debate rounds** before reaching human revi
 - **Instagram** — Real-time webhook comment auto-replies (<5s) plus scheduled polling
 
 ### 💰 Cost-Optimized AI Routing
-- **100% Free** via intelligent model tier routing
-- Explicit non-DeepSeek free models for generation, critique, and synthesis ($0.00)
-- Generic `openrouter/free` routing is prohibited because it can select DeepSeek
-- Paid and DeepSeek model overrides are rejected at runtime
-- Explicit free-model fallback chain ensures zero token cost
+- Current price/performance models selected from OpenRouter's live catalog
+- DeepSeek and unapproved model overrides are rejected at runtime
+- Cheap/fast requests never escalate to the premium Pro reasoning tier
+- Explicit output caps and actual-model cost accounting prevent billing surprises
 
 ### 🛡️ Safety & Control
 - Global kill switch with Telegram integration
@@ -399,12 +398,12 @@ AI Council OS uses an intelligent cost-optimized routing system:
 
 | Tier | Model | Input / Output Cost | Role Assignment |
 | :--- | :--- | :--- | :--- |
-| `cheap` | inclusionai/ling-3.0-flash:free | $0.00 / $0.00 per 1M tokens | Supervisor routing, classification |
-| `fast` | inclusionai/ling-3.0-flash:free | $0.00 / $0.00 per 1M tokens | Fast synthesis, summaries |
-| `smart` | google/gemma-4-31b-it:free | $0.00 / $0.00 per 1M tokens | Critic evaluation |
-| `reasoning` | nvidia/nemotron-3-super-120b-a12b:free | $0.00 / $0.00 per 1M tokens | Complex strategy |
+| `cheap` | qwen/qwen3.7-flash | $0.03 / $0.13 per 1M tokens | Supervisor routing, classification |
+| `fast` | openai/gpt-5.6-luna | $0.10 / $0.60 per 1M tokens | Generation and synthesis |
+| `smart` | google/gemini-3-flash-preview | $0.50 / $3.00 per 1M tokens | Critic evaluation and high-priority work |
+| `reasoning` | google/gemini-3.1-pro-preview | $2.00 / $12.00 per 1M tokens | Critical escalation only |
 
-**Cost comparison:** A full 2-round debate costs $0.00 vs. ~$0.30 with GPT-4o (**100% savings**).
+Model prices are configured from OpenRouter's live catalog and may change. The dashboard records actual input/output token usage for the model that handled each call; configure an OpenRouter key spending limit as a final billing guardrail.
 
 ---
 

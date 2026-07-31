@@ -34,40 +34,61 @@ class ModelTier:
 MODEL_TIERS: dict[str, ModelTier] = {
     "cheap": ModelTier(
         name="cheap",
-        model_id="inclusionai/ling-3.0-flash:free",
-        input_cost_per_m=0.00,
-        output_cost_per_m=0.00,
-        description="Ling 3.0 Flash: explicit non-DeepSeek free model",
+        model_id="qwen/qwen3.7-flash",
+        input_cost_per_m=0.03,
+        output_cost_per_m=0.13,
+        description="Qwen 3.7 Flash: ultra-low-cost routing and classification",
     ),
     "fast": ModelTier(
         name="fast",
-        model_id="inclusionai/ling-3.0-flash:free",
-        input_cost_per_m=0.00,
-        output_cost_per_m=0.00,
-        description="Ling 3.0 Flash: explicit non-DeepSeek free model",
+        model_id="openai/gpt-5.6-luna",
+        input_cost_per_m=0.10,
+        output_cost_per_m=0.60,
+        description="GPT-5.6 Luna: current high-quality price/performance generation",
     ),
     "smart": ModelTier(
         name="smart",
-        model_id="google/gemma-4-31b-it:free",
-        input_cost_per_m=0.00,
-        output_cost_per_m=0.00,
-        description="Gemma 4 31B: explicit non-DeepSeek free model",
+        model_id="google/gemini-3-flash-preview",
+        input_cost_per_m=0.50,
+        output_cost_per_m=3.00,
+        description="Gemini 3 Flash: high-quality criticism and high-priority work",
     ),
     "reasoning": ModelTier(
         name="reasoning",
-        model_id="nvidia/nemotron-3-super-120b-a12b:free",
-        input_cost_per_m=0.00,
-        output_cost_per_m=0.00,
-        description="Nemotron 3 Super: explicit non-DeepSeek free model",
+        model_id="google/gemini-3.1-pro-preview",
+        input_cost_per_m=2.00,
+        output_cost_per_m=12.00,
+        description="Gemini 3.1 Pro: critical escalation only",
     ),
 }
 
+MODEL_PRICING = {
+    tier.model_id: (tier.input_cost_per_m, tier.output_cost_per_m)
+    for tier in MODEL_TIERS.values()
+}
+
+# Fallbacks only move laterally or downward in cost/quality; a cheap or fast
+# request can never silently escalate to the Pro reasoning tier.
+TIER_FALLBACKS = {
+    "cheap": ["qwen/qwen3.7-flash", "openai/gpt-5.6-luna"],
+    "fast": ["openai/gpt-5.6-luna", "qwen/qwen3.7-flash"],
+    "smart": [
+        "google/gemini-3-flash-preview",
+        "openai/gpt-5.6-luna",
+        "qwen/qwen3.7-flash",
+    ],
+    "reasoning": [
+        "google/gemini-3.1-pro-preview",
+        "google/gemini-3-flash-preview",
+        "openai/gpt-5.6-luna",
+    ],
+}
 
 PRIORITY_TO_TIER = {
-    "low": "fast",
+    "low": "cheap",
     "medium": "fast",
-    "high": "fast",
-    "critical": "fast",
+    "high": "smart",
+    "critical": "reasoning",
 }
 
 
@@ -126,9 +147,8 @@ async def call_llm(
     """
     Call an LLM through OpenRouter with model fallbacks for network resilience.
 
-    All candidates are explicit, zero-cost, non-DeepSeek model IDs. The generic
-    `openrouter/free` router is deliberately forbidden because it may randomly
-    select a DeepSeek model, which the client explicitly prohibited.
+    All candidates are explicit, cost-bounded, non-DeepSeek model IDs. Fallbacks
+    never escalate to a more expensive tier. Generic automatic routing is forbidden.
     """
     import asyncio
     model_tier = MODEL_TIERS.get(tier, MODEL_TIERS["fast"])
@@ -136,16 +156,12 @@ async def call_llm(
 
     if "deepseek" in primary_model.lower():
         raise ValueError("DeepSeek models are prohibited by client policy.")
-    if not primary_model.endswith(":free"):
-        raise ValueError("Only explicit OpenRouter :free models are permitted.")
+    if primary_model not in MODEL_PRICING:
+        raise ValueError("Model override is not in the approved cost-controlled model list.")
 
-    # Explicit fallback set checked against OpenRouter's live model catalog.
-    # Never use `openrouter/free`: it can randomly choose a prohibited DeepSeek model.
     candidate_models = list(dict.fromkeys([
         primary_model,
-        "inclusionai/ling-3.0-flash:free",
-        "google/gemma-4-31b-it:free",
-        "openai/gpt-oss-20b:free",
+        *TIER_FALLBACKS[model_tier.name],
     ]))
 
     client = get_client()
@@ -161,17 +177,21 @@ async def call_llm(
                     max_tokens=max_tokens,
                 )
 
+                content = response.choices[0].message.content or ""
+                if not content.strip():
+                    raise ValueError(f"Model {model_id} returned an empty response.")
+
                 usage = response.usage
                 input_tokens = usage.prompt_tokens if usage else 0
                 output_tokens = usage.completion_tokens if usage else 0
-
+                input_rate, output_rate = MODEL_PRICING[model_id]
                 cost_usd = (
-                    (input_tokens / 1_000_000) * model_tier.input_cost_per_m
-                    + (output_tokens / 1_000_000) * model_tier.output_cost_per_m
+                    (input_tokens / 1_000_000) * input_rate
+                    + (output_tokens / 1_000_000) * output_rate
                 )
 
                 return {
-                    "content": response.choices[0].message.content or "",
+                    "content": content,
                     "model": model_id,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
