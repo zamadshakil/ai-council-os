@@ -123,3 +123,19 @@ export async function triggerWorkflow(workflow: string, body?: any): Promise<Wor
 export async function fetchWorkflowDetails(workflowId: string): Promise<any> {
   return apiFetch(`${API_BASE}/api/workflows/${workflowId}/details`);
 }
+
+export async function fetchWorkflowConfigStatus(): Promise<Record<string, { ready: boolean; missing_env: string[] }>> {
+  return apiFetch(`${API_BASE}/api/workflows/config-status`);
+}
+
+export async function fetchIntegrationsStatus(): Promise<{
+  hubspot: { configured: boolean; provider: string; note: string };
+  publishing: Record<string, boolean>;
+}> {
+  return apiFetch(`${API_BASE}/api/integrations/status`);
+}
+
+// ── Document Export ─────────────────
+export function getTaskDocxExportUrl(taskId: string): string {
+  return `${API_BASE}/api/tasks/${taskId}/export/docx`;
+}

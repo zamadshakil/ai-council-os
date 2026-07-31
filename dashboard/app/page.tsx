@@ -1,12 +1,12 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { fetchStats, fetchTasks, fetchKillSwitch } from './lib/api';
+import { fetchStats, fetchTasks, fetchKillSwitch, fetchIntegrationsStatus } from './lib/api';
 import { Task, Stats, KillSwitchStatus } from './lib/types';
 import { 
   Clock, ArrowRight, Brain, Zap, Target, BookOpen, Activity, 
   Shield, ShieldOff, TrendingUp, DollarSign, CheckCircle2, AlertCircle,
-  MessageCircle, Video, FileText, Share2
+  MessageCircle, Video, FileText, Share2, Plug, PlugZap
 } from 'lucide-react';
 import Link from 'next/link';
 import { formatDistanceToNow } from 'date-fns';
@@ -22,19 +22,22 @@ export default function OverviewPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [killSwitch, setKillSwitch] = useState<KillSwitchStatus | null>(null);
+  const [integrations, setIntegrations] = useState<{ hubspot: { configured: boolean }; publishing: Record<string, boolean> } | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function load() {
       try {
-        const [s, t, k] = await Promise.all([
+        const [s, t, k, i] = await Promise.all([
           fetchStats(),
           fetchTasks('awaiting_approval'),
           fetchKillSwitch(),
+          fetchIntegrationsStatus().catch(() => null),
         ]);
         setStats(s);
         setTasks(t.slice(0, 6));
         setKillSwitch(k);
+        setIntegrations(i);
       } catch (e) {
         console.error('Failed to load overview:', e);
       } finally {
@@ -129,6 +132,39 @@ export default function OverviewPage() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Integration Status — real connection state, never assumed */}
+      {integrations && (
+        <div className="bg-white border border-zinc-200 rounded-[20px] p-6 shadow-sm">
+          <h3 className="text-[16px] font-bold text-zinc-900 mb-4">CRM & Publishing Integrations</h3>
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+            {[
+              { label: 'HubSpot CRM', connected: integrations.hubspot?.configured },
+              { label: 'Instagram', connected: integrations.publishing?.instagram },
+              { label: 'LinkedIn', connected: integrations.publishing?.linkedin },
+              { label: 'Facebook', connected: integrations.publishing?.facebook },
+              { label: 'X / Twitter', connected: integrations.publishing?.twitter },
+            ].map((item) => (
+              <div
+                key={item.label}
+                className={`flex items-center gap-2 p-3 rounded-[12px] border text-[13px] font-semibold ${
+                  item.connected
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                    : 'bg-zinc-50 border-zinc-200 text-zinc-500'
+                }`}
+              >
+                {item.connected ? <PlugZap className="w-4 h-4" /> : <Plug className="w-4 h-4" />}
+                <span>{item.label}</span>
+              </div>
+            ))}
+          </div>
+          {!integrations.hubspot?.configured && (
+            <p className="text-[12.5px] text-zinc-400 mt-3">
+              HubSpot not connected yet — add HUBSPOT_ACCESS_TOKEN to enable automatic contact/deal sync on approved Sales Council outreach.
+            </p>
+          )}
         </div>
       )}
 
