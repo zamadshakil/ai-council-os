@@ -57,6 +57,16 @@ async def startup_event():
 
     set_tasks_store(tasks_store)
     start_scheduler()
+
+    # Start Telegram control bot
+    try:
+        from src.integrations.telegram_bot import start_telegram_bot_async
+        import asyncio
+        asyncio.create_task(start_telegram_bot_async())
+        print("[FastAPI] Telegram bot initialized.")
+    except Exception as e:
+        print(f"[FastAPI] Telegram bot initialization skipped: {e}")
+
     print(f"[FastAPI] Loaded {len(tasks_store)} tasks from DB. All systems online.")
 
 

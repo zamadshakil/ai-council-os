@@ -206,24 +206,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _handled_callbacks.add(callback_id)
 
     action, task_id = callback_id.split(":", 1)
+    from src.core.database import update_task
 
     if action == "approve":
+        await update_task(task_id, {"status": "approved"})
         await query.edit_message_text(
-            text=f"✅ *Approved* — Task `{task_id}`\nPublishing...",
+            text=f"✅ *Approved* — Task `{task_id}`\nUpdated task status to approved and ready for publishing.",
             parse_mode=ParseMode.MARKDOWN,
         )
-        # The actual publish action is triggered via the API server
-        # when the task status changes to "approved"
 
     elif action == "retry":
+        await update_task(task_id, {"status": "pending"})
         await query.edit_message_text(
-            text=f"🔄 *Retry requested* — Task `{task_id}`\nRe-running council...",
+            text=f"🔄 *Retry requested* — Task `{task_id}`\nReset task to pending status.",
             parse_mode=ParseMode.MARKDOWN,
         )
 
     elif action == "cancel":
+        await update_task(task_id, {"status": "rejected"})
         await query.edit_message_text(
-            text=f"❌ *Cancelled* — Task `{task_id}`\nDraft discarded and logged.",
+            text=f"❌ *Cancelled* — Task `{task_id}`\nDraft discarded and marked as rejected.",
             parse_mode=ParseMode.MARKDOWN,
         )
 
