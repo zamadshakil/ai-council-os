@@ -320,9 +320,10 @@ async def approve_task(task_id: str, request: ApprovalRequest):
     except Exception as mem_err:
         print(f"[Memory] Episode storage failed (non-fatal): {mem_err}")
 
-    # Multi-platform publishing on approval
+    # Multi-platform publishing is opt-in through the persisted task context.
+    # Approval alone never silently publishes content to an external platform.
     if request.approved:
-        publish_platforms = request.context.get("publish_to", []) if hasattr(request, "context") else []
+        publish_platforms = task.get("context", {}).get("publish_to", [])
         if publish_platforms:
             try:
                 from src.integrations.publisher import publish_to_platforms
@@ -411,6 +412,24 @@ async def _process_council_task(task_id: str, council_name: str, description: st
         await update_task(task_id, final_updates)
         if task_id in tasks_store:
             tasks_store[task_id].update(final_updates)
+
+        # Every completed council task enters the same human approval queue in
+        # both Telegram and the dashboard. Telegram-submitted tasks return to
+        # the originating chat; dashboard tasks use configured destinations.
+        try:
+            from src.integrations.telegram_bot import send_draft_for_approval
+            telegram_chat_id = context.get("telegram_chat_id")
+            await send_draft_for_approval(
+                task_id=task_id,
+                workflow_name=f"{council_name.title()} Council",
+                draft_text=final_updates["final_output"],
+                context_summary=description,
+                confidence=final_updates["confidence_score"],
+                destination_chat_id=int(telegram_chat_id) if telegram_chat_id else None,
+            )
+        except Exception as telegram_error:
+            print(f"[Telegram] Approval delivery failed for task {task_id}: {telegram_error}")
+
         print(f"[Council Success] Task {task_id} completed streaming by {council_name} council.")
 
     except Exception as e:
@@ -433,6 +452,16 @@ async def _process_council_task(task_id: str, council_name: str, description: st
 @app.post("/api/councils/run")
 async def run_council(request: RunCouncilRequest):
     """Submit a new task to a council."""
+    if kill_switch.is_killed():
+        raise HTTPException(
+            status_code=423,
+            detail="Global kill switch is active. Resume workflows before submitting a council task.",
+        )
+
+    allowed_councils = {"content", "sales", "grant", "strategy", "support"}
+    if request.council.lower() not in allowed_councils:
+        raise HTTPException(status_code=400, detail="Unknown council")
+
     task_id = str(uuid.uuid4())[:8]
 
     task_data = {

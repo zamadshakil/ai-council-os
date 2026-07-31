@@ -114,7 +114,7 @@ Every output goes through **minimum 2 debate rounds** before reaching human revi
 ### 🔌 Platform Integrations
 - **YouTube** — Video listing, comment scanning, automated replies, description optimization
 - **Reddit** — Subreddit monitoring, intent scoring, lead prospecting, automated outreach
-- **Telegram** — Real-time notifications, inline approval buttons, kill-switch commands
+- **Telegram** — Submit tasks by choosing a council, receive completed drafts, approve/retry/reject against the dashboard DB, and control the global kill switch
 - **Instagram** — Real-time webhook comment auto-replies (<5s) plus scheduled polling
 
 ### 💰 Cost-Optimized AI Routing
@@ -384,6 +384,11 @@ YOUTUBE_API_KEY=...
 REDDIT_CLIENT_ID=...
 REDDIT_CLIENT_SECRET=...
 TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=8298199732
+# Optional comma-separated operator chats/private groups (recommended in production)
+TELEGRAM_CHAT_IDS=8298199732
+TELEGRAM_ALLOWED_CHAT_IDS=8298199732
+DASHBOARD_URL=https://187.124.172.17.sslip.io
 ```
 
 ---
