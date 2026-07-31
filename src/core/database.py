@@ -140,146 +140,21 @@ async def init_db():
             await conn.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
 
-    # Seed initial sample tasks if database is empty
+    # Remove legacy demo/sample tasks that were previously auto-seeded into
+    # production. These were placeholder rows (fake models, fake proposals)
+    # that showed up mixed with real client data and must never reappear.
+    legacy_demo_ids = [
+        "task-sales-01", "task-support-01", "task-content-01",
+        "task-content-02", "task-grant-01", "task-strategy-01",
+    ]
     async with async_session() as session:
-        from sqlalchemy import select, func
-        count_res = await session.execute(select(func.count(TaskModel.task_id)))
-        if count_res.scalar() == 0:
-            await _seed_mock_data(session)
+        from sqlalchemy import delete
+        await session.execute(delete(TaskModel).where(TaskModel.task_id.in_(legacy_demo_ids)))
+        await session.commit()
 
     print("[Database] Tables initialized.")
 
 
-async def _seed_mock_data(session):
-    """Seeds rich sample tasks for demonstration if the database is brand new."""
-    now = datetime.now(timezone.utc)
-    sample_tasks = [
-        TaskModel(
-            task_id="task-sales-01",
-            council="sales",
-            status="awaiting_approval",
-            task_description="High-Intent Lead Prospecting on r/SaaS: 'Looking for an AI platform to automate support tickets'",
-            final_output="Hey @dev_founder_99! For automating support ticket triage and multi-channel responses, AI Council OS is built specifically for this. It runs a 3-stage consensus debate (Generator -> Critic -> Synthesizer) before proposing a response to your team's dashboard for 1-click approval. Happy to share a quick live demo!",
-            confidence_score=94.5,
-            iterations=2,
-            total_cost_usd=0.0412,
-            context={
-                "subreddit": "SaaS",
-                "author": "dev_founder_99",
-                "intent_score": 0.94,
-                "workflow": "reddit_prospector",
-                "title": "Looking for an AI platform to automate support tickets"
-            },
-            debate_history=[
-                {"role": "generator", "model": "GPT-4o", "content": "Drafted initial outreach focusing on features and price.", "timestamp": now.isoformat()},
-                {"role": "critic", "model": "Claude 3.5 Sonnet", "content": "Critique: Response sounds slightly overly salesy. Recommend emphasizing human-in-the-loop safety and 1-click approval.", "confidence_score": 0.94, "timestamp": now.isoformat()},
-                {"role": "synthesizer", "model": "GPT-4o", "content": "Synthesized balanced, helpful reply addressing the founder's exact pain point with zero fluff.", "timestamp": now.isoformat()}
-            ],
-            created_at=now,
-        ),
-        TaskModel(
-            task_id="task-support-01",
-            council="support",
-            status="awaiting_approval",
-            task_description="YouTube Comment Reply: 'Can this integration handle webhooks and real-time alerts on Telegram?'",
-            final_output="Great question! Yes — the system includes a built-in Telegram notifier that sends real-time approval alerts whenever a new task is generated or approved, as well as instant kill-switch notifications. You can also hook custom webhooks into the FastAPI endpoints!",
-            confidence_score=91.0,
-            iterations=1,
-            total_cost_usd=0.0185,
-            context={
-                "video_title": "Building Autonomous AI Councils in Python",
-                "video_id": "v_781920",
-                "comment_id": "c_99812",
-                "original_comment": "Can this integration handle webhooks and real-time alerts on Telegram?",
-                "workflow": "youtube_comments"
-            },
-            debate_history=[
-                {"role": "generator", "model": "GPT-4o", "content": "Generated reply confirming Telegram notification capabilities.", "timestamp": now.isoformat()},
-                {"role": "critic", "model": "Claude 3.5 Sonnet", "content": "Approved. Technical accuracy verified against architecture specs.", "confidence_score": 0.91, "timestamp": now.isoformat()}
-            ],
-            created_at=now,
-        ),
-        TaskModel(
-            task_id="task-content-01",
-            council="content",
-            status="awaiting_approval",
-            task_description="Bulk Description Update for Video: 'Mastering LangGraph Multi-Agent Workflows'",
-            final_output="In this video, we deep dive into building production-ready multi-agent architectures using LangGraph and FastAPI.\n\n--- KEY TIMESTAMPS ---\n0:00 Introduction & Architecture Overview\n3:45 Setting up the Generator-Critic Loop\n8:20 Human-in-the-Loop Dashboard Integration\n14:10 Live Deployment on Hostinger VPS\n\n--- RESOURCES & LINKS ---\n🌐 Website: https://council-os.dev\n📄 Documentation: https://docs.council-os.dev\n💬 Discord Community: https://discord.gg/council-os",
-            confidence_score=88.0,
-            iterations=2,
-            total_cost_usd=0.0350,
-            context={
-                "video_title": "Mastering LangGraph Multi-Agent Workflows",
-                "video_id": "v_102938",
-                "workflow": "youtube_descriptions"
-            },
-            debate_history=[
-                {"role": "generator", "model": "GPT-4o", "content": "Preserved opening paragraph and updated standard links section.", "timestamp": now.isoformat()},
-                {"role": "critic", "model": "Claude 3.5 Sonnet", "content": "Verified timestamps match audio outline.", "confidence_score": 0.88, "timestamp": now.isoformat()}
-            ],
-            created_at=now,
-        ),
-        TaskModel(
-            task_id="task-content-02",
-            council="content",
-            status="awaiting_approval",
-            task_description="Multi-Platform Variant Generation: 'AI Council OS Announcement Video'",
-            final_output="🚀 Excited to announce AI Council OS — the first multi-agent AI operating system built for teams that demand human oversight.\n\nWhy traditional AI automations fail: They operate blindly without validation.\n\nHow AI Council OS fixes this:\n1️⃣ Generator agent drafts the response\n2️⃣ Critic agent validates facts & tone\n3️⃣ Synthesizer produces final output\n4️⃣ Human approves via 1-click Dashboard\n\nFull open-source repo & walkthrough available now!",
-            confidence_score=96.0,
-            iterations=3,
-            total_cost_usd=0.0620,
-            context={
-                "platform": "linkedin",
-                "platform_name": "LinkedIn",
-                "workflow": "content_engine"
-            },
-            debate_history=[
-                {"role": "generator", "model": "GPT-4o", "content": "Drafted initial post for LinkedIn audience.", "timestamp": now.isoformat()},
-                {"role": "critic", "model": "Claude 3.5 Sonnet", "content": "Format optimized with line breaks and emoji bullet points.", "confidence_score": 0.96, "timestamp": now.isoformat()}
-            ],
-            created_at=now,
-        ),
-        TaskModel(
-            task_id="task-grant-01",
-            council="grant",
-            status="approved",
-            task_description="Draft Executive Summary for $50k Web3 Ecosystem Infrastructure Grant",
-            final_output="Executive Summary: AI Council OS proposes an open-source decentralized agent orchestrator enabling reliable multi-LLM debate loops. Funding will cover core SDK development, pgvector memory persistence, and standardized API integrations.",
-            confidence_score=92.0,
-            iterations=2,
-            total_cost_usd=0.0780,
-            context={
-                "grant_body": "Web3 Foundation",
-                "amount": "$50,000"
-            },
-            debate_history=[
-                {"role": "generator", "model": "GPT-4o", "content": "Drafted grant proposal alignment with Web3 roadmap.", "timestamp": now.isoformat()},
-                {"role": "critic", "model": "Claude 3.5 Sonnet", "content": "Strengthened technical deliverable metrics.", "confidence_score": 0.92, "timestamp": now.isoformat()}
-            ],
-            created_at=now,
-        ),
-        TaskModel(
-            task_id="task-strategy-01",
-            council="strategy",
-            status="approved",
-            task_description="Q3 Competitive Positioning Analysis: AI Agents vs Single-Prompt Automation",
-            final_output="Strategic Insight: Position AI Council OS as 'The Trust Engine for Enterprise AI'. While single-prompt tools have a 35% hallucination rate in production, multi-agent debate reduces errors below 3% while keeping human approval mandatory.",
-            confidence_score=89.5,
-            iterations=2,
-            total_cost_usd=0.0540,
-            context={
-                "market_segment": "Enterprise SaaS Automation"
-            },
-            debate_history=[
-                {"role": "generator", "model": "GPT-4o", "content": "Analyzed market positioning against single-prompt automation.", "timestamp": now.isoformat()},
-                {"role": "critic", "model": "Claude 3.5 Sonnet", "content": "Validated enterprise error reduction stats.", "confidence_score": 0.895, "timestamp": now.isoformat()}
-            ],
-            created_at=now,
-        )
-    ]
-    session.add_all(sample_tasks)
-    await session.commit()
-    print("[Database] Seeded 6 initial sample tasks for demonstration.")
 
 
 # ── CRUD Operations ──────────────────────────────────────────────────────
