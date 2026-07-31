@@ -475,6 +475,24 @@ async def api_get_stats():
 
 # ── Workflow Trigger Endpoints ───────────────────────────────────────────
 
+async def _sync_new_tasks_to_db():
+    """
+    Persist any workflow-created tasks that only exist in the in-memory
+    tasks_store into the database, so they survive a server restart.
+
+    Workflows (Reddit Prospector, YouTube, Content Engine) write directly
+    to tasks_store for immediate dashboard visibility; this bridges that
+    into permanent storage.
+    """
+    for task_id, task_data in list(tasks_store.items()):
+        try:
+            existing = await get_task(task_id)
+            if existing is None:
+                await create_task(task_data)
+        except Exception as e:
+            print(f"[Sync] Failed to sync task {task_id} to DB: {e}")
+
+
 @app.post("/api/workflows/reddit-prospector")
 async def trigger_reddit_prospector():
     """Manually trigger the Reddit Lead Prospector."""
