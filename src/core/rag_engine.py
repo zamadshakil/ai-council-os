@@ -55,13 +55,6 @@ def get_table():
     db = _get_lance_db()
     table_name = "knowledge_base"
 
-    try:
-        _lance_table = db.open_table(table_name)
-        return _lance_table
-    except Exception:
-        pass
-
-    # Create with initial dummy record to establish schema
     import pyarrow as pa
     schema = pa.schema([
         pa.field("id", pa.string()),
@@ -72,6 +65,16 @@ def get_table():
         pa.field("doc_name", pa.string()),
         pa.field("chunk_index", pa.int32()),
     ])
+
+    try:
+        table = db.open_table(table_name)
+        vec_field = table.schema.field("vector")
+        if getattr(vec_field.type, 'list_size', None) == EMBEDDING_DIM:
+            _lance_table = table
+            return _lance_table
+    except Exception:
+        pass
+
     _lance_table = db.create_table(table_name, schema=schema, mode="overwrite")
     return _lance_table
 
