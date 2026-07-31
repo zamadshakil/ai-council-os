@@ -3,8 +3,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { fetchTask, approveTask } from '../../lib/api';
-import { ArrowLeft, Check, X, Clock, Target, DollarSign, RotateCcw, Loader2, Sparkles } from 'lucide-react';
+import { fetchTask, approveTask, getTaskDocxExportUrl } from '../../lib/api';
+import { ArrowLeft, Check, X, Clock, Target, DollarSign, RotateCcw, Loader2, Sparkles, FileDown } from 'lucide-react';
 import { DebateTrace } from '../../components/debate-trace';
 import { Task } from '../../lib/types';
 import { formatDistanceToNow } from 'date-fns';
@@ -166,22 +166,31 @@ export function TaskDetailContent({ id }: { id: string }) {
                 <Check className="w-5 h-5 mr-2 text-zinc-400" /> Final Output
               </h3>
               {task.final_output && (
-                <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(task.final_output);
-                    setCopied(true);
-                    showToast('Copied to Clipboard!', 'Final output copied to clipboard.');
-                    setTimeout(() => setCopied(false), 2500);
-                  }}
-                  className={`px-3.5 py-1.5 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer ${
-                    copied
-                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                      : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700'
-                  }`}
-                >
-                  <Check className={`w-3.5 h-3.5 ${copied ? 'text-emerald-600' : 'text-zinc-500'}`} />
-                  <span>{copied ? 'Copied!' : 'Copy Output'}</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={getTaskDocxExportUrl(task.task_id)}
+                    className="px-3.5 py-1.5 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    <span>Download DOCX</span>
+                  </a>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(task.final_output);
+                      setCopied(true);
+                      showToast('Copied to Clipboard!', 'Final output copied to clipboard.');
+                      setTimeout(() => setCopied(false), 2500);
+                    }}
+                    className={`px-3.5 py-1.5 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer ${
+                      copied
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700'
+                    }`}
+                  >
+                    <Check className={`w-3.5 h-3.5 ${copied ? 'text-emerald-600' : 'text-zinc-500'}`} />
+                    <span>{copied ? 'Copied!' : 'Copy Output'}</span>
+                  </button>
+                </div>
               )}
             </div>
 

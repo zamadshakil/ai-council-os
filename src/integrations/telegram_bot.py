@@ -149,6 +149,7 @@ async def send_draft_for_approval(
     context_summary: str = "",
     confidence: float = 0.0,
     destination_chat_id: int | None = None,
+    council: str = "",
 ):
     """Send a persisted task draft with DB-backed approval actions."""
     if not TOKEN:
@@ -177,6 +178,24 @@ async def send_draft_for_approval(
 
     recipients = {destination_chat_id} if destination_chat_id else DESTINATION_CHAT_IDS
     bot = _get_bot()
+
+    docx_bytes = None
+    docx_filename = None
+    if council.lower() == "grant":
+        try:
+            from src.integrations.docx_export import build_task_docx, build_task_docx_filename
+            task_snapshot = {
+                "task_id": task_id,
+                "council": council,
+                "task_description": context_summary,
+                "final_output": draft_text,
+                "confidence_score": confidence,
+            }
+            docx_bytes = build_task_docx(task_snapshot)
+            docx_filename = build_task_docx_filename(task_snapshot)
+        except Exception as exc:
+            print(f"[Telegram] DOCX generation failed for {task_id}: {exc}")
+
     for chat_id in recipients:
         if chat_id is None:
             continue
@@ -187,6 +206,14 @@ async def send_draft_for_approval(
                 parse_mode=ParseMode.HTML,
                 reply_markup=keyboard,
             )
+            if docx_bytes and docx_filename:
+                from io import BytesIO
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=BytesIO(docx_bytes),
+                    filename=docx_filename,
+                    caption=f"📄 Proposal document for task {task_id} — ready to review and manually submit.",
+                )
         except Exception as exc:
             print(f"[Telegram] Failed to send approval draft to {chat_id}: {exc}")
 
