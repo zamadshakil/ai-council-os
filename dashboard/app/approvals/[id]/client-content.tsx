@@ -150,17 +150,39 @@ export function TaskDetailContent({ id }: { id: string }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
+      {/* TOP SECTION: DEBATE TRACE (FULL WIDTH ON TOP) */}
+      <div className="bg-white p-8 lg:p-10 rounded-[32px] shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-zinc-200/80">
+        <div className="flex items-center justify-between mb-6 pb-4 border-b border-zinc-100">
+          <div>
+            <h2 className="text-[20px] font-bold text-[#111827] flex items-center gap-2">
+              <Sparkles className="w-5 h-5 text-blue-600" />
+              AI Council Debate Trace & Consensus History
+            </h2>
+            <p className="text-xs text-zinc-500 font-medium mt-1">
+              Real-time multi-agent debate trace showing outputs, critiques, and scores from Generator, Critic, and Synthesizer agents.
+            </p>
+          </div>
+          {isDebating && (
+            <span className="text-xs font-bold text-blue-600 bg-blue-50 border border-blue-200 px-3 py-1 rounded-full animate-pulse flex items-center gap-1.5 shadow-sm">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Live Debate Stream
+            </span>
+          )}
+        </div>
+        <DebateTrace history={task.debate_history || []} isDebating={isDebating} />
+      </div>
+
+      {/* BOTTOM SECTION: TASK OUTPUT & EXECUTION METRICS */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-2 space-y-8">
           
-          <div className="bg-white p-10 rounded-[32px] shadow-[0_8px_30px_rgb(0,0,0,0.03)] hover:shadow-[0_12px_40px_rgb(0,0,0,0.06)] transition-shadow duration-500">
+          <div className="bg-white p-8 lg:p-10 rounded-[32px] shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-zinc-200/80">
             <h3 className="text-[16px] font-bold text-[#111827] mb-4 flex items-center">
               <Target className="w-5 h-5 mr-2 text-zinc-400" /> Original Request
             </h3>
-            <p className="text-zinc-600 leading-relaxed text-[16px] p-6 bg-[#F8FAFC] rounded-[20px]">{task.task_description}</p>
+            <p className="text-zinc-600 leading-relaxed text-[15px] p-6 bg-[#F8FAFC] rounded-[20px] border border-zinc-200/60 font-medium">{task.task_description}</p>
           </div>
           
-          <div className="bg-white p-10 rounded-[32px] shadow-[0_8px_30px_rgb(0,0,0,0.03)] hover:shadow-[0_12px_40px_rgb(0,0,0,0.06)] transition-shadow duration-500">
+          <div className="bg-white p-8 lg:p-10 rounded-[32px] shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-zinc-200/80">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-[16px] font-bold text-[#111827] flex items-center">
                 <Check className="w-5 h-5 mr-2 text-zinc-400" /> Final Output
@@ -169,7 +191,7 @@ export function TaskDetailContent({ id }: { id: string }) {
                 <div className="flex items-center gap-2">
                   <a
                     href={getTaskDocxExportUrl(task.task_id)}
-                    className="px-3.5 py-1.5 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200"
+                    className="px-3.5 py-1.5 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 shadow-sm"
                   >
                     <FileDown className="w-3.5 h-3.5" />
                     <span>Download DOCX</span>
@@ -181,10 +203,10 @@ export function TaskDetailContent({ id }: { id: string }) {
                       showToast('Copied to Clipboard!', 'Final output copied to clipboard.');
                       setTimeout(() => setCopied(false), 2500);
                     }}
-                    className={`px-3.5 py-1.5 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer ${
+                    className={`px-3.5 py-1.5 font-semibold text-[13px] rounded-[10px] transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer shadow-sm ${
                       copied
                         ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                        : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700'
+                        : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700 border border-zinc-200'
                     }`}
                   >
                     <Check className={`w-3.5 h-3.5 ${copied ? 'text-emerald-600' : 'text-zinc-500'}`} />
@@ -238,26 +260,26 @@ export function TaskDetailContent({ id }: { id: string }) {
                 </div>
               </div>
             ) : (
-              <div className="prose prose-zinc max-w-none text-[15px] p-6 bg-[#F8FAFC] rounded-[20px] whitespace-pre-wrap leading-relaxed shadow-inner">
+              <div className="prose prose-zinc max-w-none text-[15px] p-6 bg-[#F8FAFC] rounded-[20px] whitespace-pre-wrap leading-relaxed border border-zinc-200/60 font-medium">
                 {task.final_output}
               </div>
             )}
           </div>
 
           {task.status === 'awaiting_approval' && (
-            <div className="bg-white p-10 rounded-[32px] shadow-[0_12px_40px_rgb(37,99,235,0.08)] ring-1 ring-[#2563EB]/10 transition-shadow duration-500">
+            <div className="bg-white p-8 lg:p-10 rounded-[32px] shadow-[0_12px_40px_rgb(37,99,235,0.08)] border border-[#2563EB]/20 transition-shadow duration-500">
               <h3 className="text-[18px] font-bold text-[#111827] mb-4">Approval Decision</h3>
               <textarea
                 value={feedback}
                 onChange={(e) => setFeedback(e.target.value)}
                 placeholder="Add feedback for the council (optional)..."
-                className="w-full text-[16px] p-6 bg-[#F8FAFC] rounded-[20px] mb-6 focus:ring-2 focus:ring-[#2563EB] focus:bg-white outline-none transition-all duration-300 resize-none min-h-[120px]"
+                className="w-full text-[15px] p-5 bg-[#F8FAFC] rounded-[20px] mb-6 focus:ring-2 focus:ring-[#2563EB] focus:bg-white outline-none transition-all duration-300 resize-none min-h-[100px] border border-zinc-200/80"
               />
               <div className="flex space-x-4">
                 <button
                   onClick={() => handleAction(false)}
                   disabled={isSubmitting}
-                  className="flex-1 flex items-center justify-center px-6 py-4 bg-zinc-100 text-zinc-600 rounded-[16px] hover:bg-zinc-200 hover:text-zinc-900 font-bold text-[15px] transition-all duration-300"
+                  className="flex-1 flex items-center justify-center px-6 py-4 bg-zinc-100 text-zinc-600 rounded-[16px] hover:bg-zinc-200 hover:text-zinc-900 font-bold text-[15px] transition-all duration-300 border border-zinc-200"
                 >
                   <X className="w-5 h-5 mr-2" /> Reject Output
                 </button>
@@ -274,22 +296,22 @@ export function TaskDetailContent({ id }: { id: string }) {
         </div>
 
         <div className="space-y-8">
-          <div className="bg-white p-8 rounded-[32px] shadow-[0_8px_30px_rgb(0,0,0,0.03)]">
+          <div className="bg-white p-8 rounded-[32px] shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-zinc-200/80">
             <h3 className="text-[16px] font-bold text-[#111827] mb-6">Execution Metrics</h3>
-            <div className="space-y-5 text-[14px]">
-              <div className="flex justify-between items-center p-4 bg-[#F8FAFC] rounded-[16px]">
+            <div className="space-y-4 text-[14px]">
+              <div className="flex justify-between items-center p-4 bg-[#F8FAFC] rounded-[16px] border border-zinc-200/60">
                 <span className="text-zinc-500 font-medium flex items-center"><Target className="w-4 h-4 mr-2" /> Council</span>
                 <span className="font-bold uppercase tracking-wide text-xs text-[#2563EB]">{task.council}</span>
               </div>
-              <div className="flex justify-between items-center p-4 bg-[#F8FAFC] rounded-[16px]">
+              <div className="flex justify-between items-center p-4 bg-[#F8FAFC] rounded-[16px] border border-zinc-200/60">
                 <span className="text-zinc-500 font-medium flex items-center"><DollarSign className="w-4 h-4 mr-2" /> Cost</span>
                 <span className="font-bold text-[#111827]">${task.total_cost_usd.toFixed(4)}</span>
               </div>
-              <div className="flex justify-between items-center p-4 bg-[#F8FAFC] rounded-[16px]">
+              <div className="flex justify-between items-center p-4 bg-[#F8FAFC] rounded-[16px] border border-zinc-200/60">
                 <span className="text-zinc-500 font-medium flex items-center"><RotateCcw className="w-4 h-4 mr-2" /> Iterations</span>
                 <span className="font-bold text-[#111827]">{task.iterations}</span>
               </div>
-              <div className="flex justify-between items-center p-4 bg-[#F8FAFC] rounded-[16px]">
+              <div className="flex justify-between items-center p-4 bg-[#F8FAFC] rounded-[16px] border border-zinc-200/60">
                 <span className="text-zinc-500 font-medium flex items-center"><Clock className="w-4 h-4 mr-2" /> Confidence</span>
                 <span className={`font-bold ${confidenceColor}`}>{task.confidence_score.toFixed(1)}%</span>
               </div>
@@ -297,18 +319,6 @@ export function TaskDetailContent({ id }: { id: string }) {
                  <span className="text-[12px] font-semibold text-zinc-400">Created {formatDistanceToNow(parseTaskDate(task.created_at))} ago</span>
               </div>
             </div>
-          </div>
-
-          <div className="bg-white p-8 rounded-[32px] shadow-[0_8px_30px_rgb(0,0,0,0.03)]">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-[16px] font-bold text-[#111827]">Debate Trace</h3>
-              {isDebating && (
-                <span className="text-[11px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full animate-pulse flex items-center gap-1">
-                  <Loader2 className="w-3 h-3 animate-spin" /> Live
-                </span>
-              )}
-            </div>
-            <DebateTrace history={task.debate_history || []} isDebating={isDebating} />
           </div>
         </div>
       </div>

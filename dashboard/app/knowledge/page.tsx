@@ -31,6 +31,7 @@ export default function KnowledgeHubPage() {
   const [isSearching, setIsSearching] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const loadDocuments = async () => {
     try {
@@ -83,16 +84,25 @@ export default function KnowledgeHubPage() {
     formData.append('file', file);
 
     try {
+      setUploadError(null);
       const res = await fetch(`${API_BASE}/api/knowledge/upload`, {
         method: 'POST',
         body: formData,
       });
       if (res.ok) {
-        setUploadProgress(100);
-        await loadDocuments();
+        const data = await res.json();
+        if (data.status === 'error' || data.error) {
+           setUploadError(data.error || 'Failed to parse document. Check if python-docx/PyMuPDF are installed.');
+        } else {
+           setUploadProgress(100);
+           await loadDocuments();
+        }
+      } else {
+        setUploadError(`Server returned ${res.status}: Upload failed`);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Upload failed:', err);
+      setUploadError(err.message || 'Network error during upload.');
     } finally {
       clearInterval(interval);
       setTimeout(() => {
@@ -177,7 +187,13 @@ export default function KnowledgeHubPage() {
                 <Upload className="w-5 h-5 text-indigo-500" /> Upload Document
               </h2>
               
-              <div 
+              {uploadError && (
+                <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg text-sm font-medium">
+                  {uploadError}
+                </div>
+              )}
+              
+              <div  
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={onDrop}
                 className={`relative border-2 border-dashed rounded-xl p-8 text-center transition-all duration-200 ${
