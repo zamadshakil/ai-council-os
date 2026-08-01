@@ -45,13 +45,17 @@ class ContentCouncil(BaseCouncil):
             spec_info = get_platform_prompt(target_platform)
             system_prompt = (
                 "You are the Content Generator — a master copywriter and social media strategist.\n\n"
-                "Your job is to generate top-tier, highly engaging social media content for a SPECIFIC platform.\n\n"
+                "Your job is to write top-tier, highly engaging social media content for a SPECIFIC platform, "
+                "based on the TASK below. The task may be a direct instruction (e.g. \"announce X\", "
+                "\"write a post about Y\") that already contains everything you need — in that case, just write "
+                "the post directly. Only ask for more information if the task is genuinely too vague to act on "
+                "at all (e.g. it names no topic, product, or subject whatsoever).\n\n"
                 f"PLATFORM SPECIFICATION:\n{spec_info}\n\n"
                 "RULES:\n"
                 "- Write directly in the platform's native tone.\n"
                 "- Stop the scroll with a strong opening line / hook.\n"
                 "- Keep formatting clean with proper spacing.\n"
-                "- Output ONLY the final ready-to-post copy."
+                "- Output ONLY the final ready-to-post copy — never a request for more information unless the task truly names no subject."
             )
         else:
             # Generate all 6 platform variants
@@ -60,8 +64,11 @@ class ContentCouncil(BaseCouncil):
                 for key, spec in PLATFORM_SPECS.items()
             )
             system_prompt = (
-                "You are the Content Generator — a multi-platform content repurposing specialist.\n\n"
-                "Your job is to transform source material into 6 distinct, platform-optimized posts:\n"
+                "You are the Content Generator — a multi-platform content specialist.\n\n"
+                "Your job is to turn the TASK below into 6 distinct, platform-optimized posts. The task may be "
+                "a transcript/article to repurpose, OR a direct instruction (e.g. \"announce X\") that already "
+                "contains everything you need — in that case, just write the posts directly. Only ask for more "
+                "information if the task truly names no topic, product, or subject at all:\n"
                 "1. X (Twitter) (key: twitter)\n"
                 "2. LinkedIn (key: linkedin)\n"
                 "3. Facebook (key: facebook)\n"
@@ -73,13 +80,13 @@ class ContentCouncil(BaseCouncil):
                 "- Each post MUST be tailored specifically to that platform's culture and constraints.\n"
                 "- Do NOT duplicate the exact same text across platforms.\n"
                 "- Output MUST be valid JSON with keys: twitter, linkedin, facebook, instagram, reddit, discord.\n"
-                "- Each key's value should be the complete post text as a string."
+                "- Each key's value should be the complete post text as a string, never a request for more information unless the task truly names no subject."
             )
 
-        user_content = f"SOURCE MATERIAL / TASK:\n{task}\n\n"
+        user_content = f"TASK:\n{task}\n\n"
 
         if context:
-            context_str = "\n".join(f"- {k}: {v}" for k, v in context.items() if k != "platform")
+            context_str = "\n".join(f"- {k}: {v}" for k, v in context.items() if k not in ("platform", "selected_docs"))
             if context_str:
                 user_content += f"ADDITIONAL CONTEXT:\n{context_str}\n\n"
 

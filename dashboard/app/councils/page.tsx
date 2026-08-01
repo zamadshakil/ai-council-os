@@ -1,9 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { runCouncil } from '../lib/api';
-import { Target, Users, BookOpen, Lightbulb, Paperclip, Send, Sparkles } from 'lucide-react';
+import { runCouncil, fetchKnowledgeDocuments, KnowledgeDoc } from '../lib/api';
+import { Target, Users, BookOpen, Lightbulb, Paperclip, Send, Sparkles, FileText, Check } from 'lucide-react';
 
 const COUNCILS = [
   { id: 'sales', name: 'Sales Council', icon: Target, desc: 'Personalized B2B outreach and lead qualification.', process: 'Generate → Critique → Synthesize (min. 2 debate rounds)', recommended: true },
@@ -24,6 +24,18 @@ export default function CouncilsPage() {
   const [taskDesc, setTaskDesc] = useState('');
   const [priority, setPriority] = useState('medium');
   const [loading, setLoading] = useState(false);
+  const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
+  const [selectedDocs, setSelectedDocs] = useState<string[]>([]);
+
+  useEffect(() => {
+    fetchKnowledgeDocuments().then(setDocs).catch(() => {});
+  }, []);
+
+  const toggleDoc = (hash: string) => {
+    setSelectedDocs((prev) =>
+      prev.includes(hash) ? prev.filter((h) => h !== hash) : [...prev, hash]
+    );
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,7 +44,10 @@ export default function CouncilsPage() {
       const res = await runCouncil({
         council: selected,
         task_description: taskDesc,
-        context: { priority }
+        context: {
+          priority,
+          ...(selectedDocs.length > 0 ? { selected_docs: selectedDocs } : {}),
+        },
       });
       if (res && res.task_id) {
         router.push(`/approvals/${res.task_id}`);
@@ -124,6 +139,47 @@ export default function CouncilsPage() {
               </button>
             </div>
           </div>
+
+          {docs.length > 0 && (
+            <div className="bg-white p-5 rounded-[20px] border border-zinc-200 shadow-sm flex flex-col gap-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-[14px] font-bold text-zinc-900 flex items-center gap-2">
+                  <FileText className="w-4 h-4 text-zinc-400" /> Knowledge Base Documents
+                </h3>
+                <span className="text-[12px] font-semibold text-zinc-400">
+                  {selectedDocs.length === 0 ? 'Searching all documents' : `${selectedDocs.length} selected`}
+                </span>
+              </div>
+              <p className="text-[13px] text-zinc-500 -mt-1">
+                Leave nothing selected to search your entire knowledge base, or pick specific documents to keep this task focused as your library grows.
+              </p>
+              <div className="flex flex-col gap-1.5 max-h-[180px] overflow-y-auto">
+                {docs.map((doc) => {
+                  const isChecked = selectedDocs.includes(doc.doc_hash);
+                  return (
+                    <button
+                      key={doc.doc_hash}
+                      type="button"
+                      onClick={() => toggleDoc(doc.doc_hash)}
+                      className={`flex items-center gap-3 px-3 py-2 rounded-[10px] border text-left transition-all ${
+                        isChecked
+                          ? 'bg-blue-50 border-blue-200 text-blue-800'
+                          : 'bg-zinc-50 border-zinc-100 text-zinc-600 hover:border-zinc-200'
+                      }`}
+                    >
+                      <span className={`w-4 h-4 rounded-[5px] border flex items-center justify-center shrink-0 ${isChecked ? 'bg-blue-600 border-blue-600' : 'bg-white border-zinc-300'}`}>
+                        {isChecked && <Check className="w-3 h-3 text-white" />}
+                      </span>
+                      <span className="text-[13px] font-medium truncate">{doc.filename}</span>
+                      {typeof doc.chunk_count === 'number' && (
+                        <span className="text-[11px] text-zinc-400 ml-auto shrink-0">{doc.chunk_count} chunks</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-2 px-1">
             <span className="text-[13px] font-semibold text-zinc-500 py-1 mr-2">Suggestions:</span>

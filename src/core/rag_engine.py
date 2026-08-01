@@ -372,14 +372,22 @@ async def delete_document(doc_hash: str) -> bool:
 
 # ── Context Injection Helper ───────────────────────────────────────────────
 
-async def get_rag_context(task_description: str, top_k: int = 3) -> str:
+async def get_rag_context(
+    task_description: str,
+    top_k: int = 3,
+    doc_hashes: Optional[list[str]] = None,
+) -> str:
     """
     Retrieve top-k relevant knowledge chunks for a council task.
     Returns a formatted string ready to inject into LLM prompts.
     Returns empty string if no knowledge base or no results.
+
+    If doc_hashes is provided, search is restricted to only those documents
+    instead of the entire knowledge base — lets a specific task/council run
+    target only the relevant docs as the knowledge base grows.
     """
     try:
-        results = await search_knowledge_base(task_description, top_k=top_k)
+        results = await search_knowledge_base(task_description, top_k=top_k, doc_hashes=doc_hashes)
         if not results:
             return ""
         parts = [

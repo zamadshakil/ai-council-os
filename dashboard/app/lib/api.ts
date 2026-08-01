@@ -140,3 +140,16 @@ export async function fetchIntegrationsStatus(): Promise<{
 export function getTaskDocxExportUrl(taskId: string): string {
   return `${API_BASE}/api/tasks/${taskId}/export/docx`;
 }
+
+// ── Knowledge Base ─────────────────
+export interface KnowledgeDoc {
+  doc_hash: string;
+  filename: string;
+  chunk_count?: number;
+  ingested_at?: string;
+}
+
+export async function fetchKnowledgeDocuments(): Promise<KnowledgeDoc[]> {
+  const data = await apiFetch(`${API_BASE}/api/knowledge/documents`);
+  return data.documents || [];
+}

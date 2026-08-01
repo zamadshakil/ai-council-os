@@ -112,10 +112,14 @@ class BaseCouncil(ABC):
         rag_ctx = ""
         memory_ctx = ""
         task = state.get("task_description", "")
+        # Optional per-task doc selection (context.selected_docs), so as the
+        # knowledge base grows a task can target specific documents instead
+        # of searching everything uploaded.
+        selected_docs = (state.get("context", {}) or {}).get("selected_docs") or None
 
         try:
             from src.core.rag_engine import get_rag_context
-            rag_ctx = await get_rag_context(task, top_k=3)
+            rag_ctx = await get_rag_context(task, top_k=3, doc_hashes=selected_docs)
             if rag_ctx:
                 print(f"[RAG] Injecting {len(rag_ctx)} chars into {self.council_name} council.")
         except Exception as e:
@@ -135,10 +139,29 @@ class BaseCouncil(ABC):
             "memory_context": memory_ctx,
         }
 
+    def _inject_knowledge_context(self, messages: list[dict], state: dict) -> list[dict]:
+        """
+        Append the retrieved knowledge-base and memory context (fetched once by
+        _retrieve_context) as an additional system message, so every council
+        actually uses uploaded documents instead of silently discarding them.
+        """
+        rag_context = state.get("rag_context", "")
+        memory_context = state.get("memory_context", "")
+        if not rag_context and not memory_context:
+            return messages
+
+        extra = "You have access to the following retrieved context. Use it when relevant; ignore it if it doesn't apply to this task.\n"
+        if rag_context:
+            extra += f"\nKNOWLEDGE BASE CONTEXT:\n{rag_context}\n"
+        if memory_context:
+            extra += f"\nLEARNED PREFERENCES / PAST FEEDBACK:\n{memory_context}\n"
+
+        return messages + [{"role": "system", "content": extra}]
+
     async def _generate(self, state: dict) -> dict:
         """Generator agent: creates or refines the draft."""
         priority = state.get("priority", "medium")
-        messages = self.get_generator_prompt(state)
+        messages = self._inject_knowledge_context(self.get_generator_prompt(state), state)
 
         result = await call_llm(
             messages=messages,
@@ -202,7 +225,7 @@ class BaseCouncil(ABC):
     async def _synthesize(self, state: dict) -> dict:
         """Synthesizer agent: merges generator draft + critic feedback into final version."""
         priority = state.get("priority", "medium")
-        messages = self.get_synthesizer_prompt(state)
+        messages = self._inject_knowledge_context(self.get_synthesizer_prompt(state), state)
 
         result = await call_llm(
             messages=messages,
