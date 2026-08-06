@@ -55,19 +55,25 @@ async def execute_graphql(query_or_mutation: str, variables: Optional[dict] = No
 
 async def start_pod(pod_id: str, api_key: Optional[str] = None) -> dict:
     """
-    Start a stopped/paused RunPod instance.
-    GraphQL mutation: podStart(input: {podId: "..."})
+    Start/Resume a stopped or paused RunPod instance.
+    GraphQL mutation: podResume(input: {podId: "...", gpuCount: 1})
     """
     mutation = """
-    mutation StartPod($podId: String!) {
-        podStart(input: {podId: $podId}) {
+    mutation ResumePod($input: PodRentInterruptableInput!) {
+        podResume(input: $input) {
             id
             desiredStatus
         }
     }
     """
-    res = await execute_graphql(mutation, variables={"podId": pod_id}, api_key=api_key)
-    return res.get("podStart", {})
+    try:
+        res = await execute_graphql(mutation, variables={"input": {"podId": pod_id, "gpuCount": 1}}, api_key=api_key)
+        return res.get("podResume", {}) or {}
+    except Exception as e:
+        # Fallback if input structure differs
+        query_simple = f'mutation {{ podResume(input: {{ podId: "{pod_id}", gpuCount: 1 }}) {{ id desiredStatus }} }}'
+        res = await execute_graphql(query_simple, api_key=api_key)
+        return res.get("podResume", {}) or {}
 
 
 async def stop_pod(pod_id: str, api_key: Optional[str] = None) -> dict:

@@ -39,13 +39,20 @@ export default function RenderStudioPage() {
     loadPods();
   }, []);
 
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const handleStartPod = async (podId: string) => {
     setPodActionId(podId);
+    setActionError(null);
     try {
-      await fetch(`/api/runpod/pods/${podId}/start`, { method: 'POST' });
+      const res = await fetch(`/api/runpod/pods/${podId}/start`, { method: 'POST' });
+      const data = await res.json();
+      if (data.status === 'error' || data.detail) {
+        setActionError(data.error || data.detail || 'Could not resume pod.');
+      }
       await loadPods();
-    } catch (e) {
-      console.error('Failed to start pod:', e);
+    } catch (e: any) {
+      setActionError(e.message || 'Failed to start pod.');
     } finally {
       setPodActionId(null);
     }
@@ -53,11 +60,16 @@ export default function RenderStudioPage() {
 
   const handleStopPod = async (podId: string) => {
     setPodActionId(podId);
+    setActionError(null);
     try {
-      await fetch(`/api/runpod/pods/${podId}/stop`, { method: 'POST' });
+      const res = await fetch(`/api/runpod/pods/${podId}/stop`, { method: 'POST' });
+      const data = await res.json();
+      if (data.status === 'error' || data.detail) {
+        setActionError(data.error || data.detail || 'Could not stop pod.');
+      }
       await loadPods();
-    } catch (e) {
-      console.error('Failed to stop pod:', e);
+    } catch (e: any) {
+      setActionError(e.message || 'Failed to stop pod.');
     } finally {
       setPodActionId(null);
     }
@@ -139,6 +151,16 @@ export default function RenderStudioPage() {
             GPU Cost Guard Active
           </div>
         </div>
+
+        {actionError && (
+          <div className="p-3.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs flex items-center justify-between gap-2 animate-in fade-in">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span><strong>RunPod Notice:</strong> {actionError}</span>
+            </div>
+            <button onClick={() => setActionError(null)} className="text-amber-600 hover:text-amber-900 font-bold text-xs">✕</button>
+          </div>
+        )}
 
         {loadingPods ? (
           <div className="p-8 text-center text-zinc-400 text-xs flex items-center justify-center gap-2">
