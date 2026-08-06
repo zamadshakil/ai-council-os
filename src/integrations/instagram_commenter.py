@@ -363,8 +363,9 @@ async def handle_instant_webhook_comment(comment_id: str, comment_text: str, use
     if not comment_id or not comment_text:
         return {"status": "ignored", "reason": "empty comment or id"}
 
+    from src.core.kill_switch import is_killed
     if is_killed():
-        print(f"🛑 [Instagram Webhook] Kill switch is active. Ignoring comment {comment_id}.")
+        print("🛑 [Instagram Webhook] Kill switch active. Skipping reply.")
         return {"status": "killed", "reason": "kill_switch_active"}
 
     if _is_already_replied(comment_id):

@@ -52,8 +52,24 @@ async def startup_event():
 
     # Load existing tasks from DB into memory cache
     existing = await db_list_tasks()
+    ABANDONED_STATUSES = {"pending", "generating", "critiquing", "refining"}
     for t in existing:
-        tasks_store[t["task_id"]] = t
+        if t.get("status") in ABANDONED_STATUSES:
+            # A server restart kills any in-flight debate loop mid-execution.
+            # Without this, the task sits forever showing "AI agents debating"
+            # even though nothing is actually running anymore.
+            fixed = {
+                **t,
+                "status": "failed",
+                "error": "Task was abandoned by a server restart before it finished. Use Retry to resubmit.",
+            }
+            try:
+                await update_task(t["task_id"], {"status": fixed["status"], "error": fixed["error"]})
+            except Exception as cleanup_err:
+                print(f"[Startup Cleanup] Failed to mark {t['task_id']} as failed: {cleanup_err}")
+            tasks_store[t["task_id"]] = fixed
+        else:
+            tasks_store[t["task_id"]] = t
 
     set_tasks_store(tasks_store)
     start_scheduler()
@@ -614,12 +630,13 @@ async def receive_instagram_webhook(request: Request):
         body = await request.json()
         print(f"[Instagram Webhook Payload Received]: {body}")
 
-        from src.integrations.instagram_commenter import handle_instant_webhook_comment
+        # Kill switch check — must be respected by ALL workflows including webhooks
         from src.core.kill_switch import is_killed
-
         if is_killed():
-            print("🛑 [Instagram Webhook] Kill switch is active. Ignoring incoming webhook event.")
-            return {"status": "killed", "message": "Kill switch active, event ignored"}
+            print("🛑 [Instagram Webhook] Kill switch active. Ignoring incoming comment.")
+            return {"status": "killed", "message": "Kill switch active — comment ignored"}
+
+        from src.integrations.instagram_commenter import handle_instant_webhook_comment
 
         # Parse Meta webhook entries
         entries = body.get("entry", [])

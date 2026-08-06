@@ -70,6 +70,7 @@ MODEL_PRICING = {
         for tier in MODEL_TIERS.values()
     },
     EMERGENCY_FREE_MODEL: (0.0, 0.0),
+    "openrouter/free": (0.0, 0.0),
 }
 
 # Fallbacks only move laterally or downward in cost/quality; a cheap or fast
@@ -178,10 +179,11 @@ async def call_llm(
     if primary_model not in MODEL_PRICING:
         raise ValueError("Model override is not in the approved cost-controlled model list.")
 
-    candidate_models = list(dict.fromkeys([
-        primary_model,
-        *TIER_FALLBACKS[model_tier.name],
-    ]))
+    # Fallback queue uses ONLY free models — no paid models allowed.
+    # This ensures zero unexpected API costs even under heavy load.
+    candidate_models = [primary_model]
+    if primary_model != "openrouter/free":
+        candidate_models.append("openrouter/free")
 
     if time.monotonic() < _key_limit_exhausted_until:
         # Known-exhausted right now: go straight to the guaranteed-free model.

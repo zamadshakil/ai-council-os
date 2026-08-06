@@ -14,7 +14,7 @@ const TABS = [
 ];
 
 export default function ApprovalsPage() {
-  const [filter, setFilter] = useState('awaiting_approval');
+  const [filter, setFilter] = useState('all');
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
 

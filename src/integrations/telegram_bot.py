@@ -66,6 +66,8 @@ _app: Optional[Application] = None
 
 # Chat -> selected council/context while waiting for the operator's task text.
 _pending_task: dict[int, dict] = {}
+# Chat -> in-progress knowledge base document picker state.
+_doc_picker_state: dict[int, dict] = {}
 # Prevent duplicate callback execution during one process lifetime.
 _handled_callbacks: set[str] = set()
 
@@ -81,6 +83,58 @@ def _get_bot() -> Bot:
     if _bot is None:
         _bot = Bot(token=TOKEN)
     return _bot
+
+
+def _build_doc_picker_keyboard(available_docs: list[dict], selected: set[int]) -> InlineKeyboardMarkup:
+    rows = []
+    for idx, doc in enumerate(available_docs):
+        checked = "☑️" if idx in selected else "⬜"
+        label = doc["filename"][:40]
+        rows.append([InlineKeyboardButton(f"{checked} {label}", callback_data=f"docsel:{idx}")])
+    rows.append([
+        InlineKeyboardButton("📚 Use All Documents", callback_data="docsel_all"),
+        InlineKeyboardButton("✅ Continue", callback_data="docsel_done"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _start_task_entry(chat_id: int, council: str, base_context: dict, edit_message=None):
+    """
+    After a council (and platform, for Content) is chosen, offer to scope the
+    task to specific knowledge base documents before asking for the task text.
+    Falls straight through to the text prompt if the knowledge base is empty.
+    """
+    try:
+        from src.core.rag_engine import get_all_documents
+        available_docs = await get_all_documents()
+    except Exception as exc:
+        print(f"[Telegram] Could not list knowledge base documents: {exc}")
+        available_docs = []
+
+    if not available_docs:
+        _pending_task[chat_id] = {"council": council, "context": base_context}
+        text = (
+            f"📝 <b>{html.escape(COUNCIL_LABELS.get(council, council.title()))} selected</b>\n\n"
+            "Now send the complete task as your next Telegram message.\n\nUse /cancel to stop."
+        )
+        if edit_message:
+            await edit_message(text, parse_mode=ParseMode.HTML)
+        return
+
+    _doc_picker_state[chat_id] = {
+        "council": council,
+        "context": base_context,
+        "available_docs": available_docs,
+        "selected": set(),
+    }
+    text = (
+        f"📚 <b>Knowledge base documents</b>\n\n"
+        "Tap to select specific documents to focus this task on, or use all. "
+        "Then tap Continue."
+    )
+    keyboard = _build_doc_picker_keyboard(available_docs, set())
+    if edit_message:
+        await edit_message(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
 def _chat_id(update: Update) -> int | None:
@@ -167,13 +221,17 @@ async def send_draft_for_approval(
         f"Task ID: <code>{html.escape(task_id)}</code>"
     )
 
+    docx_download_url = f"{DASHBOARD_URL}/api/tasks/{task_id}/export/docx"
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Approve", callback_data=f"approve:{task_id}"),
             InlineKeyboardButton("🔄 Retry", callback_data=f"retry:{task_id}"),
             InlineKeyboardButton("❌ Reject", callback_data=f"reject:{task_id}"),
         ],
-        [InlineKeyboardButton("📊 Open in Dashboard", url=f"{DASHBOARD_URL}/approvals/{task_id}")]
+        [
+            InlineKeyboardButton("📊 Open in Dashboard", url=f"{DASHBOARD_URL}/approvals/{task_id}"),
+            InlineKeyboardButton("📄 Download DOCX", url=docx_download_url),
+        ],
     ])
 
     recipients = {destination_chat_id} if destination_chat_id else DESTINATION_CHAT_IDS
@@ -289,6 +347,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = _chat_id(update)
     if chat_id is not None:
         _pending_task.pop(chat_id, None)
+        _doc_picker_state.pop(chat_id, None)
     await update.effective_message.reply_text("Task entry cancelled. Use /task to start again.")
 
 
@@ -433,13 +492,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if chat_id is not None:
-            _pending_task[chat_id] = {"council": council, "context": {}}
-        await query.edit_message_text(
-            f"📝 <b>{html.escape(COUNCIL_LABELS[council])} selected</b>\n\n"
-            "Now send the complete task as your next Telegram message.\n\n"
-            "Use /cancel to stop.",
-            parse_mode=ParseMode.HTML,
-        )
+            await _start_task_entry(chat_id, council, {}, edit_message=query.edit_message_text)
         return
 
     if data.startswith("platform:"):
@@ -449,18 +502,52 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Unknown platform", show_alert=True)
             return
         chat_id = _chat_id(update)
-        if chat_id is not None:
-            _pending_task[chat_id] = {
-                "council": "content",
-                "context": {"platform": platform},
-            }
         await query.answer()
-        label = "all 6 platforms" if platform == "all" else platform.title()
+        if chat_id is not None:
+            await _start_task_entry(chat_id, "content", {"platform": platform}, edit_message=query.edit_message_text)
+        return
+
+    if data.startswith("docsel:") or data in ("docsel_all", "docsel_done"):
+        chat_id = _chat_id(update)
+        state = _doc_picker_state.get(chat_id) if chat_id is not None else None
+        if not state:
+            await query.answer("This selection expired, use /task again.", show_alert=True)
+            return
+
+        if data.startswith("docsel:"):
+            idx = int(data.split(":", 1)[1])
+            if idx in state["selected"]:
+                state["selected"].discard(idx)
+            else:
+                state["selected"].add(idx)
+            await query.answer()
+            await query.edit_message_reply_markup(
+                reply_markup=_build_doc_picker_keyboard(state["available_docs"], state["selected"])
+            )
+            return
+
+        if data == "docsel_all":
+            state["selected"] = set()
+
+        # docsel_done or docsel_all: finalize and move to task-text prompt.
+        selected_hashes = [
+            state["available_docs"][i]["doc_hash"] for i in state["selected"]
+        ]
+        final_context = {**state["context"]}
+        if selected_hashes:
+            final_context["selected_docs"] = selected_hashes
+        _pending_task[chat_id] = {"council": state["council"], "context": final_context}
+        _doc_picker_state.pop(chat_id, None)
+
+        await query.answer()
+        doc_summary = (
+            f"Using {len(selected_hashes)} selected document(s)."
+            if selected_hashes else "Searching your entire knowledge base."
+        )
         await query.edit_message_text(
-            f"📝 <b>Content Council — {html.escape(label)}</b>\n\n"
-            "Now send the source material and what you want created as your next message.\n\n"
-            "Example: <i>Turn this product announcement into a launch post: …</i>\n\n"
-            "Use /cancel to stop.",
+            f"📝 <b>{html.escape(COUNCIL_LABELS.get(state['council'], state['council'].title()))} selected</b>\n"
+            f"{doc_summary}\n\n"
+            "Now send the complete task as your next Telegram message.\n\nUse /cancel to stop.",
             parse_mode=ParseMode.HTML,
         )
         return

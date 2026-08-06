@@ -73,7 +73,7 @@ Every output goes through **minimum 2 debate rounds** before reaching human revi
 ┌─────────▼──────────┐   ┌────────────▼───────────┐   ┌───────────▼──────────┐
 │   LangGraph Engine │   │   OpenRouter Gateway   │   │   Integration Layer  │
 │   Multi-Agent      │   │   OpenRouter Free      │   │   YouTube • Reddit   │
-│   Debate Loop      │   │   Local Models         │   │   Telegram • Sheets  │
+│   Debate Loop      │   │   Local Models         │   │   Telegram • HubSpot │
 │   StateGraph       │   │                        │   │   Twitter • LinkedIn │
 └─────────┬──────────┘   └────────────────────────┘   └──────────────────────┘
           │
@@ -312,13 +312,13 @@ AstroCouncil/
 │   │   ├── council_base.py           # LangGraph StateGraph debate engine
 │   │   ├── database.py               # SQLAlchemy async models (PostgreSQL/SQLite)
 │   │   ├── llm_router.py             # OpenRouter multi-tier model gateway
-│   │   ├── memory.py                 # Short-term state & episodic memory
-│   │   ├── memory_manager.py         # 3-layer memory manager (short/long/episodic)
-│   │   ├── rag_engine.py             # LanceDB + sentence-transformers knowledge hub
-│   │   ├── mcp_server.py             # FastMCP server exposing council tools
+│   │   ├── rag_engine.py             # LanceDB RAG knowledge base
+│   │   ├── memory.py                 # ChromaDB vector store & short-term state
+│   │   ├── memory_manager.py         # 3-layer memory: working, episodic, semantic
 │   │   ├── state.py                  # Pydantic schemas: CouncilState, AgentRole
 │   │   ├── dedup.py                  # SHA-256 content deduplication
-│   │   ├── kill_switch.py            # Global emergency stop controller (checked by every workflow)
+│   │   ├── kill_switch.py            # Global emergency stop controller
+│   │   ├── mcp_server.py             # FastMCP tool server
 │   │   └── scheduler.py              # APScheduler background cron runner
 │   ├── councils/
 │   │   ├── content/council.py        # Content repurposing & multi-platform posts
@@ -327,16 +327,17 @@ AstroCouncil/
 │   │   ├── strategy/council.py       # Market analysis & strategic planning
 │   │   └── support/council.py        # Community engagement & comment replies
 │   ├── integrations/
+│   │   ├── instagram.py              # Instagram Graph API content publisher
+│   │   ├── instagram_commenter.py    # Instagram Comment Auto-Reply (webhooks + scheduled)
+│   │   ├── facebook.py               # Facebook Page publisher
+│   │   ├── linkedin.py               # LinkedIn publisher
+│   │   ├── twitter.py                # X/Twitter publisher
 │   │   ├── youtube.py                # YouTube Data API v3 adapter
 │   │   ├── reddit.py                 # PRAW Reddit API adapter
 │   │   ├── telegram_bot.py           # Telegram bot notifications & approvals
-│   │   ├── instagram.py              # Instagram Graph API publishing adapter
-│   │   ├── instagram_commenter.py    # Instagram real-time + scheduled comment auto-reply
-│   │   ├── facebook.py               # Facebook Graph API publishing adapter
-│   │   ├── linkedin.py               # LinkedIn publishing adapter
-│   │   ├── twitter.py                # X/Twitter publishing adapter
-│   │   ├── publisher.py              # Unified cross-platform publisher adapter
-│   │   └── whisper.py                # OpenAI Whisper voice-to-text
+│   │   ├── publisher.py              # Unified multi-platform publish adapter
+│   │   ├── whisper.py                # OpenAI Whisper voice-to-text
+│   │   └── hubspot.py                # HubSpot CRM sync (contacts, deals, notes)
 │   └── workflows/
 │       ├── content_engine.py         # Transcript → 6 platform content variants
 │       ├── reddit_prospector.py      # Subreddit scanning → intent scoring
