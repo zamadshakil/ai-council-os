@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { 
   LayoutDashboard, CheckCircle2, Users, BarChart3, Settings, 
-  ChevronLeft, Shield, ShieldOff, Zap, LogOut, User as UserIcon, X, Check, BookOpen
+  ChevronLeft, Shield, ShieldOff, Zap, LogOut, User as UserIcon, X, Check, BookOpen, Box
 } from 'lucide-react';
 import { useSidebar } from '../contexts/SidebarContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -15,6 +15,7 @@ const NAV_ITEMS = [
   { href: '/', label: 'Overview', icon: LayoutDashboard },
   { href: '/approvals', label: 'Approvals', icon: CheckCircle2 },
   { href: '/councils', label: 'Councils', icon: Users },
+  { href: '/render-studio', label: 'Render & CAD Studio', icon: Box },
   { href: '/knowledge', label: 'Knowledge Hub', icon: BookOpen },
   { href: '/workflows', label: 'Workflows', icon: Zap },
   { href: '/analytics', label: 'Analytics', icon: BarChart3 },
