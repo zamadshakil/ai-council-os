@@ -923,7 +923,53 @@ async def api_publish(request: PublishRequest):
     return await publish_to_platforms(request.content, request.platforms, request.media_url)
 
 
-# ── MCP Server Mount ────────────────────────────────────────────────────────
+# ── RunPod GPU Pod Management Endpoints ──────────────────────────────
+
+@app.get("/api/runpod/pods")
+async def list_runpod_pods_endpoint():
+    """List all active and paused RunPod GPU instances under configured API key."""
+    try:
+        from src.integrations.runpod_manager import list_user_pods
+        pods = await list_user_pods()
+        return {"status": "ok", "pods": pods}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "pods": []}
+
+
+@app.get("/api/runpod/pods/{pod_id}")
+async def get_runpod_pod_endpoint(pod_id: str):
+    """Get status, uptime, IP and GPU metrics for a specific pod."""
+    try:
+        from src.integrations.runpod_manager import get_pod_status
+        pod = await get_pod_status(pod_id)
+        return {"status": "ok", "pod": pod}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/runpod/pods/{pod_id}/start")
+async def start_runpod_pod_endpoint(pod_id: str):
+    """Start a paused RunPod instance (podStart)."""
+    try:
+        from src.integrations.runpod_manager import start_pod
+        res = await start_pod(pod_id)
+        return {"status": "ok", "result": res}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/runpod/pods/{pod_id}/stop")
+async def stop_runpod_pod_endpoint(pod_id: str):
+    """Stop/Pause a running RunPod instance (podStop) to prevent idle billing."""
+    try:
+        from src.integrations.runpod_manager import stop_pod
+        res = await stop_pod(pod_id)
+        return {"status": "ok", "result": res}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+# ── MCP Server Mount ──────────────────────────────────────────────────────────
 
 try:
     from src.core.mcp_server import mcp
