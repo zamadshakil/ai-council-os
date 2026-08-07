@@ -3,6 +3,36 @@
 import { useState, useEffect } from 'react';
 import { Cpu, Play, Square, RefreshCw, Box, Layers, Download, CheckCircle, AlertCircle, Sparkles, Terminal, FileSpreadsheet, ShieldAlert } from 'lucide-react';
 
+// Fallback bpy script used when API is unavailable
+function generateFallbackScript(prompt: string): string {
+  return `# Blender bpy Script — Generated for: ${prompt}
+import bpy
+import random
+import math
+
+# Clear default scene
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete(use_global=False)
+
+# Grid layout: scatter objects with natural variation
+GRID_X, GRID_Y = 5, 10
+SPACING = 2.0
+
+for x in range(GRID_X):
+    for y in range(GRID_Y):
+        bpy.ops.mesh.primitive_cylinder_add(
+            location=(x * SPACING, y * SPACING, 0)
+        )
+        obj = bpy.context.active_object
+        obj.name = f"Plant_{x}_{y}"
+        # Natural variation
+        scale = random.uniform(0.7, 1.3)
+        obj.scale = (scale, scale, random.uniform(0.8, 1.5))
+        obj.rotation_euler = (0, 0, random.uniform(0, math.tau))
+
+print(f"Scene populated with {GRID_X * GRID_Y} objects!")`;
+}
+
 export default function RenderStudioPage() {
   const [pods, setPods] = useState<any[]>([]);
   const [loadingPods, setLoadingPods] = useState(true);
@@ -83,14 +113,14 @@ export default function RenderStudioPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          topic: `Generate Blender Python bpy script to: ${blenderPrompt}`,
-          target_council: 'content',
+          council: 'content',
+          task_description: `Generate a complete Blender Python bpy script to: ${blenderPrompt}. Include import bpy, random. Use programmatic object scattering with rotation and scale variation for a realistic greenhouse/farm scene.`,
         }),
       });
       const data = await res.json();
-      setBlenderScript(data.final_output || data.consensus_output || `# Blender Python Script generated for: ${blenderPrompt}\nimport bpy\nimport random\n\n# Create grid layout\nfor x in range(5):\n    for y in range(10):\n        bpy.ops.mesh.primitive_cylinder_add(location=(x*2, y*2, 0))\n        obj = bpy.context.active_object\n        obj.scale = (random.uniform(0.8, 1.2), random.uniform(0.8, 1.2), random.uniform(0.8, 1.2))\n        obj.rotation_euler = (0, 0, random.uniform(0, 6.28))\n\nprint("Greenhouse prop layout generated successfully!")`);
+      setBlenderScript(data.final_output || data.consensus_output || data.result || generateFallbackScript(blenderPrompt));
     } catch (e) {
-      setBlenderScript(`# Blender Python Script generated for: ${blenderPrompt}\nimport bpy\nimport random\n\n# Create grid layout\nfor x in range(5):\n    for y in range(10):\n        bpy.ops.mesh.primitive_cylinder_add(location=(x*2, y*2, 0))\n        obj = bpy.context.active_object\n        obj.scale = (random.uniform(0.8, 1.2), random.uniform(0.8, 1.2), random.uniform(0.8, 1.2))\n        obj.rotation_euler = (0, 0, random.uniform(0, 6.28))\n\nprint("Greenhouse prop layout generated successfully!")`);
+      setBlenderScript(generateFallbackScript(blenderPrompt));
     } finally {
       setGeneratingScript(false);
     }
