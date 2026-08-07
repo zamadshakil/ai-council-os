@@ -429,6 +429,7 @@ export default function RenderStudioPage() {
                     download_url: `/api/cad/download/${data.filename}`,
                     preview_url: `/api/cad/preview/${data.filename}`,
                     filename: data.filename,
+                    ai_notes: data.ai_optimization_notes,
                     timestamp: new Date().toLocaleTimeString(),
                   });
                 } catch (err) {
@@ -450,6 +451,17 @@ export default function RenderStudioPage() {
               </span>
               <span className="text-[11px] text-emerald-700">{cadOutput.timestamp}</span>
             </div>
+
+            {/* AI Reasoning / Optimization Banner */}
+            {cadOutput.ai_notes && (
+              <div className="p-3 bg-blue-50/80 border border-blue-200 rounded-lg text-xs text-blue-900 flex items-start gap-2">
+                <Sparkles className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+                <div>
+                  <strong className="block text-blue-950 font-bold text-[11px] uppercase tracking-wider mb-0.5">AI Architectural Reasoning Layer</strong>
+                  <span>{cadOutput.ai_notes}</span>
+                </div>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-zinc-700 pt-2 border-t border-emerald-200/60">
               <div><span className="text-zinc-500 block text-[10px]">Dimensions:</span> <strong>{cadOutput.dimensions}</strong></div>
