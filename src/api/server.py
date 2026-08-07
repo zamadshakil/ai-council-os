@@ -1001,12 +1001,21 @@ async def generate_cad_dxf_endpoint(req: CadRequest):
 async def upload_excel_cad_endpoint(file: UploadFile = File(...)):
     """Parse uploaded DSFC Excel sheet and generate dynamic CAD floorplan + visual preview."""
     try:
+        import warnings
+        warnings.filterwarnings('ignore')
         import openpyxl
         import io
+        import re
+
         contents = await file.read()
-        wb = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=True)
-        sheet_names = wb.sheetnames
         
+        # Load workbook safely
+        try:
+            wb = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=True)
+        except Exception:
+            wb = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=False)
+
+        sheet_names = wb.sheetnames
         crop_details = []
         crew_size = 15
         
@@ -1029,25 +1038,30 @@ async def upload_excel_cad_endpoint(file: UploadFile = File(...)):
                 # Check for Crew Size in Assumptions sheet or row
                 if c1 and "crew" in str(c1).lower():
                     try:
-                        import re
                         m = re.search(r'\d+', str(c1))
                         if m: crew_size = int(m.group(0))
                     except: pass
 
-                # If row contains crop ingredient name & numeric mass
-                if c1 and isinstance(c1, str) and not c1.startswith("Ref") and not c1.startswith("Ingredient"):
-                    if isinstance(c3, (int, float)) and c3 > 0:
+                # Extract crop ingredient rows
+                if c1 and isinstance(c1, str) and not c1.startswith("Ref") and not c1.startswith("Ingredient") and not c1.startswith("Astrofood"):
+                    # Check if numerical mass exists in col 3 or any nearby column
+                    mass = None
+                    for val in [c3, c2, target_sheet.cell(r, 4).value]:
+                        if isinstance(val, (int, float)) and val > 0:
+                            mass = int(val)
+                            break
+                    if mass and mass > 0:
                         crop_details.append({
                             "name": c1.strip(),
                             "unit": str(c2).strip() if c2 else "g",
-                            "mass_g": int(c3)
+                            "mass_g": mass
                         })
 
         from src.integrations.cad_generator import generate_greenhouse_dxf
         res = generate_greenhouse_dxf(
             crew_size=crew_size,
             sol_duration=14,
-            crop_selection=f"DSFC Plan: {file.filename} ({len(crop_details)} crops)",
+            crop_selection=f"DSFC Plan: {file.filename} ({len(crop_details)} crops parsed)",
             crop_details=crop_details if len(crop_details) > 0 else None,
             filename=f"dxf_{file.filename.replace('.xlsx', '').replace(' ', '_')}.dxf"
         )
@@ -1062,7 +1076,7 @@ async def upload_excel_cad_endpoint(file: UploadFile = File(...)):
         return res
     except Exception as e:
         from src.integrations.cad_generator import generate_greenhouse_dxf
-        return generate_greenhouse_dxf(crew_size=15, crop_selection=f"Parsed {file.filename}")
+        return generate_greenhouse_dxf(crew_size=15, crop_selection=f"Parsed {file.filename}: {str(e)}")
 
 @app.get("/api/cad/preview/{filename}")
 async def preview_cad_png_endpoint(filename: str):
