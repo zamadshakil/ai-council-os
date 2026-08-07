@@ -982,12 +982,17 @@ class CadRequest(BaseModel):
 async def generate_cad_dxf_endpoint(req: CadRequest):
     """Generate parametric DXF greenhouse floorplan with PNG preview."""
     try:
+        import os
         from src.integrations.cad_generator import generate_greenhouse_dxf
         res = generate_greenhouse_dxf(
             crew_size=req.crew_size,
             sol_duration=req.sol_duration,
             crop_selection=req.crop_selection
         )
+        # Clear PNG preview cache so image updates fresh
+        png_cache = res["file_path"].replace('.dxf', '.png')
+        if os.path.exists(png_cache):
+            os.remove(png_cache)
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -83,9 +83,9 @@ def generate_greenhouse_dxf(
     # 4. Annotation Titleblock (TEXT)
     doc.layers.add(name="ANNOTATIONS", color=2) # Yellow
     title_text = f"ASTROFOOD MARS GREENHOUSE FLOORPLAN ({crew_size} CREW, {sol_duration} SOLS)"
-    msp.add_text(title_text, dxfattribs={"layer": "ANNOTATIONS", "height": 0.4}).set_placement((0.5, building_length + 1.0))
-    msp.add_text(f"Overall Dimensions: {building_width:.1f}m x {building_length:.1f}m", dxfattribs={"layer": "ANNOTATIONS", "height": 0.3}).set_placement((0.5, building_length + 0.5))
-    msp.add_text(f"Crop Targets: {crop_selection}", dxfattribs={"layer": "ANNOTATIONS", "height": 0.25}).set_placement((0.5, building_length + 0.1))
+    msp.add_text(title_text, dxfattribs={"layer": "ANNOTATIONS", "height": 0.4}).set_placement((0.5, building_length + 2.2))
+    msp.add_text(f"Overall Dimensions: {building_width:.1f}m x {building_length:.1f}m", dxfattribs={"layer": "ANNOTATIONS", "height": 0.3}).set_placement((0.5, building_length + 1.5))
+    msp.add_text(f"Crop Targets: {crop_selection}", dxfattribs={"layer": "ANNOTATIONS", "height": 0.25}).set_placement((0.5, building_length + 0.9))
 
     # Save output DXF
     file_path = os.path.join(OUTPUT_DIR, filename)
