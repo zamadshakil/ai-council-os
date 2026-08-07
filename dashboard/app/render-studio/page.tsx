@@ -229,15 +229,13 @@ export default function RenderStudioPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {pods.map((pod) => {
               const isRunning = pod.desiredStatus === 'RUNNING';
-              const isPrimary = pod.id === 'b1thgw95x1n3d4'; // superb_pink_ptarmigan only
               return (
-                <div key={pod.id} className={`p-5 rounded-xl border flex flex-col justify-between gap-4 ${isPrimary ? 'bg-blue-50/40 border-blue-200' : 'bg-zinc-50/70 border-zinc-200 opacity-70'}`}>
+                <div key={pod.id} className={`p-5 rounded-xl border flex flex-col justify-between gap-4 ${isRunning ? 'bg-emerald-50/40 border-emerald-200' : 'bg-zinc-50/70 border-zinc-200'}`}>
                   <div className="flex items-start justify-between">
                     <div>
                       <div className="flex items-center gap-2">
                         <span className={`w-2.5 h-2.5 rounded-full ${isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
                         <h3 className="text-sm font-bold text-zinc-900">{pod.name || pod.id}</h3>
-                        {isPrimary && <span className="px-1.5 py-0.5 text-[10px] font-bold bg-blue-600 text-white rounded-full">PRIMARY</span>}
                       </div>
                       <p className="text-xs text-zinc-500 mt-1 font-mono">{pod.imageName || 'NVIDIA RTX A6000 (48GB)'}</p>
                     </div>
@@ -256,30 +254,24 @@ export default function RenderStudioPage() {
 
                   {/* Action Buttons */}
                   <div className="flex items-center gap-2 pt-1">
-                    {isPrimary ? (
-                      isRunning ? (
-                        <button
-                          onClick={() => handleStopPod(pod.id)}
-                          disabled={podActionId === pod.id}
-                          className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs rounded-lg transition-colors shadow-xs disabled:opacity-60"
-                        >
-                          <Square className="w-3.5 h-3.5 fill-current" />
-                          <span>{podActionId === pod.id ? 'Stopping...' : 'Stop Pod (Pause Billing)'}</span>
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => handleStartPod(pod.id)}
-                          disabled={podActionId === pod.id}
-                          className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs rounded-lg transition-colors shadow-xs disabled:opacity-60"
-                        >
-                          <Play className="w-3.5 h-3.5 fill-current" />
-                          <span>{podActionId === pod.id ? 'Starting...' : 'Start Pod (Resume GPU)'}</span>
-                        </button>
-                      )
+                    {isRunning ? (
+                      <button
+                        onClick={() => handleStopPod(pod.id)}
+                        disabled={podActionId === pod.id}
+                        className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs rounded-lg transition-colors shadow-xs disabled:opacity-60"
+                      >
+                        <Square className="w-3.5 h-3.5 fill-current" />
+                        <span>{podActionId === pod.id ? 'Stopping...' : 'Stop Pod (Pause Billing)'}</span>
+                      </button>
                     ) : (
-                      <div className="w-full py-2 px-4 bg-zinc-100 border border-zinc-200 text-zinc-400 font-semibold text-xs rounded-lg text-center">
-                        🔒 Reserved — Not in Use
-                      </div>
+                      <button
+                        onClick={() => handleStartPod(pod.id)}
+                        disabled={podActionId === pod.id}
+                        className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs rounded-lg transition-colors shadow-xs disabled:opacity-60"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                        <span>{podActionId === pod.id ? 'Starting...' : 'Start Pod (Resume GPU)'}</span>
+                      </button>
                     )}
                   </div>
                 </div>
