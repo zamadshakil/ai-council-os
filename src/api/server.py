@@ -1019,13 +1019,19 @@ async def upload_excel_cad_endpoint(file: UploadFile = File(...)):
         crop_details = []
         crew_size = 15
         
-        # Look for 'Ingredient Demand', 'Meal Lifecycle Plan', 'Resource Summary' or first sheet
+        # Look for 'Ingredient Demand', 'Ingredient', 'Crop', 'Demand', 'Resource Summary'
         target_sheet = None
         for name in sheet_names:
             n_lower = name.lower()
-            if "demand" in n_lower or "ingredient" in n_lower or "crop" in n_lower or "summary" in n_lower:
+            if "ingredient" in n_lower and "demand" in n_lower:
                 target_sheet = wb[name]
                 break
+        if not target_sheet:
+            for name in sheet_names:
+                n_lower = name.lower()
+                if "ingredient" in n_lower or "demand" in n_lower or "crop" in n_lower:
+                    target_sheet = wb[name]
+                    break
         if not target_sheet and len(sheet_names) > 0:
             target_sheet = wb[sheet_names[0]]
             
