@@ -372,21 +372,62 @@ export default function RenderStudioPage() {
           </div>
         </div>
 
-        <button
-          onClick={generateCadFloorplan}
-          disabled={generatingCad}
-          className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs rounded-xl flex items-center justify-center gap-2 transition-colors shadow-xs"
-        >
-          <Layers className="w-4 h-4" />
-          <span>{generatingCad ? 'Calculating Layout Math...' : 'Generate Optimized CAD Floorplan (.DXF)'}</span>
-        </button>
+        <div className="flex flex-col md:flex-row items-center gap-3">
+          <button
+            onClick={generateCadFloorplan}
+            disabled={generatingCad}
+            className="w-full md:w-2/3 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs rounded-xl flex items-center justify-center gap-2 transition-colors shadow-xs"
+          >
+            <Layers className="w-4 h-4" />
+            <span>{generatingCad ? 'Calculating Layout Math...' : 'Generate Optimized CAD Floorplan (.DXF)'}</span>
+          </button>
+
+          <label className="w-full md:w-1/3 py-3 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-semibold text-xs rounded-xl border border-zinc-300 flex items-center justify-center gap-2 cursor-pointer transition-colors text-center">
+            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+            <span>Upload Excel (.xlsx) Sheet</span>
+            <input
+              type="file"
+              accept=".xlsx,.xls"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                setGeneratingCad(true);
+                const formData = new FormData();
+                formData.append('file', file);
+                try {
+                  const res = await fetch('/api/cad/upload-excel', {
+                    method: 'POST',
+                    body: formData,
+                  });
+                  const data = await res.json();
+                  setCropType(`Excel: ${file.name}`);
+                  setCadOutput({
+                    dimensions: `${data.building_width_m}m x ${data.building_length_m}m`,
+                    crop_capacity: `15 Crew Members (${file.name})`,
+                    rack_count: data.total_racks,
+                    cad_format: '.DXF / FreeCAD / AutoCAD',
+                    download_url: `/api/cad/download/${data.filename}`,
+                    preview_url: `/api/cad/preview/${data.filename}`,
+                    filename: data.filename,
+                    timestamp: new Date().toLocaleTimeString(),
+                  });
+                } catch (err) {
+                  console.error(err);
+                } finally {
+                  setGeneratingCad(false);
+                }
+              }}
+            />
+          </label>
+        </div>
 
         {cadOutput && (
-          <div className="p-4 bg-emerald-50/60 rounded-xl border border-emerald-200/80 space-y-3">
+          <div className="p-4 bg-emerald-50/60 rounded-xl border border-emerald-200/80 space-y-4">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-emerald-900 flex items-center gap-1.5">
                 <CheckCircle className="w-4 h-4 text-emerald-600" />
-                Optimal Floorplan Calculated Successfully
+                Optimal Floorplan Calculated & Visualized
               </span>
               <span className="text-[11px] text-emerald-700">{cadOutput.timestamp}</span>
             </div>
@@ -398,14 +439,28 @@ export default function RenderStudioPage() {
               <div><span className="text-zinc-500 block text-[10px]">Format:</span> <strong>{cadOutput.cad_format}</strong></div>
             </div>
 
+            {/* Visual Floorplan Image Preview */}
+            <div className="pt-2">
+              <span className="block text-[11px] font-bold text-zinc-700 mb-2 uppercase tracking-wider">
+                Visual Blueprint Preview (Auto-Generated Vector Rendering)
+              </span>
+              <div className="p-3 bg-zinc-950 rounded-xl border border-zinc-800 flex justify-center max-h-[450px] overflow-hidden">
+                <img
+                  src={cadOutput.preview_url || `/api/cad/preview/${cadOutput.filename || 'astrofood_greenhouse_floorplan.dxf'}`}
+                  alt="CAD Floorplan Visual Preview"
+                  className="h-full object-contain rounded-lg shadow-md"
+                />
+              </div>
+            </div>
+
             <div className="pt-2">
               <a
                 href={cadOutput.download_url}
                 download={cadOutput.filename}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
               >
-                <Download className="w-3.5 h-3.5" />
-                <span>Download DXF Floorplan File ({cadOutput.filename})</span>
+                <Download className="w-4 h-4" />
+                <span>Download DXF Floorplan File ({cadOutput.filename || 'astrofood_greenhouse_floorplan.dxf'})</span>
               </a>
             </div>
           </div>

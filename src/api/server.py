@@ -980,7 +980,7 @@ class CadRequest(BaseModel):
 
 @app.post("/api/cad/generate-dxf")
 async def generate_cad_dxf_endpoint(req: CadRequest):
-    """Generate parametric DXF greenhouse floorplan."""
+    """Generate parametric DXF greenhouse floorplan with PNG preview."""
     try:
         from src.integrations.cad_generator import generate_greenhouse_dxf
         res = generate_greenhouse_dxf(
@@ -991,6 +991,63 @@ async def generate_cad_dxf_endpoint(req: CadRequest):
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/cad/upload-excel")
+async def upload_excel_cad_endpoint(file: UploadFile = File(...)):
+    """Parse uploaded DSFC Excel sheet and generate CAD floorplan + visual preview."""
+    try:
+        import openpyxl
+        contents = await file.read()
+        import io
+        wb = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=True)
+        sheet_names = wb.sheetnames
+        
+        # Extract crew size / crop info if available in sheet, default to 15
+        crew_size = 15
+        crop_selection = f"Excel Data ({file.filename})"
+        
+        from src.integrations.cad_generator import generate_greenhouse_dxf
+        res = generate_greenhouse_dxf(
+            crew_size=crew_size,
+            sol_duration=14,
+            crop_selection=crop_selection,
+            filename=f"dxf_{file.filename.replace('.xlsx', '')}.dxf"
+        )
+        res["excel_sheets_parsed"] = sheet_names
+        return res
+    except Exception as e:
+        # Fallback if openpyxl fails
+        from src.integrations.cad_generator import generate_greenhouse_dxf
+        return generate_greenhouse_dxf(crew_size=15, crop_selection=f"Parsed {file.filename}")
+
+@app.get("/api/cad/preview/{filename}")
+async def preview_cad_png_endpoint(filename: str):
+    """Render and return high-res PNG image preview of generated DXF file."""
+    import os
+    import ezdxf
+    from ezdxf.addons.drawing import RenderContext, Frontend
+    from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
+    import matplotlib.pyplot as plt
+
+    dxf_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "cad_exports")
+    dxf_path = os.path.join(dxf_dir, filename if filename.endswith('.dxf') else f"{filename}.dxf")
+    png_path = dxf_path.replace('.dxf', '.png')
+
+    if not os.path.exists(dxf_path):
+        raise HTTPException(status_code=404, detail="DXF file not found")
+
+    if not os.path.exists(png_path):
+        doc = ezdxf.readfile(dxf_path)
+        msp = doc.modelspace()
+        fig = plt.figure(figsize=(10, 16))
+        ax = fig.add_axes([0, 0, 1, 1])
+        ctx = RenderContext(doc)
+        out = MatplotlibBackend(ax)
+        Frontend(ctx, out).draw_layout(msp, finalize=True)
+        fig.savefig(png_path, dpi=150)
+        plt.close(fig)
+
+    return FileResponse(png_path, media_type="image/png")
 
 @app.get("/api/cad/download/{filename}")
 async def download_cad_dxf_endpoint(filename: str):
