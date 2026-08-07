@@ -999,29 +999,68 @@ async def generate_cad_dxf_endpoint(req: CadRequest):
 
 @app.post("/api/cad/upload-excel")
 async def upload_excel_cad_endpoint(file: UploadFile = File(...)):
-    """Parse uploaded DSFC Excel sheet and generate CAD floorplan + visual preview."""
+    """Parse uploaded DSFC Excel sheet and generate dynamic CAD floorplan + visual preview."""
     try:
         import openpyxl
-        contents = await file.read()
         import io
+        contents = await file.read()
         wb = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=True)
         sheet_names = wb.sheetnames
         
-        # Extract crew size / crop info if available in sheet, default to 15
+        crop_details = []
         crew_size = 15
-        crop_selection = f"Excel Data ({file.filename})"
         
+        # Look for 'Ingredient Demand', 'Meal Lifecycle Plan', 'Resource Summary' or first sheet
+        target_sheet = None
+        for name in sheet_names:
+            n_lower = name.lower()
+            if "demand" in n_lower or "ingredient" in n_lower or "crop" in n_lower or "summary" in n_lower:
+                target_sheet = wb[name]
+                break
+        if not target_sheet and len(sheet_names) > 0:
+            target_sheet = wb[sheet_names[0]]
+            
+        if target_sheet:
+            for r in range(1, target_sheet.max_row + 1):
+                c1 = target_sheet.cell(r, 1).value
+                c2 = target_sheet.cell(r, 2).value
+                c3 = target_sheet.cell(r, 3).value
+                
+                # Check for Crew Size in Assumptions sheet or row
+                if c1 and "crew" in str(c1).lower():
+                    try:
+                        import re
+                        m = re.search(r'\d+', str(c1))
+                        if m: crew_size = int(m.group(0))
+                    except: pass
+
+                # If row contains crop ingredient name & numeric mass
+                if c1 and isinstance(c1, str) and not c1.startswith("Ref") and not c1.startswith("Ingredient"):
+                    if isinstance(c3, (int, float)) and c3 > 0:
+                        crop_details.append({
+                            "name": c1.strip(),
+                            "unit": str(c2).strip() if c2 else "g",
+                            "mass_g": int(c3)
+                        })
+
         from src.integrations.cad_generator import generate_greenhouse_dxf
         res = generate_greenhouse_dxf(
             crew_size=crew_size,
             sol_duration=14,
-            crop_selection=crop_selection,
-            filename=f"dxf_{file.filename.replace('.xlsx', '')}.dxf"
+            crop_selection=f"DSFC Plan: {file.filename} ({len(crop_details)} crops)",
+            crop_details=crop_details if len(crop_details) > 0 else None,
+            filename=f"dxf_{file.filename.replace('.xlsx', '').replace(' ', '_')}.dxf"
         )
+        
+        # Clear PNG cache so image updates fresh
+        png_cache = res["file_path"].replace('.dxf', '.png')
+        if os.path.exists(png_cache):
+            os.remove(png_cache)
+            
         res["excel_sheets_parsed"] = sheet_names
+        res["crops_extracted"] = [c["name"] for c in crop_details[:10]]
         return res
     except Exception as e:
-        # Fallback if openpyxl fails
         from src.integrations.cad_generator import generate_greenhouse_dxf
         return generate_greenhouse_dxf(crew_size=15, crop_selection=f"Parsed {file.filename}")
 
