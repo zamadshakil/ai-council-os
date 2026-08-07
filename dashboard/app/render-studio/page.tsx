@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Cpu, Play, Square, RefreshCw, Box, Layers, Download, CheckCircle, AlertCircle, Sparkles, Terminal, FileSpreadsheet, ShieldAlert } from 'lucide-react';
+import { Cpu, Play, Square, RefreshCw, Box, Layers, Download, CheckCircle, AlertCircle, Sparkles, Terminal, FileSpreadsheet, ShieldAlert, Copy, Check } from 'lucide-react';
 
 // Fallback bpy script used when API is unavailable
 function generateFallbackScript(prompt: string): string {
@@ -42,6 +42,7 @@ export default function RenderStudioPage() {
   const [blenderPrompt, setBlenderPrompt] = useState('Scatter 50 greenhouse plants across a 5x10 grid with natural scale and rotation variation');
   const [blenderScript, setBlenderScript] = useState('');
   const [generatingScript, setGeneratingScript] = useState(false);
+  const [copiedScript, setCopiedScript] = useState(false);
 
   // CAD Floorplan State
   const [crewSize, setCrewSize] = useState(15);
@@ -321,10 +322,28 @@ export default function RenderStudioPage() {
             <div className="flex items-center justify-between text-xs font-bold text-zinc-600">
               <span className="flex items-center gap-1.5"><Terminal className="w-3.5 h-3.5 text-zinc-500" /> Executable Blender Python Code (bpy)</span>
               <button
-                onClick={() => navigator.clipboard.writeText(blenderScript)}
-                className="text-blue-600 hover:underline text-[11px]"
+                onClick={() => {
+                  navigator.clipboard.writeText(blenderScript);
+                  setCopiedScript(true);
+                  setTimeout(() => setCopiedScript(false), 2000);
+                }}
+                className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-lg border transition-all shadow-xs ${
+                  copiedScript
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                    : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700 border-zinc-300'
+                }`}
               >
-                Copy Code
+                {copiedScript ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5 text-zinc-500" />
+                    <span>Copy Code</span>
+                  </>
+                )}
               </button>
             </div>
             <pre className="p-4 bg-zinc-900 text-emerald-400 text-xs font-mono rounded-xl overflow-x-auto border border-zinc-800 leading-relaxed">
