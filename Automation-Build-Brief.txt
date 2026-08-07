@@ -1,0 +1,103 @@
+Build Brief: Creator Automation Suite
+Five workflows to be built in n8n. Scope, purpose and known pitfalls.
+You are building five automation workflows in n8n (self-hosted). Each one is listed below with what it does, what it is for, and the mistakes that break it. Screenshots show the intended shape of each workflow — treat them as reference, not as a spec to copy node for node.
+Ground rules for all five
+Official APIs only. No scraping, no headless-browser logins, no unofficial endpoints.
+Every workflow logs every processed item to a Google Sheet. The sheet is the memory.
+Every write action (post, reply, upload) is preceded by a deduplication check against that sheet. Non-negotiable.
+Every AI call uses a Structured Output Parser with a defined schema. No raw text into downstream nodes.
+Loop over items with per-item error handling so one failure does not kill the batch.
+All credentials in n8n credential store, never hard-coded in code nodes.
+
+Overall canvas layout — separate colour-coded blocks per stage, with a cost note pinned on canvas.
+1. YouTube Comment Auto-Reply
+Build steps
+Schedule Trigger + manual trigger for testing.
+Fetch channel videos → Loop Over Items → fetch comments per video.
+Aggregate, then check each comment ID against a "Comment IDs" sheet. Drop anything already seen.
+Build prompt with video title/topic + comment text → AI Agent → Structured Output Parser (fields: reply, confidence).
+Limit node to cap replies per run.
+Post reply via YouTube API → append comment ID + reply to sheet.
+Pitfalls
+No comment-ID dedupe = it re-replies to old comments every run. This is the number one failure.
+Prompt without video context produces generic replies that read as bot output and hurt engagement.
+No rate cap = quota exhaustion and unnatural reply bursts. Stagger them.
+
+Comment reply workflow — dual triggers, loop, dedupe, AI draft, post back, sheet log.
+
+2. Bulk Description Updater + Scheduler
+Build steps
+Fetch full video list (single call, handle pagination).
+HTTP Request to pull current link set / boilerplate from one external source of truth — do not hard-code it.
+Merge node joins video data + reference data → Code node normalises.
+AI Agent rewrites: keep the video-specific opening, replace only defined boilerplate blocks.
+Append all generated copy to a sheet FIRST. Publish back to YouTube as a second, separately-triggered step.
+Pitfalls
+Generating and publishing in one pass. If output is wrong it is wrong live, across the whole catalogue. Always stage to a sheet first.
+Letting the model author descriptions from scratch — it will delete video-specific content. Instruct it to replace defined blocks only.
+Ignoring YouTube API write quota; a full catalogue update will hit it. Batch across runs.
+
+Catalogue update branch (top) and platform-variant generation branch (bottom), with execution output panel.
+
+3. Reddit Lead Prospector
+Build steps
+Code node holds config: subreddit list (45), intent keywords, exclusion terms. One editable array — nothing scattered across nodes.
+Schedule Trigger + manual command trigger.
+Loop Over Items across subreddits → HTTP Request to official Reddit API → parse into title, body, author, timestamp, subreddit, permalink.
+Dedupe each post ID against the seen-threads sheet.
+AI Agent scores intent (is this a real request for a solution?) → IF node discards below threshold. Most posts should be rejected here.
+AI Agent drafts a reply that answers the question first; structured output = reply, score, reasoning.
+Append every qualifying thread + draft to a review sheet. Telegram message summarises the run.
+Pitfalls
+Auto-posting without review. Do not build this. Drafts go to the sheet; a human posts.
+No per-subreddit volume cap = the account looks like a spam bot and gets banned.
+Weak intent threshold floods the sheet with noise and makes the whole system useless. Tune it high.
+Scraping Reddit instead of using the API. Instant account risk. Do not.
+
+Prospector workflow — schedule + command triggers, subreddit loop, parse, dedupe, AI scoring, sheet log, Telegram notify.
+
+4. Multi-Platform Content Engine
+Build steps
+Input: video transcript + metadata.
+AI Agent given a per-platform spec (max length, formatting allowed, tone, links allowed in body y/n).
+Structured Output Parser returns one field per destination. A missing or malformed field must fail the run, not publish empty.
+Route each variant to its platform node / scheduling tool.
+Log every post + destination + timestamp to a sheet.
+Media sub-workflow (if generating video/image assets)
+Script from AI Agent → speech synthesis → audio analysis → image generation → merge assets.
+Trigger the render job, then Wait 60s → Check Status → IF complete → else loop back. Poll, never block.
+Download finished file → upload to destination.
+Pitfalls
+Awaiting a render synchronously. It will time out every time. The wait/poll loop is mandatory.
+One prompt for all six platforms produces six near-identical posts. Separate specs per platform.
+No retry limit on the polling loop = infinite loop on a failed render. Cap it.
+Media generation is the main variable cost. Pin per-service costs to the canvas as a note.
+
+Media sub-workflow — script, speech, image generation, merge, trigger render, wait/check-status loop, download, upload.
+
+Distribution fan-out — one source asset, multiple variants, routed per platform, performance read back from analytics.
+
+5. Telegram Control & Approval Layer
+Build steps
+Telegram bot + private channel. Every workflow start posts a message including current kill-switch state.
+Kill switch = a single stored flag (sheet cell or n8n variable) checked at the top of every generation workflow. If ON, exit immediately.
+On media completion: send the file to Telegram with inline Approve / Retry / Cancel.
+Approve → publish. Retry → regenerate with same prompt. Cancel → discard and log.
+Post a confirmation message after each successful upload.
+Pitfalls
+Building the other four workflows before this one. Do this one first — it is how everything else gets tested safely.
+Kill switch that only stops one workflow. It must be checked by all of them.
+Approval callbacks that expire or fire twice. Handle the callback idempotently.
+
+Operator channel — run notifications with kill-switch state, media delivered with approve/retry/cancel, upload confirmation.
+
+Same channel on mobile — overnight output reviewable from a phone.
+
+Stack
+Build order
+Telegram control layer + kill switch.
+Comment auto-reply (simplest full loop: fetch → dedupe → AI → write → log).
+Reddit prospector.
+Bulk description updater.
+Multi-platform engine + media sub-workflow.
+Deliverable per system: exported n8n JSON, the linked Google Sheet, a short README covering credentials required and how to run it.

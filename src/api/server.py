@@ -969,6 +969,48 @@ async def stop_runpod_pod_endpoint(pod_id: str):
         return {"status": "error", "error": str(e)}
 
 
+# ── CAD Floorplan Generator Endpoints ────────────────────────────────────────
+
+from fastapi.responses import FileResponse
+
+class CadRequest(BaseModel):
+    crew_size: int = 15
+    sol_duration: int = 14
+    crop_selection: str = "Spirulina, Dwarf Sunflower, Sugar Beet"
+
+@app.post("/api/cad/generate-dxf")
+async def generate_cad_dxf_endpoint(req: CadRequest):
+    """Generate parametric DXF greenhouse floorplan."""
+    try:
+        from src.integrations.cad_generator import generate_greenhouse_dxf
+        res = generate_greenhouse_dxf(
+            crew_size=req.crew_size,
+            sol_duration=req.sol_duration,
+            crop_selection=req.crop_selection
+        )
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/cad/download/{filename}")
+async def download_cad_dxf_endpoint(filename: str):
+    """Download generated DXF CAD file."""
+    import os
+    file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "cad_exports", filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="CAD file not found")
+    return FileResponse(file_path, filename=filename, media_type="application/dxf")
+
+@app.post("/api/gdrive/sync")
+async def sync_gdrive_endpoint():
+    """Manually trigger Google Drive knowledge sync."""
+    try:
+        from src.integrations.gdrive_manager import sync_drive_to_knowledge
+        return await sync_drive_to_knowledge()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── MCP Server Mount ──────────────────────────────────────────────────────────
 
 try:

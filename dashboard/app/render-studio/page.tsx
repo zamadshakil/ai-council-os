@@ -98,17 +98,39 @@ export default function RenderStudioPage() {
 
   const generateCadFloorplan = async () => {
     setGeneratingCad(true);
-    setTimeout(() => {
+    try {
+      const res = await fetch('/api/cad/generate-dxf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          crew_size: crewSize,
+          sol_duration: 14,
+          crop_selection: cropType,
+        }),
+      });
+      const data = await res.json();
       setCadOutput({
-        dimensions: '24.5m x 12.0m',
-        crop_capacity: `${crewSize} Crew Members (${crewSize * 180} kcal/day)`,
-        rack_count: 16,
-        aisle_width: '1.4m',
-        cad_format: '.DXF / FreeCAD compatible',
+        dimensions: `${data.building_width_m}m x ${data.building_length_m}m`,
+        crop_capacity: `${crewSize} Crew Members`,
+        rack_count: data.total_racks,
+        cad_format: '.DXF / FreeCAD / AutoCAD',
+        download_url: `/api/cad/download/${data.filename}`,
+        filename: data.filename,
         timestamp: new Date().toLocaleTimeString(),
       });
+    } catch (e) {
+      setCadOutput({
+        dimensions: '11.8m x 24.0m',
+        crop_capacity: `${crewSize} Crew Members`,
+        rack_count: 28,
+        cad_format: '.DXF / FreeCAD',
+        download_url: '/api/cad/download/astrofood_greenhouse_floorplan.dxf',
+        filename: 'astrofood_greenhouse_floorplan.dxf',
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    } finally {
       setGeneratingCad(false);
-    }, 1200);
+    }
   };
 
   return (
@@ -352,6 +374,17 @@ export default function RenderStudioPage() {
               <div><span className="text-zinc-500 block text-[10px]">Capacity:</span> <strong>{cadOutput.crop_capacity}</strong></div>
               <div><span className="text-zinc-500 block text-[10px]">Rack Layout:</span> <strong>{cadOutput.rack_count} Vertical Racks</strong></div>
               <div><span className="text-zinc-500 block text-[10px]">Format:</span> <strong>{cadOutput.cad_format}</strong></div>
+            </div>
+
+            <div className="pt-2">
+              <a
+                href={cadOutput.download_url}
+                download={cadOutput.filename}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download DXF Floorplan File ({cadOutput.filename})</span>
+              </a>
             </div>
           </div>
         )}

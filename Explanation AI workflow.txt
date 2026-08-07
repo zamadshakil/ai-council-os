@@ -1,0 +1,38 @@
+Explanation AI workflow
+The goal is not simply to automate tasks, but to build an AI organization where every important decision is made through collaboration between multiple specialized AI models.
+Instead of one AI writing an email or one AI researching a company, every functional agent should itself be an AI Council.
+For example, the Research Council should consist of several models with different strengths. One model researches the topic, another validates the facts, another looks for alternative strategies, another identifies risks or missing information, and another summarizes the discussion. These models should debate internally, critique each other's work, assign confidence scores, and only produce a final answer once consensus has been reached.
+The same principle should apply throughout the platform.
+Sales Council
+Multiple models discuss lead qualification, outreach strategy, company fit, buying signals, and the optimal communication approach before any outreach is generated.
+Content Council
+Multiple models generate, review and optimize content for different platforms. One focuses on creativity, another on factual correctness, another on marketing performance, another on brand consistency, and another on compliance.
+Grant Council
+Multiple models collaborate to write grant proposals. One retrieves previous proposals, one researches the call, one develops the technical approach, one reviews against evaluation criteria, one identifies weaknesses, and one produces the final submission-ready version.
+Strategy Council
+Several reasoning models discuss business decisions, prioritization, partnerships, pricing and commercial strategy before recommendations are presented.
+Software Engineering Council
+Different models collaborate on architecture, implementation, code review, documentation, testing and security before code is committed.
+Every council should communicate internally before communicating with the rest of the system.
+I would like you to design this architecture in detail, including:
+• Number of councils
+• Number of agents inside each council
+• Which AI model is used for each role and why
+• Internal communication protocol between models
+• Debate and consensus mechanism
+• Confidence scoring
+• Memory architecture
+• Long-term and short-term memory
+• Shared knowledge base
+• Retrieval architecture
+• Prompt hierarchy
+• Model routing logic
+• Human approval workflow
+• Automatic retry and self-correction
+• Learning from previous approvals and rejections
+• Cost optimization by selecting the appropriate model for each task
+• Escalation rules for complex decisions
+• Logging, observability and audit trail for every AI decision
+The AI Councils should become reusable building blocks. For example, the Grant Council should be usable from the Research Council, the Sales Council should be able to consult the Strategy Council, and every council should have access to the shared knowledge base and memory.
+Rather than building a collection of automations, I want to build an intelligent operating system where specialized AI councils collaborate continuously, exchange information, challenge each other's reasoning, and converge on the highest quality output before any action is taken.
+This AI Council architecture is the most innovative and most important part of the project, so I would like your proposal to focus heavily on how this will actually be implemented technically, not just conceptually.
