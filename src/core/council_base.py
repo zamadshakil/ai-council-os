@@ -166,6 +166,7 @@ class BaseCouncil(ABC):
         result = await call_llm(
             messages=messages,
             tier=get_model_for_role("generator", priority).name,
+            model_override=state.get("model") or None,
         )
 
         agent_msg = AgentMessage(
@@ -196,6 +197,7 @@ class BaseCouncil(ABC):
             messages=messages,
             tier="smart",  # Critics always use smart models
             temperature=0.3,  # Lower temperature for more consistent scoring
+            model_override=state.get("model") or None,
         )
 
         # Parse confidence score from the response
@@ -230,6 +232,7 @@ class BaseCouncil(ABC):
         result = await call_llm(
             messages=messages,
             tier=get_model_for_role("synthesizer", priority).name,
+            model_override=state.get("model") or None,
         )
 
         agent_msg = AgentMessage(

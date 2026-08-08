@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Cpu, Play, Square, RefreshCw, Box, Layers, Download, CheckCircle, AlertCircle, Sparkles, Terminal, FileSpreadsheet, ShieldAlert, Copy, Check } from 'lucide-react';
+import { Cpu, Play, Square, RefreshCw, Box, Layers, Download, CheckCircle, AlertCircle, Sparkles, Terminal, FileSpreadsheet, ShieldAlert, Copy, Check, ExternalLink, Github } from 'lucide-react';
 
 // Fallback bpy script used when API is unavailable
 function generateFallbackScript(prompt: string): string {
@@ -40,9 +40,12 @@ export default function RenderStudioPage() {
 
   // Blender AI Orchestrator State
   const [blenderPrompt, setBlenderPrompt] = useState('Scatter 50 greenhouse plants across a 5x10 grid with natural scale and rotation variation');
+  const [aiModel, setAiModel] = useState('anthropic/claude-3.5-sonnet');
   const [blenderScript, setBlenderScript] = useState('');
   const [generatingScript, setGeneratingScript] = useState(false);
   const [copiedScript, setCopiedScript] = useState(false);
+  const [pushingToGithub, setPushingToGithub] = useState(false);
+  const [githubPushResult, setGithubPushResult] = useState<{status: string, url?: string, error?: string} | null>(null);
 
   // CAD Floorplan State
   const [crewSize, setCrewSize] = useState(15);
@@ -116,6 +119,7 @@ export default function RenderStudioPage() {
         body: JSON.stringify({
           council: 'content',
           task_description: `Generate a complete Blender Python bpy script to: ${blenderPrompt}. Include import bpy, random. Use programmatic object scattering with rotation and scale variation for a realistic greenhouse/farm scene.`,
+          model: aiModel,
         }),
       });
       const data = await res.json();
@@ -124,6 +128,34 @@ export default function RenderStudioPage() {
       setBlenderScript(generateFallbackScript(blenderPrompt));
     } finally {
       setGeneratingScript(false);
+    }
+  };
+
+  const handlePushToGithub = async () => {
+    if (!blenderScript) return;
+    setPushingToGithub(true);
+    setGithubPushResult(null);
+    try {
+      const res = await fetch('/api/github/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: blenderScript,
+          filename: `scripts/blender_auto_layout_${Date.now()}.py`,
+          commit_message: `Auto-generated Blender Layout Script: ${blenderPrompt.substring(0, 50)}...`
+        }),
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        setGithubPushResult({ status: 'success', url: data.url });
+      } else {
+        setGithubPushResult({ status: 'error', error: data.error || 'Failed to push to GitHub' });
+      }
+    } catch (e: any) {
+      setGithubPushResult({ status: 'error', error: e.message || 'Error communicating with server' });
+    } finally {
+      setPushingToGithub(false);
+      setTimeout(() => setGithubPushResult(null), 5000);
     }
   };
 
@@ -256,14 +288,25 @@ export default function RenderStudioPage() {
                   {/* Action Buttons */}
                   <div className="flex items-center gap-2 pt-1">
                     {isRunning ? (
-                      <button
-                        onClick={() => handleStopPod(pod.id)}
-                        disabled={podActionId === pod.id}
-                        className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs rounded-lg transition-colors shadow-xs disabled:opacity-60"
-                      >
-                        <Square className="w-3.5 h-3.5 fill-current" />
-                        <span>{podActionId === pod.id ? 'Stopping...' : 'Stop Pod (Pause Billing)'}</span>
-                      </button>
+                      <>
+                        <a
+                          href={`https://${pod.id}-6901.proxy.runpod.net`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="w-1/2 flex items-center justify-center gap-2 py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs rounded-lg transition-colors shadow-xs"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          <span>Open Blender Desktop</span>
+                        </a>
+                        <button
+                          onClick={() => handleStopPod(pod.id)}
+                          disabled={podActionId === pod.id}
+                          className="w-1/2 flex items-center justify-center gap-2 py-2 px-4 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs rounded-lg transition-colors shadow-xs disabled:opacity-60"
+                        >
+                          <Square className="w-3.5 h-3.5 fill-current" />
+                          <span>{podActionId === pod.id ? 'Stopping...' : 'Stop Pod (Pause Billing)'}</span>
+                        </button>
+                      </>
                     ) : (
                       <button
                         onClick={() => handleStartPod(pod.id)}
@@ -295,9 +338,24 @@ export default function RenderStudioPage() {
         </div>
 
         <div className="space-y-3">
-          <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider">
-            Natural Language Layout Prompt
-          </label>
+          <div className="flex items-center justify-between">
+            <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider">
+              Natural Language Layout Prompt
+            </label>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-bold text-zinc-400 uppercase">AI Model:</span>
+              <select
+                value={aiModel}
+                onChange={(e) => setAiModel(e.target.value)}
+                className="text-xs bg-zinc-50 border border-zinc-200 text-zinc-700 rounded-lg px-2 py-1 focus:outline-none focus:border-blue-500"
+              >
+                <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+                <option value="openai/gpt-4o">GPT-4o</option>
+                <option value="google/gemini-1.5-pro">Gemini 1.5 Pro</option>
+                <option value="deepseek/deepseek-r1">DeepSeek R1</option>
+              </select>
+            </div>
+          </div>
           <div className="flex gap-3">
             <input
               type="text"
@@ -321,30 +379,60 @@ export default function RenderStudioPage() {
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs font-bold text-zinc-600">
               <span className="flex items-center gap-1.5"><Terminal className="w-3.5 h-3.5 text-zinc-500" /> Executable Blender Python Code (bpy)</span>
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(blenderScript);
-                  setCopiedScript(true);
-                  setTimeout(() => setCopiedScript(false), 2000);
-                }}
-                className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-lg border transition-all shadow-xs ${
-                  copiedScript
-                    ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
-                    : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700 border-zinc-300'
-                }`}
-              >
-                {copiedScript ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Copied!</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5 text-zinc-500" />
-                    <span>Copy Code</span>
-                  </>
-                )}
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={handlePushToGithub}
+                  disabled={pushingToGithub}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-lg border transition-all shadow-xs ${
+                    githubPushResult?.status === 'success'
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                      : githubPushResult?.status === 'error'
+                      ? 'bg-red-50 text-red-700 border-red-300'
+                      : 'bg-zinc-900 hover:bg-zinc-800 text-white border-zinc-900 disabled:opacity-50'
+                  }`}
+                >
+                  {githubPushResult?.status === 'success' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Pushed!</span>
+                    </>
+                  ) : githubPushResult?.status === 'error' ? (
+                    <>
+                      <ShieldAlert className="w-3.5 h-3.5" />
+                      <span>Failed</span>
+                    </>
+                  ) : (
+                    <>
+                      <Github className="w-3.5 h-3.5" />
+                      <span>{pushingToGithub ? 'Pushing...' : 'Push to GitHub'}</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(blenderScript);
+                    setCopiedScript(true);
+                    setTimeout(() => setCopiedScript(false), 2000);
+                  }}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-lg border transition-all shadow-xs ${
+                    copiedScript
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                      : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700 border-zinc-300'
+                  }`}
+                >
+                  {copiedScript ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Copied!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5 text-zinc-500" />
+                      <span>Copy Code</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
             <pre className="p-4 bg-zinc-900 text-emerald-400 text-xs font-mono rounded-xl overflow-x-auto border border-zinc-800 leading-relaxed">
               {blenderScript}

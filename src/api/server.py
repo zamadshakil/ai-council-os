@@ -174,6 +174,7 @@ class RunCouncilRequest(BaseModel):
     task_description: str
     context: dict[str, Any] = Field(default_factory=dict)
     priority: str = "high"
+    model: str = ""
 
 
 class ApprovalRequest(BaseModel):
@@ -368,7 +369,7 @@ import asyncio
 _background_tasks: set[asyncio.Task] = set()
 
 
-async def _process_council_task(task_id: str, council_name: str, description: str, context: dict, priority: str):
+async def _process_council_task(task_id: str, council_name: str, description: str, context: dict, priority: str, model: str = ""):
     """Executes the multi-agent debate loop via OpenRouter in the background."""
     try:
         c_name = council_name.lower()
@@ -396,6 +397,7 @@ async def _process_council_task(task_id: str, council_name: str, description: st
             "task_description": description,
             "context": context,
             "priority": priority,
+            "model": model,
         }):
             for node_name, node_state in chunk.items():
                 final_state.update(node_state)
@@ -516,6 +518,7 @@ async def run_council(request: RunCouncilRequest):
             description=request.task_description,
             context=request.context,
             priority=request.priority,
+            model=request.model,
         )
     )
     _background_tasks.add(bg_task)
@@ -1133,6 +1136,26 @@ async def sync_gdrive_endpoint():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+class GitHubPushRequest(BaseModel):
+    content: str
+    filename: str
+    commit_message: str = ""
+
+@app.post("/api/github/push")
+async def api_github_push(request: GitHubPushRequest):
+    """Push a file (like a bpy script or dxf) directly to the configured GitHub repository."""
+    from src.integrations.github import push_file_to_github
+    try:
+        result = await push_file_to_github(
+            content=request.content,
+            filename=request.filename,
+            commit_message=request.commit_message
+        )
+        if result.get("status") == "error":
+            raise HTTPException(status_code=400, detail=result.get("error"))
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── MCP Server Mount ──────────────────────────────────────────────────────────
 
