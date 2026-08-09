@@ -290,7 +290,7 @@ export default function RenderStudioPage() {
                     {isRunning ? (
                       <>
                         <a
-                          href={`https://${pod.id}-6901.proxy.runpod.net`}
+                          href={`https://${pod.id}-${pod.httpPort || '6901'}.proxy.runpod.net`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="w-1/2 flex items-center justify-center gap-2 py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs rounded-lg transition-colors shadow-xs"

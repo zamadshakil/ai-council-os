@@ -145,13 +145,32 @@ async def list_user_pods(api_key: Optional[str] = None) -> List[dict]:
                 gpuCount
                 costPerHr
                 imageName
+                ports
             }
         }
     }
     """
     res = await execute_graphql(query, api_key=api_key)
     myself = res.get("myself", {})
-    return myself.get("pods", []) if myself else []
+    raw_pods = myself.get("pods", []) if myself else []
+
+    formatted = []
+    for pod in raw_pods:
+        p_str = pod.get("ports", "") or ""
+        # Determine best desktop/web port
+        if "6901" in p_str:
+            port = "6901"
+        elif "6080" in p_str:
+            port = "6080"
+        elif "8888" in p_str:
+            port = "8888"
+        else:
+            port = "6901"
+        
+        pod["httpPort"] = port
+        formatted.append(pod)
+
+    return formatted
 
 
 async def create_pod(
