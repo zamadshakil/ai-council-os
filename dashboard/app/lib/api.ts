@@ -273,7 +273,11 @@ export async function verifyPublishingIntegration(platform: string): Promise<unk
 
 export async function fetchIntegrationCatalog(): Promise<IntegrationConnection[]> {
   const data = await apiFetch<{ integrations: IntegrationConnection[] }>('/api/integrations/catalog');
-  return data.integrations ?? [];
+  return (data.integrations ?? []).map((connection) => ({
+    ...connection,
+    linked_workflows: Array.isArray(connection.linked_workflows) ? connection.linked_workflows : [],
+    linked_councils: Array.isArray(connection.linked_councils) ? connection.linked_councils : [],
+  }));
 }
 
 export async function saveIntegrationCredentials(
