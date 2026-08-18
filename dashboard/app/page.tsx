@@ -3,21 +3,23 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowUpRight, CheckCircle2, Clock3, Database, Plus, Radio, ShieldCheck, Sparkles } from 'lucide-react';
-import { fetchIntegrationsHealth, fetchTasks, fetchWorkflows } from './lib/api';
-import { IntegrationHealth, Task, WorkflowDefinition } from './lib/types';
+import { fetchIntegrationsHealth, fetchKnowledgeDocuments, fetchTasks, fetchWorkflows } from './lib/api';
+import { IntegrationHealth, KnowledgeDoc, Task, WorkflowDefinition } from './lib/types';
 import { TaskCard } from './components/task-card';
 import { StatusOrb } from './components/status-orb';
+import { SystemTopology } from './components/system-topology';
 
 export default function OverviewPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationHealth[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDoc[]>([]);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    void Promise.all([fetchTasks(), fetchIntegrationsHealth(), fetchWorkflows()])
-      .then(([nextTasks, nextIntegrations, nextWorkflows]) => {
-        setTasks(nextTasks); setIntegrations(nextIntegrations); setWorkflows(nextWorkflows);
+    void Promise.all([fetchTasks(), fetchIntegrationsHealth(), fetchWorkflows(), fetchKnowledgeDocuments()])
+      .then(([nextTasks, nextIntegrations, nextWorkflows, nextKnowledgeDocuments]) => {
+        setTasks(nextTasks); setIntegrations(nextIntegrations); setWorkflows(nextWorkflows); setKnowledgeDocuments(nextKnowledgeDocuments);
       })
       .catch((loadError: unknown) => setError(loadError instanceof Error ? loadError.message : 'Unable to load command-center data.'));
   }, []);
@@ -56,6 +58,8 @@ export default function OverviewPage() {
       </section>
 
       {error && <p role="alert" className="rounded-2xl border border-rose-300/20 bg-rose-400/8 p-4 text-sm text-rose-200">{error}</p>}
+
+      <SystemTopology tasks={tasks} workflows={workflows} integrationReady={verified} integrationTotal={integrations.length} knowledgeCount={knowledgeDocuments.length} />
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {metrics.map((item) => <article key={item.label} className="metric-tile surface-card rounded-[22px] p-5"><div className="flex items-start justify-between"><item.icon className={`h-5 w-5 ${item.tone}`} /><span className="status-dot text-slate-700" /></div><p className="mt-6 text-3xl font-black tracking-tight text-slate-50">{item.value}</p><p className="mt-2 text-xs font-bold uppercase tracking-[.13em] text-slate-400">{item.label}</p><p className="mt-1 text-xs text-slate-600">{item.hint}</p></article>)}

@@ -415,6 +415,370 @@ a {
   display: none;
 }
 
+/* Data-backed command maps. The visual language borrows the precision of an
+   operations console while keeping the density, spacing, and surfaces calm. */
+.topology-shell,
+.fabric-shell,
+.retrieval-shell {
+  border-color: rgba(118, 181, 221, 0.2);
+  background:
+    linear-gradient(rgba(73, 115, 153, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(73, 115, 153, 0.055) 1px, transparent 1px),
+    radial-gradient(circle at 50% 44%, rgba(42, 151, 190, 0.11), transparent 31rem),
+    linear-gradient(145deg, #0c192a, #07121f 68%, #060e19);
+  background-size: 38px 38px, 38px 38px, auto, auto;
+  box-shadow: 0 24px 68px rgba(0, 5, 15, 0.3), inset 0 1px rgba(255, 255, 255, 0.055);
+}
+
+.topology-legend {
+  display: inline-flex;
+  min-height: 2rem;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid rgba(190, 220, 244, 0.12);
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  color: #afc3da;
+  background: rgba(4, 13, 24, 0.52);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.045);
+}
+
+.topology-canvas {
+  position: relative;
+  min-height: 30rem;
+  isolation: isolate;
+}
+
+.topology-wiring {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.topology-path-base,
+.topology-path-signal {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology-path-base {
+  stroke: rgba(137, 178, 211, 0.16);
+  stroke-width: 1.2;
+}
+
+.topology-path-signal {
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-dasharray: 4 11;
+  filter: drop-shadow(0 0 6px currentColor);
+}
+
+.topology-layout {
+  display: grid;
+  min-height: 30rem;
+  grid-template-columns: minmax(13.5rem, 1fr) minmax(13rem, 0.72fr) minmax(13.5rem, 1fr);
+  align-items: center;
+  gap: clamp(2rem, 7vw, 7rem);
+  padding: 2.25rem clamp(1.25rem, 4vw, 4rem);
+}
+
+.topology-stack {
+  display: grid;
+  gap: 2rem;
+}
+
+.topology-node {
+  position: relative;
+  display: flex;
+  min-height: 6.2rem;
+  align-items: center;
+  gap: 0.85rem;
+  overflow: hidden;
+  border: 1px solid rgba(171, 205, 231, 0.15);
+  border-radius: 1.15rem;
+  padding: 0.9rem;
+  background: linear-gradient(145deg, rgba(19, 36, 57, 0.94), rgba(7, 18, 31, 0.9));
+  box-shadow: 0 14px 34px rgba(0, 4, 12, 0.24), inset 0 1px rgba(255, 255, 255, 0.045);
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.topology-node::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  content: "";
+  background: var(--node-accent);
+  opacity: 0.45;
+  box-shadow: 0 0 16px var(--node-accent);
+}
+
+.topology-node:hover,
+.topology-node:focus-visible {
+  z-index: 2;
+  transform: translateY(-2px) scale(1.012);
+  border-color: color-mix(in srgb, var(--node-accent) 46%, transparent);
+  box-shadow: 0 20px 46px rgba(0, 4, 12, 0.34), 0 0 28px color-mix(in srgb, var(--node-accent) 9%, transparent);
+}
+
+.topology-node[data-active="true"] {
+  border-color: color-mix(in srgb, var(--node-accent) 34%, transparent);
+}
+
+.topology-node[data-active="true"]::after {
+  position: absolute;
+  top: 0.9rem;
+  right: 0.9rem;
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  content: "";
+  background: var(--node-accent);
+  box-shadow: 0 0 12px var(--node-accent);
+}
+
+.topology-node-icon {
+  display: grid;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex: none;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--node-accent) 32%, transparent);
+  border-radius: 0.8rem;
+  color: var(--node-accent);
+  background: color-mix(in srgb, var(--node-accent) 9%, transparent);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.topology-core-wrap {
+  display: grid;
+  place-items: center;
+}
+
+.topology-core {
+  position: relative;
+  display: grid;
+  width: 15rem;
+  min-height: 15rem;
+  place-items: center;
+  align-content: center;
+  border: 1px solid rgba(121, 217, 239, 0.25);
+  border-radius: 999px;
+  padding: 1.5rem;
+  text-align: center;
+  background:
+    radial-gradient(circle at 38% 28%, rgba(255, 255, 255, 0.09), transparent 30%),
+    radial-gradient(circle, rgba(26, 88, 115, 0.42), rgba(5, 17, 29, 0.96) 68%);
+  box-shadow: 0 0 0 1.2rem rgba(74, 171, 198, 0.025), 0 0 0 2.8rem rgba(74, 171, 198, 0.018), 0 24px 70px rgba(0, 3, 10, 0.42), inset 0 1px rgba(255, 255, 255, 0.1);
+}
+
+.topology-core[data-active="true"] {
+  border-color: rgba(89, 225, 247, 0.5);
+  box-shadow: 0 0 0 1.2rem rgba(74, 213, 235, 0.035), 0 0 0 2.8rem rgba(74, 213, 235, 0.022), 0 0 64px rgba(64, 205, 225, 0.11), 0 24px 70px rgba(0, 3, 10, 0.42), inset 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.topology-core-orbit {
+  position: absolute;
+  inset: -1.15rem;
+  border: 1px dashed rgba(94, 214, 237, 0.22);
+  border-radius: 999px;
+}
+
+.topology-core-orbit i {
+  position: absolute;
+  width: 0.48rem;
+  height: 0.48rem;
+  border: 1px solid rgba(188, 239, 248, 0.6);
+  border-radius: 999px;
+  background: #12344a;
+  box-shadow: 0 0 12px rgba(89, 225, 247, 0.7);
+}
+
+.topology-core-orbit i:nth-child(1) { top: 6%; left: 28%; }
+.topology-core-orbit i:nth-child(2) { top: 45%; right: -0.25rem; }
+.topology-core-orbit i:nth-child(3) { bottom: 7%; left: 19%; }
+
+.topology-core-stat {
+  border: 1px solid rgba(190, 220, 244, 0.1);
+  border-radius: 999px;
+  padding: 0.28rem 0.58rem;
+  color: #93aac5;
+  background: rgba(2, 10, 18, 0.48);
+  font-size: 0.62rem;
+  font-weight: 700;
+}
+
+.topology-core-stat strong {
+  color: #e7f1ff;
+}
+
+.fabric-row {
+  min-height: 4.25rem;
+  border: 1px solid rgba(161, 197, 226, 0.1);
+  background: rgba(5, 15, 27, 0.64);
+  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+.fabric-row[data-active="true"] {
+  border-color: rgba(72, 227, 162, 0.18);
+  background: linear-gradient(90deg, rgba(38, 133, 141, 0.055), rgba(5, 15, 27, 0.72));
+}
+
+.fabric-row:hover,
+.fabric-row:focus-visible {
+  z-index: 2;
+  transform: translateY(-1px);
+  border-color: rgba(89, 225, 247, 0.26);
+  background: linear-gradient(90deg, rgba(38, 133, 141, 0.09), rgba(7, 19, 33, 0.82));
+  box-shadow: 0 14px 34px rgba(0, 4, 12, 0.24);
+}
+
+.fabric-row-name {
+  position: absolute;
+  top: 0.45rem;
+  left: 1rem;
+  display: flex;
+  max-width: calc(100% - 14rem);
+  align-items: center;
+  gap: 0.55rem;
+  overflow: hidden;
+  color: #bed0e4;
+  font-size: 0.67rem;
+  font-weight: 800;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.fabric-row-name small {
+  overflow: hidden;
+  color: #7890aa;
+  font-size: 0.59rem;
+  font-weight: 650;
+  text-transform: capitalize;
+  text-overflow: ellipsis;
+}
+
+.fabric-row-badges {
+  position: absolute;
+  top: 0.42rem;
+  right: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.58rem;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.fabric-rail {
+  position: absolute;
+  z-index: 0;
+  top: 50%;
+  right: 7%;
+  left: 7%;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(89, 225, 247, 0.32), rgba(167, 139, 250, 0.26), rgba(245, 201, 107, 0.26), rgba(72, 227, 162, 0.3));
+}
+
+.fabric-rail::after {
+  position: absolute;
+  inset: -1px 0;
+  content: "";
+  background: linear-gradient(90deg, transparent 0%, rgba(125, 231, 248, 0.07) 34%, rgba(125, 231, 248, 0.62) 50%, rgba(125, 231, 248, 0.07) 66%, transparent 100%);
+  background-size: 35% 100%;
+  background-repeat: no-repeat;
+  animation: fabric-ambient-scan 7.5s linear infinite;
+  opacity: 0.32;
+}
+
+.fabric-row[data-active="true"] .fabric-rail::after {
+  animation-duration: 3.2s;
+  opacity: 0.72;
+}
+
+@keyframes fabric-ambient-scan {
+  from { background-position: -55% 0; }
+  to { background-position: 155% 0; }
+}
+
+.fabric-packet {
+  position: absolute;
+  z-index: 1;
+  top: calc(50% - 0.25rem);
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: #a5f3fc;
+  box-shadow: 0 0 14px rgba(89, 225, 247, 0.9);
+}
+
+.fabric-stage {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.55rem;
+  border: 1px solid rgba(180, 210, 234, 0.12);
+  border-radius: 0.75rem;
+  padding: 0.55rem 0.7rem;
+  color: #c7d7e8;
+  background: #0b1726;
+  font-size: 0.7rem;
+  font-weight: 750;
+  box-shadow: 0 6px 18px rgba(0, 4, 12, 0.25), inset 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.fabric-stage i {
+  width: 0.4rem;
+  height: 0.4rem;
+  flex: none;
+  border-radius: 999px;
+  background: #59e1f7;
+  box-shadow: 0 0 9px rgba(89, 225, 247, 0.55);
+}
+
+.fabric-human {
+  border-color: rgba(245, 201, 107, 0.18);
+}
+
+.fabric-human i {
+  background: #f5c96b;
+  box-shadow: 0 0 9px rgba(245, 201, 107, 0.55);
+}
+
+.retrieval-stage {
+  border: 1px solid rgba(164, 199, 226, 0.12);
+  background: rgba(5, 15, 27, 0.7);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
+}
+
+.retrieval-connector {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  left: calc(100% + 0.15rem);
+  width: calc(1rem - 0.3rem);
+  height: 1px;
+  background: rgba(89, 225, 247, 0.36);
+}
+
+.retrieval-pulse {
+  position: absolute;
+  z-index: 3;
+  top: calc(50% - 0.2rem);
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: #a5f3fc;
+  box-shadow: 0 0 12px rgba(89, 225, 247, 0.9);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -492,6 +856,73 @@ html[data-reduce-transparency] .liquid-nav-selection {
 }
 
 @media (max-width: 767px) {
+  .topology-canvas,
+  .topology-layout {
+    min-height: auto;
+  }
+
+  .topology-wiring {
+    display: none;
+  }
+
+  .topology-layout {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+    padding: 1.25rem;
+  }
+
+  .topology-core-wrap {
+    grid-row: 1;
+    padding: 1.5rem 0;
+  }
+
+  .topology-councils { grid-row: 2; }
+  .topology-operations { grid-row: 3; }
+  .topology-stack { gap: 0.75rem; }
+  .topology-core { width: 12rem; min-height: 12rem; }
+  .topology-node { min-height: 5.25rem; }
+
+  .retrieval-connector,
+  .retrieval-pulse {
+    display: none;
+  }
+
+  .fabric-canvas {
+    min-width: 0;
+  }
+
+  .fabric-headings,
+  .fabric-rail,
+  .fabric-packet {
+    display: none;
+  }
+
+  .fabric-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 0.55rem;
+    padding: 3.1rem 0.75rem 0.75rem;
+  }
+
+  .fabric-stage {
+    width: 100%;
+  }
+
+  .fabric-row-name {
+    top: 0.6rem;
+    right: 0.75rem;
+    max-width: calc(100% - 1.5rem);
+  }
+
+  .fabric-row-name small {
+    display: none;
+  }
+
+  .fabric-row-badges {
+    top: 1.75rem;
+    right: auto;
+    left: 0.75rem;
+  }
+
   .shell-content {
     padding-left: 0 !important;
     padding-bottom: 92px;

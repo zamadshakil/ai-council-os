@@ -6,6 +6,7 @@ import { Bot, ExternalLink, FilePenLine, MessageCircle, Newspaper, Pause, Play, 
 import { fetchWorkflows, triggerWorkflow, updateWorkflow } from '../lib/api';
 import { WorkflowDefinition } from '../lib/types';
 import { StatusOrb } from '../components/status-orb';
+import { WorkflowFabric } from '../components/workflow-fabric';
 
 const META: Record<string, { description: string; value: string; icon: typeof Bot }> = {
   telegram_control: { description: 'Private administrator approvals, alerts, pause controls, and global emergency stop.', value: 'Control plane', icon: Send },
@@ -53,6 +54,7 @@ export default function WorkflowsPage() {
   return <div className="space-y-7 pb-16">
     <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="eyebrow">Durable execution fabric</p><h1 className="mt-2 text-3xl font-black tracking-tight text-slate-50">Automation workflows</h1><p className="mt-2 max-w-2xl text-sm text-slate-300">Six focused automations with durable jobs, deduplication, verified credentials, and human approval before every external write.</p></div><div className="flex items-center gap-3"><span className="flex items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/8 px-4 py-2 text-xs font-bold text-emerald-300"><span className="status-dot" />{online} online</span><button aria-label="Refresh workflows" onClick={() => void load()} className="rounded-xl border border-white/10 bg-white/5 p-2.5 text-slate-300"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /></button></div></div>
     {error && <p role="alert" className="rounded-2xl border border-rose-300/20 bg-rose-400/8 p-4 text-sm text-rose-200">{error}</p>}
+    <WorkflowFabric workflows={workflows} />
     {loading && workflows.length === 0 ? <div className="grid gap-4 lg:grid-cols-2">{[1,2,3,4].map((id) => <div key={id} className="h-64 animate-pulse rounded-2xl bg-white/5" />)}</div> : <section className="grid gap-4 lg:grid-cols-2">{workflows.map((workflow) => {
       const meta = META[workflow.id] ?? { description: 'Durable production automation.', value: 'Automation', icon: Bot }; const Icon = meta.icon;
       const isOnline = workflow.is_enabled && !workflow.is_paused; const ready = verified(workflow); const working = busy === workflow.id;
