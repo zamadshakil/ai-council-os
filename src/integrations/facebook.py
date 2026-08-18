@@ -1,29 +1,30 @@
 from __future__ import annotations
-import os
 import httpx
+from src.core.integration_context import integration_value
 
 """
 facebook.py — Facebook Page Publisher
 
 Posts AI-generated content to Facebook Pages.
-Uses Meta Graph API v21.0.
+Uses the configured Meta Graph API version.
 
 Requires:
   META_ACCESS_TOKEN (or INSTAGRAM_ACCESS_TOKEN — same app token works)
   FACEBOOK_PAGE_ID — the numeric Facebook Page ID
 """
 
-API_VERSION = "v21.0"
-BASE_URL = f"https://graph.facebook.com/{API_VERSION}"
+def _base_url() -> str:
+    version = integration_value("META_GRAPH_API_VERSION", "v23.0").strip() or "v23.0"
+    return f"https://graph.facebook.com/{version}"
 
 async def publish_text(content: str) -> dict:
     """Text-only post."""
-    page_id = os.environ.get("FACEBOOK_PAGE_ID")
-    token = os.environ.get("META_ACCESS_TOKEN") or os.environ.get("INSTAGRAM_ACCESS_TOKEN")
+    page_id = integration_value("FACEBOOK_PAGE_ID")
+    token = integration_value("META_ACCESS_TOKEN") or integration_value("INSTAGRAM_ACCESS_TOKEN")
     if not page_id or not token:
         raise RuntimeError("Missing Facebook credentials (FACEBOOK_PAGE_ID, META_ACCESS_TOKEN).")
         
-    url = f"{BASE_URL}/{page_id}/feed"
+    url = f"{_base_url()}/{page_id}/feed"
     payload = {
         "message": content,
         "access_token": token
@@ -38,12 +39,12 @@ async def publish_text(content: str) -> dict:
 
 async def publish_with_image(content: str, image_url: str) -> dict:
     """Posts with photo."""
-    page_id = os.environ.get("FACEBOOK_PAGE_ID")
-    token = os.environ.get("META_ACCESS_TOKEN") or os.environ.get("INSTAGRAM_ACCESS_TOKEN")
+    page_id = integration_value("FACEBOOK_PAGE_ID")
+    token = integration_value("META_ACCESS_TOKEN") or integration_value("INSTAGRAM_ACCESS_TOKEN")
     if not page_id or not token:
         raise RuntimeError("Missing Facebook credentials (FACEBOOK_PAGE_ID, META_ACCESS_TOKEN).")
         
-    url = f"{BASE_URL}/{page_id}/photos"
+    url = f"{_base_url()}/{page_id}/photos"
     payload = {
         "url": image_url,
         "message": content,

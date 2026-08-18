@@ -13,7 +13,7 @@ Edit this single file to tune the prospector.
 
 SUBREDDITS = [
     # Business & Startups
-    "Entrepreneur", "startups", "SaaS", "smallbusiness", "business",
+    "Entrepreneur", "startups", "SaaS", "smallbusiness",
     "EntrepreneurRideAlong", "growmybusiness", "indiehackers",
     
     # Marketing & Sales
@@ -34,8 +34,7 @@ SUBREDDITS = [
     "podcasting", "Blogging", "TikTokCreators",
     
     # Productivity & Tools
-    "productivity", "SideProject", "InternetIsBeautiful",
-    "software", "Notion", "selfhosted",
+    "productivity", "SideProject", "Notion", "selfhosted",
     
     # Industry-Specific
     "ecommerce", "dropship", "realestateinvesting",

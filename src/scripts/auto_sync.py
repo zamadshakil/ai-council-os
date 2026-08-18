@@ -7,7 +7,6 @@ to guarantee ZERO data loss even if a pod crashes or is terminated.
 """
 
 import os
-import sys
 import time
 import subprocess
 from datetime import datetime, timezone

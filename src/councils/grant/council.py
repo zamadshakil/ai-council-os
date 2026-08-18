@@ -53,8 +53,19 @@ class GrantCouncil(BaseCouncil):
 
     council_name = "grant"
     confidence_threshold = 88.0   # Stricter — grants must be near-perfect
-    max_iterations = 4            # Allow more debate rounds for quality
-    min_iterations = 2            # Always do at least 2 rounds
+    max_iterations = 3            # Hard cap: no more than three generator drafts
+    critic_categories = {
+        "scientific_rigour": 10,
+        "innovation_ambition": 10,
+        "objectives_clarity": 10,
+        "interdisciplinarity": 10,
+        "expected_outcomes": 10,
+        "dissemination_exploitation": 10,
+        "societal_relevance": 10,
+        "work_plan_feasibility": 10,
+        "budget_justification": 10,
+        "risk_management": 10,
+    }
 
     def get_generator_prompt(self, state: dict) -> list[dict]:
         """
@@ -116,8 +127,9 @@ class GrantCouncil(BaseCouncil):
             "'state-of-the-art solution' without immediately substantiating it\n"
             "- Write in third person where appropriate (e.g., 'The consortium "
             "will…', 'The project aims to…')\n\n"
-            "OUTPUT: Produce the FULL proposal text with all sections clearly "
-            "marked with markdown headings (## and ###). Do not ask for more "
+            "OUTPUT CONTRACT: Put the FULL proposal text in the structured content field, "
+            "with all sections clearly marked with markdown headings (## and ###). Put every "
+            "assumption in the assumptions list and any safety/completeness warning in warnings. Do not ask for more "
             "information — work with what is provided and make reasonable "
             "assumptions where details are missing (flag assumptions clearly "
             "with [ASSUMPTION: ...] markers so the human reviewer can fill them in)."
@@ -213,14 +225,12 @@ class GrantCouncil(BaseCouncil):
             "clearly tied to activities?\n"
             "10. RISK MANAGEMENT (1-10): Are risks identified with mitigation "
             "strategies?\n\n"
-            "FORMAT YOUR RESPONSE AS:\n"
-            "- Per-criterion scores with specific, actionable feedback\n"
-            "- STRUCTURAL COMPLETENESS: List any missing sections from the "
-            "standard EU framework\n"
-            "- KEY STRENGTHS (what would impress a panel)\n"
-            "- CRITICAL WEAKNESSES (what would cause rejection)\n"
-            "- SPECIFIC REQUIRED EDITS (numbered list)\n"
-            "- End with: CONFIDENCE: X/100\n\n"
+            "Return the required structured critic object. category_scores must contain "
+            "exactly these snake_case keys, each scored from 0 to 100: "
+            "scientific_rigour, innovation_ambition, objectives_clarity, "
+            "interdisciplinarity, expected_outcomes, dissemination_exploitation, "
+            "societal_relevance, work_plan_feasibility, budget_justification, "
+            "risk_management. Include concrete strengths, weaknesses, and required edits.\n\n"
             "SCORING GUIDE:\n"
             "- 88+ = Submission-ready (minor polish only)\n"
             "- 70-87 = Promising but needs significant revision\n"
@@ -233,7 +243,7 @@ class GrantCouncil(BaseCouncil):
             f"GRANT PROGRAMME: {grant_type}\n\n"
             f"ORIGINAL CALL / TASK:\n{task}\n\n"
             f"PROPOSAL DRAFT TO EVALUATE:\n{draft}\n\n"
-            "Provide your full evaluation panel critique and CONFIDENCE score:"
+            "Provide the structured evaluation panel result:"
         )
 
         return [

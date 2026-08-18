@@ -1,210 +1,195 @@
-"""
-youtube_comments.py — YouTube Comment Auto-Reply Workflow
+"""YouTube comment reply producer; publication is a separate approved action."""
 
-Client spec:
-- Pulls new comments across the channel
-- Drafts context-aware reply with AI (Support Council)
-- Posts via YouTube API after human approval
-- ~200 comments/day target
-- Rate cap per run
-- Deduplication against persistent store
+from __future__ import annotations
 
-Pipeline:
-1. Check kill switch → exit if ON
-2. Fetch all channel videos
-3. Loop over each video → fetch comments
-4. Deduplicate each comment ID against persistent DB
-5. For each new comment: build prompt with video title + topic + comment text
-6. Send to Support Council (LangGraph debate loop)
-7. Stage draft for human approval in Dashboard
-8. On approval → post reply via YouTube API
-"""
-
+import asyncio
 import os
+from src.core.integration_context import integration_value
 import uuid
-from datetime import datetime, timezone
-from typing import List, Dict, Any
+from collections.abc import MutableMapping
+from typing import Any
 
-from src.core.kill_switch import is_killed
 from src.core.dedup import is_seen, mark_seen
-from src.core.llm_router import call_llm
-from src.integrations.youtube import (
-    fetch_channel_videos,
-    fetch_recent_comments,
-    post_comment_reply,
+from src.core.workflow_contracts import (
+    PublicationPolicy,
+    TaskSink,
+    WorkflowRunResult,
+    WorkflowTask,
+    WorkflowTaskStatus,
+    has_external_item,
+    stage_workflow_task,
+    workflow_execution_blocked,
+    workflow_kill_switch_active,
 )
-from src.integrations.telegram_bot import (
-    notify_workflow_start,
-    notify_workflow_complete,
-    notify_workflow_error,
-    send_draft_for_approval,
-)
+from src.councils import create_council
+from src.integrations.youtube import fetch_channel_videos, fetch_recent_comments
 
-# Config
 MAX_REPLIES_PER_RUN = int(os.getenv("YT_MAX_REPLIES_PER_RUN", "50"))
-CONFIDENCE_THRESHOLD = 75.0
 
 
-async def run_youtube_comment_workflow(tasks_store: dict) -> dict:
-    """
-    Main entry point for the YouTube Comment Auto-Reply workflow.
-    
-    Returns a summary dict with stats from this run.
-    """
-    # 1. Kill switch check
-    if is_killed():
-        print("🛑 [YouTube Comments] Kill switch is active. Aborting.")
-        return {"status": "killed", "processed": 0}
-
-    await notify_workflow_start(
-        "YouTube Comment Auto-Reply",
-        f"Max replies this run: {MAX_REPLIES_PER_RUN}"
+async def _already_staged(sink: TaskSink, comment_id: str) -> bool:
+    if await has_external_item(sink, "youtube_comment", comment_id):
+        return True
+    return isinstance(sink, MutableMapping) and is_seen(
+        comment_id, source="youtube_comment"
     )
 
-    channel_id = os.getenv("YOUTUBE_CHANNEL_ID", "")
-    if not channel_id:
-        await notify_workflow_error("YouTube Comment Auto-Reply", "No YOUTUBE_CHANNEL_ID configured")
-        return {"status": "error", "error": "No channel ID"}
 
-    try:
-        # 2. Fetch all channel videos
-        videos = fetch_channel_videos(channel_id, max_results=50)
-        
-        new_comments = []
-        replies_staged = 0
-
-        # 3. Loop over each video → fetch comments
-        for video in videos:
-            if is_killed():
-                break
-            if replies_staged >= MAX_REPLIES_PER_RUN:
-                break
-
-            video_id = video["video_id"]
-            video_title = video["title"]
-            
-            comments = fetch_recent_comments(video_id, limit=30)
-
-            # 4. Deduplicate
-            for comment in comments:
-                if replies_staged >= MAX_REPLIES_PER_RUN:
-                    break
-
-                comment_id = comment["comment_id"]
-                
-                if is_seen(comment_id, source="youtube_comment"):
-                    continue
-
-                # 5. Build context-aware prompt and get AI reply
-                reply_data = await _generate_reply(
-                    video_title=video_title,
-                    comment_text=comment["text"],
-                    comment_author=comment["author"],
-                )
-
-                # Mark as seen immediately (even before approval)
-                mark_seen(comment_id, source="youtube_comment", metadata=video_title)
-
-                # 6. Stage for human approval in Dashboard
-                task_id = f"yt-{str(uuid.uuid4())[:8]}"
-                task = {
-                    "task_id": task_id,
-                    "council": "support",
-                    "status": "awaiting_approval",
-                    "task_description": f"Reply to comment on '{video_title}' by {comment['author']}",
-                    "final_output": reply_data["reply"],
-                    "confidence_score": reply_data["confidence"],
-                    "iterations": 1,
-                    "total_cost_usd": reply_data.get("cost", 0),
-                    "debate_history": [
-                        {
-                            "role": "generator",
-                            "model": reply_data.get("model", "unknown"),
-                            "content": f"Generated reply to: \"{comment['text'][:100]}...\"",
-                            "confidence_score": reply_data["confidence"],
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                    ],
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "context": {
-                        "comment_id": comment_id,
-                        "video_id": video_id,
-                        "video_title": video_title,
-                        "original_comment": comment["text"],
-                        "comment_author": comment["author"],
-                        "workflow": "youtube_comments",
-                    },
-                }
-                tasks_store[task_id] = task
-                replies_staged += 1
-
-                # 7. Notify via Telegram
-                await send_draft_for_approval(
-                    task_id=task_id,
-                    workflow_name="YouTube Comment Reply",
-                    draft_text=reply_data["reply"],
-                    context_summary=f"Video: {video_title}\nComment by {comment['author']}: {comment['text'][:100]}",
-                    confidence=reply_data["confidence"],
-                )
-
-        summary = f"Scanned {len(videos)} videos. Staged {replies_staged} new replies for approval."
-        await notify_workflow_complete("YouTube Comment Auto-Reply", summary)
-        
-        return {"status": "complete", "videos_scanned": len(videos), "replies_staged": replies_staged}
-
-    except Exception as e:
-        await notify_workflow_error("YouTube Comment Auto-Reply", str(e))
-        return {"status": "error", "error": str(e)}
-
-
-async def _generate_reply(video_title: str, comment_text: str, comment_author: str) -> dict:
-    """
-    Generate a context-aware reply using the LLM.
-    Uses the cheap/fast tier for individual comment replies to save costs.
-    """
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a helpful, friendly YouTube channel manager.\n\n"
-                "RULES:\n"
-                "- Reply to the comment naturally and helpfully.\n"
-                "- Reference the VIDEO TOPIC to show you actually watched/made the video.\n"
-                "- Keep replies under 100 words.\n"
-                "- Sound human, not like a bot. Vary your sentence structure.\n"
-                "- If the comment is positive, be grateful. If it's a question, answer it.\n"
-                "- Never be generic. Never say 'Thanks for watching!' without context.\n\n"
-                "At the end of your response, on a new line, write:\n"
-                "CONFIDENCE: X/100\n"
-                "Score 80+ means the reply is natural and contextual."
-            ),
+async def _generate_reply(
+    video_title: str, comment_text: str, comment_author: str, custom_prompt: str = ""
+) -> dict[str, Any]:
+    """Generate and critique a reply with the Content Council profile."""
+    result = await create_council("content").run(
+        "Write a natural, specific reply to the supplied YouTube comment."
+        + (f"\n\nAdministrator guidance:\n{custom_prompt}" if custom_prompt.strip() else ""),
+        context={
+            "platform": "youtube_comment",
+            "video_title": video_title,
+            "comment_text": comment_text,
+            "comment_author": comment_author,
         },
-        {
-            "role": "user",
-            "content": (
-                f"VIDEO TITLE: {video_title}\n"
-                f"COMMENTER: {comment_author}\n"
-                f"COMMENT: {comment_text}\n\n"
-                "Write a reply:"
-            ),
-        },
-    ]
-
-    result = await call_llm(messages=messages, tier="fast", temperature=0.8)
-
-    # Extract confidence
-    import re
-    confidence = 75.0
-    match = re.search(r"CONFIDENCE:\s*(\d+(?:\.\d+)?)", result["content"], re.IGNORECASE)
-    if match:
-        confidence = float(match.group(1))
-
-    # Strip confidence line from reply
-    reply = re.sub(r"\nCONFIDENCE:\s*\d+(?:\.\d+)?/?\d*\s*$", "", result["content"]).strip()
-
+    )
     return {
-        "reply": reply,
-        "confidence": min(max(confidence, 0), 100),
-        "model": result["model"],
-        "cost": result["cost_usd"],
+        "reply": result.final_output,
+        "confidence": result.confidence_score,
+        "cost": result.total_cost_usd,
+        "cost_metrics_complete": result.cost_metrics_complete,
+        "iterations": result.draft_count,
+        "debate_history": result.debate_history,
+        "structured_output": result.structured_output,
+        "status": result.status.value,
+        "warnings": result.warnings,
     }
+
+
+async def run_youtube_comment_workflow(
+    tasks_store: TaskSink, custom_prompt: str = ""
+) -> dict[str, Any]:
+    from src.integrations.telegram_bot import (
+        notify_workflow_complete,
+        notify_workflow_error,
+        notify_workflow_start,
+    )
+
+    workflow_name = "youtube_comments"
+    if await workflow_kill_switch_active(tasks_store):
+        return WorkflowRunResult(workflow=workflow_name, status="killed").model_dump(mode="json")
+
+    channel_id = integration_value("YOUTUBE_CHANNEL_ID", "").strip()
+    if not channel_id:
+        error = "YOUTUBE_CHANNEL_ID is not configured."
+        await notify_workflow_error("YouTube Comment Replies", error)
+        return WorkflowRunResult(workflow=workflow_name, status="error", error=error).model_dump(
+            mode="json"
+        )
+
+    await notify_workflow_start(
+        "YouTube Comment Replies",
+        f"At most {MAX_REPLIES_PER_RUN} replies will be staged for approval.",
+    )
+    task_ids: list[str] = []
+    skipped = 0
+    failed = 0
+    scanned = 0
+    item_errors: list[str] = []
+    try:
+        videos = await asyncio.to_thread(fetch_channel_videos, channel_id, 50)
+        for video in videos:
+            if await workflow_execution_blocked(tasks_store, workflow_name) or len(task_ids) >= MAX_REPLIES_PER_RUN:
+                break
+            comments = await asyncio.to_thread(fetch_recent_comments, video["video_id"], 30)
+            for comment in comments:
+                if await workflow_execution_blocked(tasks_store, workflow_name) or len(task_ids) >= MAX_REPLIES_PER_RUN:
+                    break
+                scanned += 1
+                comment_id = comment["comment_id"]
+                if await _already_staged(tasks_store, comment_id):
+                    skipped += 1
+                    continue
+                try:
+                    if await workflow_execution_blocked(tasks_store, workflow_name):
+                        break
+                    reply = await _generate_reply(
+                        video["title"], comment["text"], comment["author"], custom_prompt
+                    )
+                    task_id = f"yt-{uuid.uuid4().hex[:8]}"
+                    task = WorkflowTask(
+                        task_id=task_id,
+                        workflow=workflow_name,
+                        source="youtube_comment",
+                        external_id=comment_id,
+                        council="content",
+                        status=WorkflowTaskStatus(reply["status"]),
+                        task_description=(
+                            f"Reply to comment on '{video['title']}' by {comment['author']}"
+                        ),
+                        final_output=reply["reply"],
+                        structured_output=reply["structured_output"],
+                        confidence_score=reply["confidence"],
+                        iterations=reply["iterations"],
+                        total_cost_usd=reply["cost"],
+                        cost_metrics_complete=reply["cost_metrics_complete"],
+                        debate_history=reply["debate_history"],
+                        publication_policy=PublicationPolicy.APPROVAL_REQUIRED,
+                        context={
+                            "comment_id": comment_id,
+                            "video_id": video["video_id"],
+                            "video_title": video["title"],
+                            "original_comment": comment["text"],
+                            "comment_author": comment["author"],
+                            "publish_action": "youtube_comment_reply",
+                            "warnings": reply["warnings"],
+                        },
+                    )
+                    await stage_workflow_task(tasks_store, task)
+                    if isinstance(tasks_store, MutableMapping):
+                        mark_seen(comment_id, source="youtube_comment", metadata=video["title"])
+                    task_ids.append(task_id)
+                except Exception as exc:
+                    failed += 1
+                    item_errors.append(f"{type(exc).__name__}: {str(exc)[:300]}")
+
+        if failed > 0 and not task_ids:
+            error = (
+                f"All {failed} eligible YouTube comment reply operations failed; "
+                "no replies were staged for approval."
+            )
+            if item_errors:
+                error += f" Last failure: {item_errors[-1]}"
+            await notify_workflow_error("YouTube Comment Replies", error)
+            return WorkflowRunResult(
+                workflow=workflow_name,
+                status="error",
+                scanned=scanned,
+                staged=0,
+                skipped=skipped,
+                failed=failed,
+                task_ids=[],
+                error=error,
+            ).model_dump(mode="json")
+
+        await notify_workflow_complete(
+            "YouTube Comment Replies",
+            f"Scanned {scanned} comments; staged {len(task_ids)} for approval.",
+        )
+        return WorkflowRunResult(
+            workflow=workflow_name,
+            status="complete",
+            scanned=scanned,
+            staged=len(task_ids),
+            skipped=skipped,
+            failed=failed,
+            task_ids=task_ids,
+        ).model_dump(mode="json")
+    except Exception as exc:
+        await notify_workflow_error("YouTube Comment Replies", str(exc))
+        return WorkflowRunResult(
+            workflow=workflow_name,
+            status="error",
+            scanned=scanned,
+            staged=len(task_ids),
+            skipped=skipped,
+            failed=failed + 1,
+            task_ids=task_ids,
+            error=str(exc),
+        ).model_dump(mode="json")

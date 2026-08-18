@@ -1,6 +1,6 @@
 from __future__ import annotations
-import os
 import httpx
+from src.core.integration_context import integration_value
 
 """
 linkedin.py — LinkedIn Content Publisher
@@ -16,11 +16,11 @@ Requires:
 
 async def _get_author_urn() -> str:
     """Returns person or org URN from env."""
-    org_id = os.environ.get("LINKEDIN_ORGANIZATION_ID")
+    org_id = integration_value("LINKEDIN_ORGANIZATION_ID")
     if org_id:
         return f"urn:li:organization:{org_id}" if not org_id.startswith("urn:li:organization:") else org_id
     
-    person_id = os.environ.get("LINKEDIN_PERSON_ID")
+    person_id = integration_value("LINKEDIN_PERSON_ID")
     if person_id:
         return f"urn:li:person:{person_id}" if not person_id.startswith("urn:li:person:") else person_id
         
@@ -32,7 +32,7 @@ async def _upload_image(image_url: str) -> str:
 
 async def publish(content: str, media_url: str | None = None) -> dict:
     """Posts text (with optional image)."""
-    token = os.environ.get("LINKEDIN_ACCESS_TOKEN")
+    token = integration_value("LINKEDIN_ACCESS_TOKEN")
     if not token:
         raise RuntimeError("Missing LINKEDIN_ACCESS_TOKEN.")
         

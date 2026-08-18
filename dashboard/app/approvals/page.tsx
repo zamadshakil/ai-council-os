@@ -1,112 +1,81 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { RefreshCw } from 'lucide-react';
 import { TaskCard } from '../components/task-card';
 import { fetchTasks } from '../lib/api';
-import { Task } from '../lib/types';
-import { Loader2 } from 'lucide-react';
+import { Task, TaskStatus } from '../lib/types';
 
-const TABS = [
-  { id: 'all', label: 'All Tasks' },
-  { id: 'awaiting_approval', label: 'Pending' },
+const TABS: Array<{ id: 'all' | TaskStatus; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'queued', label: 'Queued' },
+  { id: 'running', label: 'Running' },
+  { id: 'awaiting_approval', label: 'Awaiting approval' },
+  { id: 'needs_manual_review', label: 'Manual review' },
   { id: 'approved', label: 'Approved' },
-  { id: 'rejected', label: 'Rejected' },
+  { id: 'failed', label: 'Failed' },
 ];
 
 export default function ApprovalsPage() {
-  const [filter, setFilter] = useState('all');
+  const [filter, setFilter] = useState<'all' | TaskStatus>('all');
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  const loadTasks = useCallback(async () => {
+  const load = useCallback(async () => {
     try {
-      // Fetch all tasks and filter in memory so pending/debating tasks also show up
-      const data = await fetchTasks();
-      let filtered = data;
-
-      if (filter === 'awaiting_approval') {
-        filtered = data.filter(t => 
-          t.status === 'awaiting_approval' || 
-          t.status === 'pending' || 
-          t.status === 'generating' || 
-          t.status === 'critiquing' || 
-          t.status === 'refining'
-        );
-      } else if (filter !== 'all') {
-        filtered = data.filter(t => t.status === filter);
-      }
-
-      setTasks(filtered);
-    } catch (err) {
-      console.error('Failed to fetch tasks:', err);
+      const next = await fetchTasks();
+      setTasks(next);
+      setError('');
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load the queue.');
     } finally {
       setLoading(false);
     }
-  }, [filter]);
+  }, []);
 
   useEffect(() => {
-    setLoading(true);
-    loadTasks();
-  }, [loadTasks]);
+    let active = true;
+    void fetchTasks()
+      .then((next) => { if (active) { setTasks(next); setError(''); } })
+      .catch((loadError: unknown) => { if (active) setError(loadError instanceof Error ? loadError.message : 'Unable to load the queue.'); })
+      .finally(() => { if (active) setLoading(false); });
+    const timer = window.setInterval(() => void load(), 10_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [load]);
 
-  // Fast auto-refresh (every 3 seconds) when tasks are in progress/debating
-  useEffect(() => {
-    const hasActiveDebate = tasks.some(t => 
-      t.status === 'pending' || t.status === 'generating' || t.status === 'critiquing' || t.status === 'refining'
-    );
-    const intervalTime = hasActiveDebate ? 3000 : 10000;
-    const interval = setInterval(loadTasks, intervalTime);
-    return () => clearInterval(interval);
-  }, [tasks, loadTasks]);
-
+  const filtered = useMemo(() => filter === 'all' ? tasks : tasks.filter((task) => task.status === filter), [filter, tasks]);
 
   return (
-    <div className="space-y-12 pb-20 animate-in fade-in duration-300 ease-out fill-mode-both">
-      <div className="mb-8">
-        <h1 className="text-[40px] font-bold text-[#111827] tracking-tight leading-none mb-3">Approval Queue</h1>
-        <p className="text-[15px] text-zinc-500 font-medium">Review, edit, and approve/reject AI council outputs before they go live.</p>
+    <div className="space-y-7 pb-16">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <p className="eyebrow">Human decision gate</p><h1 className="mt-2 text-3xl font-black tracking-tight text-slate-50">Queue & approvals</h1>
+          <p className="mt-2 text-sm text-slate-400">Running work is visible but can only be approved after it reaches an approval state.</p>
+        </div>
+        <button onClick={() => void load()} className="flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 text-sm font-semibold text-slate-300 hover:bg-white/8">
+          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
+        </button>
       </div>
 
-      <div className="flex space-x-2">
+      <div className="flex flex-wrap gap-2">
         {TABS.map((tab) => {
-          const isActive = filter === tab.id;
-          const count = tab.id === 'all' ? tasks.length : 
-            tab.id === filter ? tasks.length : undefined;
+          const count = tab.id === 'all' ? tasks.length : tasks.filter((task) => task.status === tab.id).length;
           return (
-            <button
-              key={tab.id}
-              onClick={() => setFilter(tab.id)}
-              className={`px-5 py-2.5 text-[14px] font-bold rounded-full transition-all duration-200 active:scale-[0.98] ${
-                isActive
-                  ? 'bg-zinc-900 text-white shadow-md'
-                  : 'bg-white text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 shadow-sm border border-zinc-200/80'
-              }`}
-            >
-              {tab.label}
-              {isActive && count !== undefined && (
-                <span className="ml-2 text-[12px] opacity-70">{count}</span>
-              )}
+            <button key={tab.id} onClick={() => setFilter(tab.id)} className={`rounded-full px-4 py-2 text-sm font-semibold ${filter === tab.id ? 'bg-cyan-300 text-[#04111b]' : 'border border-white/10 bg-white/5 text-slate-400 hover:bg-white/8'}`}>
+              {tab.label} <span className="ml-1 opacity-70">{count}</span>
             </button>
           );
         })}
       </div>
 
-      {loading ? (
-        <div className="flex flex-col gap-4">
-          {[1, 2, 3].map(i => (
-            <div key={i} className="h-32 bg-zinc-200/50 rounded-[24px] animate-pulse" />
-          ))}
-        </div>
-      ) : tasks.length === 0 ? (
-        <div className="py-32 text-center bg-transparent rounded-[24px] border border-zinc-200/60 border-dashed">
-          <p className="text-[15px] text-zinc-500 font-medium">No tasks found in this view.</p>
-        </div>
+      {error && <p role="alert" className="rounded-xl border border-rose-300/20 bg-rose-400/8 p-4 text-sm text-rose-200">{error}</p>}
+      {loading && tasks.length === 0 ? (
+        <div className="space-y-3">{[1, 2, 3].map((item) => <div key={item} className="h-36 animate-pulse rounded-2xl bg-white/5" />)}</div>
+      ) : filtered.length === 0 ? (
+        <div className="surface-card rounded-2xl border-dashed py-24 text-center text-sm text-slate-500">No persisted tasks match this filter.</div>
       ) : (
-        <div className="flex flex-col gap-4 animate-in fade-in duration-500">
-          {tasks.map((task) => (
-            <TaskCard key={task.task_id} task={task} onStatusChange={loadTasks} />
-          ))}
-        </div>
+        <div className="space-y-3">{filtered.map((task) => <TaskCard key={task.task_id} task={task} />)}</div>
       )}
     </div>
   );

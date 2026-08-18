@@ -1,22 +1,217 @@
-version: '3.8'
+name: ai-council-os
 
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: council_os_db
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: council_user
-      POSTGRES_PASSWORD: council_pass
-      POSTGRES_DB: council_os
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
     volumes:
-      - council_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U council_user -d council_os"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
       timeout: 5s
+      retries: 10
+    networks: [internal]
+    mem_limit: 2g
+    cpus: 1.5
+
+  api:
+    image: ${BACKEND_IMAGE:?Set immutable BACKEND_IMAGE in .env}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+      APP_ORIGIN: https://${PUBLIC_HOST:?Set PUBLIC_HOST in .env}
+      ALLOWED_HOSTS: ${PUBLIC_HOST:?},api,localhost,127.0.0.1
+      API_BASE_URL: http://api:8000
+      DASHBOARD_URL: https://${PUBLIC_HOST:?}
+    command: ["/bin/sh", "-c", "alembic upgrade head && exec uvicorn src.api.server:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=*"]
+    volumes:
+      - app_data:/app/data
+      - ./credentials:/app/credentials:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+    mem_limit: 4g
+    cpus: 2.0
+    stop_grace_period: 30s
+
+  worker:
+    image: ${BACKEND_IMAGE:?Set immutable BACKEND_IMAGE in .env}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+      APP_ORIGIN: https://${PUBLIC_HOST:?Set PUBLIC_HOST in .env}
+      ALLOWED_HOSTS: ${PUBLIC_HOST:?},api,localhost,127.0.0.1
+      API_BASE_URL: http://api:8000
+      DASHBOARD_URL: https://${PUBLIC_HOST:?}
+    command: ["python", "-m", "src.worker"]
+    volumes:
+      - app_data:/app/data
+      - ./credentials:/app/credentials:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import asyncio; from src.core.database import database_ready; raise SystemExit(0 if asyncio.run(database_ready()) else 1)"]
+      interval: 30s
+      timeout: 8s
       retries: 5
+      start_period: 30s
+    networks: [internal]
+    mem_limit: 6g
+    cpus: 3.0
+    stop_grace_period: 45s
+
+  dashboard:
+    image: ${DASHBOARD_IMAGE:?Set immutable DASHBOARD_IMAGE in .env}
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        BACKEND_URL: http://api:8000/api/:path*
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+    mem_limit: 1g
+    cpus: 1.0
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?Set PUBLIC_HOST in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      dashboard:
+        condition: service_healthy
+    networks: [internal]
+    mem_limit: 256m
+    cpus: 0.5
+
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PGDATABASE: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        while true; do
+          timestamp=$$(date -u +%Y%m%dT%H%M%SZ)
+          dump_tmp="/backups/.council_os_$${timestamp}.dump.tmp"
+          dump_final="/backups/council_os_$${timestamp}.dump"
+          data_tmp="/backups/.app_data_$${timestamp}.tar.gz.tmp"
+          data_final="/backups/app_data_$${timestamp}.tar.gz"
+          pg_dump --format=custom --file="$${dump_tmp}"
+          pg_restore --list "$${dump_tmp}" >/dev/null
+          mv "$${dump_tmp}" "$${dump_final}"
+          tar -czf "$${data_tmp}" -C /app-data .
+          tar -tzf "$${data_tmp}" >/dev/null
+          mv "$${data_tmp}" "$${data_final}"
+          date -u +%s > /backups/.last_success
+          find /backups -type f -name 'council_os_*.dump' -mtime "+$${BACKUP_RETENTION_DAYS}" -delete
+          find /backups -type f -name 'app_data_*.tar.gz' -mtime "+$${BACKUP_RETENTION_DAYS}" -delete
+          sleep 86400
+        done
+    volumes:
+      - postgres_backups:/backups
+      - app_data:/app-data:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [internal]
+    mem_limit: 256m
+    cpus: 0.25
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /backups/.last_success && age=$$(( $$(date -u +%s) - $$(cat /backups/.last_success) )); test $$age -lt 90000"]
+      interval: 1h
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+
+  backup-restore-test:
+    image: postgres:16-alpine
+    profiles: ["ops"]
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PGDATABASE: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        latest=$$(find /backups -type f -name 'council_os_*.dump' | sort | tail -n 1)
+        latest_data=$$(find /backups -type f -name 'app_data_*.tar.gz' | sort | tail -n 1)
+        test -s "$${latest}"
+        test -s "$${latest_data}"
+        pg_restore --list "$${latest}" >/dev/null
+        tar -tzf "$${latest_data}" >/dev/null
+        test_db="council_restore_test_$$(date -u +%s)"
+        createdb "$${test_db}"
+        trap 'dropdb --if-exists "$${test_db}"' EXIT
+        pg_restore --exit-on-error --no-owner --no-privileges --dbname="$${test_db}" "$${latest}"
+        psql --dbname="$${test_db}" --set=ON_ERROR_STOP=1 --tuples-only --command="SELECT COUNT(*) FROM alembic_version; SELECT COUNT(*) FROM users;" >/dev/null
+        echo "Backup restore verification passed"
+    volumes:
+      - postgres_backups:/backups:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
 
 volumes:
-  council_data:
+  postgres_data:
+  postgres_backups:
+  app_data:
+  caddy_data:
+  caddy_config:

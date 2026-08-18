@@ -3,24 +3,38 @@
 import { useSidebar } from '../contexts/SidebarContext';
 import { useAuth } from '../contexts/AuthContext';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, Suspense } from 'react';
+import { useEffect, Suspense, useState } from 'react';
 import { Sidebar } from './sidebar';
 import { TopNav } from './top-nav';
 import { Sparkles } from 'lucide-react';
+import { CommandPalette } from './command-palette';
+import { motion } from 'framer-motion';
 
 export function ClientLayoutWrapper({ children }: { children: React.ReactNode }) {
   const { isCollapsed } = useSidebar();
   const { user, isLoading } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
+  const [commandOpen, setCommandOpen] = useState(false);
 
   const isLoginPage = pathname === '/login';
 
   useEffect(() => {
     if (!isLoading && !user && !isLoginPage) {
-      router.push('/login');
+      router.replace('/login');
     }
   }, [user, isLoading, isLoginPage, router]);
+
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setCommandOpen((current) => !current);
+      }
+    };
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  }, []);
 
   // If on login page, render plain container
   if (isLoginPage) {
@@ -45,15 +59,21 @@ export function ClientLayoutWrapper({ children }: { children: React.ReactNode })
   }
 
   return (
-    <div className="min-h-screen bg-[#FAFAFA]">
+    <div className="app-grid min-h-screen bg-[#060d17]">
       <Sidebar />
       <div
-        className={`transition-all duration-300 ease-in-out flex flex-col min-h-screen ${
-          isCollapsed ? 'pl-20' : 'pl-64'
+        className={`shell-content transition-all duration-300 ease-in-out flex flex-col min-h-screen ${
+          isCollapsed ? 'pl-[108px]' : 'pl-[272px]'
         }`}
       >
-        <TopNav />
-        <main className="pt-28 px-4 lg:px-8 pb-12 flex-1 max-w-[1600px] mx-auto w-full">
+        <TopNav onOpenCommand={() => setCommandOpen(true)} />
+        <motion.main
+          key={pathname}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          className="mx-auto w-full max-w-[1500px] flex-1 px-4 pb-14 pt-8 lg:px-8"
+        >
           <Suspense fallback={
             <div className="flex items-center justify-center p-12 text-zinc-500 font-medium">
               Loading Page Content...
@@ -61,8 +81,9 @@ export function ClientLayoutWrapper({ children }: { children: React.ReactNode })
           }>
             {children}
           </Suspense>
-        </main>
+        </motion.main>
       </div>
+      <CommandPalette open={commandOpen} onClose={() => setCommandOpen(false)} />
     </div>
   );
 }

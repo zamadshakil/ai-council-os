@@ -12,8 +12,25 @@ This council:
 from __future__ import annotations
 
 import json
-from src.core.council_base import BaseCouncil
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from src.core.council_base import BaseCouncil, TextDraftOutput
 from src.workflows.config.platform_specs import PLATFORM_SPECS, get_platform_prompt
+
+
+class ContentVariantsOutput(BaseModel):
+    """Exact six-destination result; missing or extra destinations fail validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    twitter: str = Field(min_length=1, max_length=280)
+    linkedin: str = Field(min_length=1, max_length=3000)
+    facebook: str = Field(min_length=1, max_length=2000)
+    instagram: str = Field(min_length=1, max_length=2200)
+    reddit: str = Field(min_length=1, max_length=10000)
+    discord: str = Field(min_length=1, max_length=2000)
 
 
 class ContentCouncil(BaseCouncil):
@@ -22,6 +39,22 @@ class ContentCouncil(BaseCouncil):
     council_name = "content"
     confidence_threshold = 85.0
     max_iterations = 3
+    critic_categories = {
+        "hook_quality": 20,
+        "platform_fit": 20,
+        "value_density": 20,
+        "authenticity": 20,
+        "call_to_action": 20,
+    }
+
+    def get_generator_output_model(self, state: dict[str, Any]) -> type[BaseModel]:
+        target = (state.get("context") or {}).get("platform", "all")
+        return ContentVariantsOutput if target == "all" else TextDraftOutput
+
+    def draft_to_text(self, draft: BaseModel, state: dict[str, Any]) -> str:
+        if isinstance(draft, ContentVariantsOutput):
+            return json.dumps(draft.model_dump(mode="json"), ensure_ascii=False)
+        return super().draft_to_text(draft, state)
 
     def get_generator_prompt(self, state: dict) -> list[dict]:
         """
@@ -41,8 +74,26 @@ class ContentCouncil(BaseCouncil):
                     last_critique = msg["content"]
                     break
 
-        if target_platform != "all" and target_platform in PLATFORM_SPECS:
-            spec_info = get_platform_prompt(target_platform)
+        if target_platform != "all":
+            workflow_specs = {
+                "youtube_comment": (
+                    "YouTube comment reply; under 100 words; natural, specific to the video and "
+                    "comment; answer questions accurately and never claim unavailable facts."
+                ),
+                "youtube_description": (
+                    "YouTube description update; preserve the video-specific opening and replace "
+                    "only the supplied boilerplate block."
+                ),
+                "instagram_comment": (
+                    "Instagram public comment reply; 1-3 concise sentences; directly address the "
+                    "comment; friendly and human; never claim unavailable facts or request private data."
+                ),
+            }
+            spec_info = (
+                get_platform_prompt(target_platform)
+                if target_platform in PLATFORM_SPECS
+                else workflow_specs.get(target_platform, f"Destination: {target_platform}")
+            )
             system_prompt = (
                 "You are the Content Generator — a master copywriter and social media strategist.\n\n"
                 "Your job is to write top-tier, highly engaging social media content for a SPECIFIC platform, "
@@ -55,7 +106,8 @@ class ContentCouncil(BaseCouncil):
                 "- Write directly in the platform's native tone.\n"
                 "- Stop the scroll with a strong opening line / hook.\n"
                 "- Keep formatting clean with proper spacing.\n"
-                "- Output ONLY the final ready-to-post copy — never a request for more information unless the task truly names no subject."
+                "- Put the final ready-to-post copy in the structured content field, with assumptions and warnings lists. "
+                "Never request more information unless the task truly names no subject."
             )
         else:
             # Generate all 6 platform variants
@@ -120,11 +172,10 @@ class ContentCouncil(BaseCouncil):
             "3. VALUE DENSITY (1-10): Does every paragraph deliver clear value without fluff?\n"
             "4. AUTHENTICITY (1-10): Does it feel like a human leader wrote it, or generic AI?\n"
             "5. CALL TO ACTION (1-10): Is there a natural, low-friction next step for the reader?\n\n"
-            "FORMAT YOUR RESPONSE AS:\n"
-            "- Dimension breakdown and specific feedback\n"
-            "- Key Strengths\n"
-            "- Critical Weaknesses / Required Edits\n"
-            "- End with: CONFIDENCE: X/100\n\n"
+            "Return the required structured critic object. category_scores must contain "
+            "exactly these keys, each scored from 0 to 100: hook_quality, platform_fit, "
+            "value_density, authenticity, call_to_action. Include concrete strengths, "
+            "weaknesses, and required edits.\n\n"
             "Scoring guideline: 85+ = Publish Ready. Below 85 = Needs Revision."
         )
 
@@ -132,7 +183,7 @@ class ContentCouncil(BaseCouncil):
             f"ORIGINAL TASK / SOURCE:\n{task}\n\n"
             f"TARGET PLATFORM: {target_platform}\n\n"
             f"DRAFT TO CRITIQUE:\n{draft}\n\n"
-            "Provide your comprehensive critique and ending CONFIDENCE score:"
+            "Provide the structured critique:"
         )
 
         return [

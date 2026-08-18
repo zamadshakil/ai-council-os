@@ -1,277 +1,296 @@
-"""
-llm_router.py — Unified LLM Gateway via OpenRouter
+"""Strict OpenRouter gateway for the three production councils.
 
-Uses a single OpenRouter API key to access all providers
-(OpenAI, Anthropic, Google) through OpenAI-compatible endpoints.
-
-Zero extra dependencies — just the `openai` package.
+There is intentionally no provider fallback and no generic model override. A
+request either runs on the model assigned to its council/role or fails loudly.
 """
 
 from __future__ import annotations
 
-import os
+import asyncio
+import hashlib
+import hmac
+import json
+import time
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
-from dotenv import load_dotenv
 from openai import AsyncOpenAI
-
-load_dotenv()
-
-
-# ── Model Tier Configuration ────────────────────────────────────────────
-
-@dataclass
-class ModelTier:
-    """A named tier that maps to a specific model + pricing info."""
-    name: str
-    model_id: str            # OpenRouter model ID
-    input_cost_per_m: float  # USD per 1M input tokens
-    output_cost_per_m: float # USD per 1M output tokens
-    description: str
+from pydantic import BaseModel, ValidationError
+from src.core.integration_context import integration_value
 
 
-MODEL_TIERS: dict[str, ModelTier] = {
-    "cheap": ModelTier(
-        name="cheap",
-        model_id="qwen/qwen3.7-flash",
-        input_cost_per_m=0.03,
-        output_cost_per_m=0.13,
-        description="Qwen 3.7 Flash: ultra-low-cost routing and classification",
+@dataclass(frozen=True)
+class CouncilModelProfile:
+    generator: str
+    critic: str
+
+
+COUNCIL_MODEL_PROFILES: dict[str, CouncilModelProfile] = {
+    "grant": CouncilModelProfile(
+        generator="anthropic/claude-sonnet-5",
+        critic="google/gemini-3.6-flash",
     ),
-    "fast": ModelTier(
-        name="fast",
-        model_id="openai/gpt-5.6-luna",
-        input_cost_per_m=0.10,
-        output_cost_per_m=0.60,
-        description="GPT-5.6 Luna: current high-quality price/performance generation",
+    "sales": CouncilModelProfile(
+        generator="openai/gpt-5.6-terra",
+        critic="anthropic/claude-sonnet-5",
     ),
-    "smart": ModelTier(
-        name="smart",
-        model_id="google/gemini-3-flash-preview",
-        input_cost_per_m=0.50,
-        output_cost_per_m=3.00,
-        description="Gemini 3 Flash: high-quality criticism and high-priority work",
-    ),
-    "reasoning": ModelTier(
-        name="reasoning",
-        model_id="google/gemini-3.1-pro-preview",
-        input_cost_per_m=2.00,
-        output_cost_per_m=12.00,
-        description="Gemini 3.1 Pro: critical escalation only",
+    "content": CouncilModelProfile(
+        generator="google/gemini-3.6-flash",
+        critic="openai/gpt-5.6-luna",
     ),
 }
 
-EMERGENCY_FREE_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+APPROVED_MODELS = frozenset(
+    model_id
+    for profile in COUNCIL_MODEL_PROFILES.values()
+    for model_id in (profile.generator, profile.critic)
+)
 
-MODEL_PRICING = {
-    **{
-        tier.model_id: (tier.input_cost_per_m, tier.output_cost_per_m)
-        for tier in MODEL_TIERS.values()
-    },
-    EMERGENCY_FREE_MODEL: (0.0, 0.0),
-    "openrouter/free": (0.0, 0.0),
-}
-
-# Fallbacks only move laterally or downward in cost/quality; a cheap or fast
-# request can never silently escalate to the Pro reasoning tier.
-TIER_FALLBACKS = {
-    "cheap": ["qwen/qwen3.7-flash", EMERGENCY_FREE_MODEL],
-    "fast": ["openai/gpt-5.6-luna", "qwen/qwen3.7-flash", EMERGENCY_FREE_MODEL],
-    "smart": [
-        "google/gemini-3-flash-preview",
-        "openai/gpt-5.6-luna",
-        "qwen/qwen3.7-flash",
-        EMERGENCY_FREE_MODEL,
-    ],
-    "reasoning": [
-        "google/gemini-3.1-pro-preview",
-        "google/gemini-3-flash-preview",
-        "openai/gpt-5.6-luna",
-        EMERGENCY_FREE_MODEL,
-    ],
-}
-
-PRIORITY_TO_TIER = {
-    "low": "cheap",
-    "medium": "fast",
-    "high": "smart",
-    "critical": "reasoning",
+# Compatibility names are deliberately mapped only to approved models. New
+# production code should call ``get_council_model`` instead of selecting tiers.
+_COMPATIBILITY_TIERS = {
+    "fast": "openai/gpt-5.6-luna",
+    "smart": "google/gemini-3.6-flash",
+    "reasoning": "anthropic/claude-sonnet-5",
 }
 
 
-# ── OpenRouter Client ────────────────────────────────────────────────────
+class ModelPolicyError(ValueError):
+    """Raised when code requests an unapproved council or model."""
+
+
+class StructuredOutputError(ValueError):
+    """Raised when OpenRouter does not return the required JSON contract."""
+
+
+def get_council_model(council: str, role: str) -> str:
+    """Return the immutable model assignment for a production council role."""
+    council_key = council.strip().lower()
+    role_key = role.strip().lower()
+    try:
+        profile = COUNCIL_MODEL_PROFILES[council_key]
+    except KeyError as exc:
+        raise ModelPolicyError(
+            f"Unsupported council {council!r}; allowed councils are grant, sales, and content."
+        ) from exc
+    if role_key not in {"generator", "critic"}:
+        raise ModelPolicyError("Council role must be 'generator' or 'critic'.")
+    return getattr(profile, role_key)
+
+
+def assert_approved_model(model_id: str) -> str:
+    """Validate and return a model ID without applying any substitution."""
+    if model_id not in APPROVED_MODELS:
+        raise ModelPolicyError(f"Model {model_id!r} is not in the production allowlist.")
+    return model_id
+
 
 _client: AsyncOpenAI | None = None
+_client_credential_fingerprint = ""
 
 
 def get_client() -> AsyncOpenAI:
-    """Get the OpenRouter client (OpenAI-compatible)."""
-    global _client
-    if _client is None:
-        api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-        if not api_key:
-            raise ValueError("OPENROUTER_API_KEY environment variable is not set on the server.")
+    """Create the OpenRouter OpenAI-compatible client from process environment."""
+    global _client, _client_credential_fingerprint, _model_validation_cache
+    api_key = integration_value("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY is not configured.")
+    credential_fingerprint = hashlib.sha256(api_key.encode()).hexdigest()
+    if _client is None or not hmac.compare_digest(
+        _client_credential_fingerprint, credential_fingerprint
+    ):
         _client = AsyncOpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
-            timeout=30.0,
+            timeout=45.0,
             default_headers={
-                "HTTP-Referer": "https://councilos.ai",
+                "HTTP-Referer": integration_value("PUBLIC_APP_URL", "https://councilos.invalid"),
                 "X-Title": "AI Council OS",
             },
         )
+        _client_credential_fingerprint = credential_fingerprint
+        _model_validation_cache = None
     return _client
 
 
-# ── Core Router ──────────────────────────────────────────────────────────
-
-def get_model_for_priority(priority: str) -> ModelTier:
-    """Get the model tier for a given priority level."""
-    tier_name = PRIORITY_TO_TIER.get(priority, "fast")
-    return MODEL_TIERS[tier_name]
-
-
-def get_model_for_role(role: str, priority: str = "medium") -> ModelTier:
-    """
-    Get the appropriate model based on agent role and task priority.
-
-    Supervisors always use cheap models (they just route).
-    Critics and Generators follow the task priority.
-    """
-    if role == "supervisor":
-        return MODEL_TIERS["cheap"]
-
-    return get_model_for_priority(priority)
+def _read_usage_value(usage: Any, name: str, default: Any = None) -> Any:
+    if usage is None:
+        return default
+    value = getattr(usage, name, None)
+    if value is not None:
+        return value
+    if isinstance(usage, dict):
+        return usage.get(name, default)
+    extra = getattr(usage, "model_extra", None) or {}
+    return extra.get(name, default)
 
 
-# Circuit breaker: once we see the account's per-key spending limit exceeded,
-# stop wasting time (and cascading debate-loop latency) retrying paid models
-# that will just 403 again. Skip straight to the free fallback until the
-# cooldown expires, so the client's key-limit issue doesn't also make every
-# task feel broken/slow on top of costing them nothing extra to fix.
-_key_limit_exhausted_until: float = 0.0
-_KEY_LIMIT_COOLDOWN_SECONDS = 600  # retry paid tiers again every 10 minutes
+def _extract_provider_cost(usage: Any) -> tuple[float | None, str]:
+    """Return OpenRouter's reported cost; never estimate with stale price tables."""
+    raw_cost = _read_usage_value(usage, "cost")
+    if raw_cost is None:
+        details = _read_usage_value(usage, "cost_details", {}) or {}
+        if isinstance(details, dict):
+            raw_cost = details.get("upstream_inference_cost")
+    if raw_cost is None:
+        return None, "unavailable"
+    try:
+        return round(float(raw_cost), 8), "provider_reported"
+    except (TypeError, ValueError):
+        return None, "unavailable"
+
+
+def _response_metrics(response: Any, model_id: str) -> dict[str, Any]:
+    usage = getattr(response, "usage", None)
+    cost_usd, cost_source = _extract_provider_cost(usage)
+    return {
+        "model": getattr(response, "model", None) or model_id,
+        "input_tokens": int(_read_usage_value(usage, "prompt_tokens", 0) or 0),
+        "output_tokens": int(_read_usage_value(usage, "completion_tokens", 0) or 0),
+        "cost_usd": cost_usd,
+        "cost_source": cost_source,
+        "provider_request_id": getattr(response, "id", None),
+    }
+
+
+def _is_retryable(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    return status is None or status == 429 or (isinstance(status, int) and status >= 500)
+
+
+async def _create_completion(
+    *,
+    messages: list[dict[str, str]],
+    model_id: str,
+    temperature: float,
+    max_tokens: int,
+    response_format: dict[str, Any] | None = None,
+) -> Any:
+    assert_approved_model(model_id)
+    kwargs: dict[str, Any] = {
+        "model": model_id,
+        "messages": cast(Any, messages),
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            return await get_client().chat.completions.create(**kwargs)
+        except Exception as exc:  # SDK exposes several transport subclasses
+            last_error = exc
+            if attempt == 1 or not _is_retryable(exc):
+                raise
+            await asyncio.sleep(0.5)
+    assert last_error is not None
+    raise last_error
 
 
 async def call_llm(
-    messages: list[dict],
+    messages: list[dict[str, str]],
     tier: str = "fast",
     model_override: str | None = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
-) -> dict:
-    """
-    Call an LLM through OpenRouter with model fallbacks for network resilience.
-
-    All candidates are explicit, cost-bounded, non-DeepSeek model IDs. Fallbacks
-    never escalate to a more expensive tier. Generic automatic routing is forbidden.
-    """
-    import asyncio
-    import time
-    global _key_limit_exhausted_until
-
-    model_tier = MODEL_TIERS.get(tier, MODEL_TIERS["fast"])
-    primary_model = model_override or model_tier.model_id
-
-    if "deepseek" in primary_model.lower():
-        raise ValueError("DeepSeek models are prohibited by client policy.")
-    if primary_model not in MODEL_PRICING:
-        raise ValueError("Model override is not in the approved cost-controlled model list.")
-
-    # Fallback queue uses ONLY free models — no paid models allowed.
-    # This ensures zero unexpected API costs even under heavy load.
-    candidate_models = [primary_model]
-    if primary_model != "openrouter/free":
-        candidate_models.append("openrouter/free")
-
-    if time.monotonic() < _key_limit_exhausted_until:
-        # Known-exhausted right now: go straight to the guaranteed-free model.
-        candidate_models = [EMERGENCY_FREE_MODEL]
-
-    client = get_client()
-    last_error = None
-
-    for model_id in candidate_models:
-        for attempt in range(2):
-            try:
-                response = await client.chat.completions.create(
-                    model=model_id,
-                    messages=cast(Any, messages),
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-
-                content = response.choices[0].message.content or ""
-                if not content.strip():
-                    raise ValueError(f"Model {model_id} returned an empty response.")
-
-                if model_id != EMERGENCY_FREE_MODEL:
-                    # A paid model just worked, so the key limit (if it was
-                    # tripped before) is no longer blocking us. Clear the breaker.
-                    _key_limit_exhausted_until = 0.0
-
-                usage = response.usage
-                input_tokens = usage.prompt_tokens if usage else 0
-                output_tokens = usage.completion_tokens if usage else 0
-                input_rate, output_rate = MODEL_PRICING[model_id]
-                cost_usd = (
-                    (input_tokens / 1_000_000) * input_rate
-                    + (output_tokens / 1_000_000) * output_rate
-                )
-
-                return {
-                    "content": content,
-                    "model": model_id,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cost_usd": round(cost_usd, 6),
-                }
-            except Exception as e:
-                last_error = e
-                print(f"[OpenRouter Retry {attempt + 1}/2 for {model_id}] {e}")
-                # A key spending-limit 403 will not recover on retry; move straight
-                # to the next approved fallback (ultimately the free emergency model),
-                # and trip the breaker so subsequent calls skip the paid tiers
-                # entirely for a while instead of re-discovering the same 403s.
-                if getattr(e, "status_code", None) == 403:
-                    if "key limit" in str(e).lower() or "limit exceeded" in str(e).lower():
-                        _key_limit_exhausted_until = time.monotonic() + _KEY_LIMIT_COOLDOWN_SECONDS
-                    break
-                await asyncio.sleep(1)
-
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("No OpenRouter model candidates were available.")
+) -> dict[str, Any]:
+    """Compatibility text call restricted to the production allowlist."""
+    if model_override:
+        model_id = assert_approved_model(model_override)
+    else:
+        try:
+            model_id = _COMPATIBILITY_TIERS[tier]
+        except KeyError as exc:
+            raise ModelPolicyError(
+                f"Tier {tier!r} is not supported; pass an approved explicit model."
+            ) from exc
+    response = await _create_completion(
+        messages=messages,
+        model_id=model_id,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    content = response.choices[0].message.content or ""
+    if not content.strip():
+        raise StructuredOutputError(f"Model {model_id} returned an empty response.")
+    return {"content": content, **_response_metrics(response, model_id)}
 
 
-def list_available_models() -> list[dict]:
-    """List all configured model tiers."""
+OutputModelT = TypeVar("OutputModelT", bound=BaseModel)
+
+
+async def call_llm_structured(
+    *,
+    messages: list[dict[str, str]],
+    model_id: str,
+    output_model: type[OutputModelT],
+    temperature: float = 0.4,
+    max_tokens: int = 4096,
+) -> tuple[OutputModelT, dict[str, Any]]:
+    """Call one approved model and validate its response against a JSON schema."""
+    response = await _create_completion(
+        messages=messages,
+        model_id=model_id,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": output_model.__name__.lower(),
+                "strict": True,
+                "schema": output_model.model_json_schema(),
+            },
+        },
+    )
+    content = response.choices[0].message.content or ""
+    if not content.strip():
+        raise StructuredOutputError(f"Model {model_id} returned an empty response.")
+    try:
+        parsed = output_model.model_validate(json.loads(content))
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise StructuredOutputError(
+            f"Model {model_id} returned output that failed {output_model.__name__} validation."
+        ) from exc
+    return parsed, {"content": content, **_response_metrics(response, model_id)}
+
+
+_model_validation_cache: tuple[float, dict[str, Any]] | None = None
+
+
+async def validate_approved_models(*, cache_seconds: int = 300) -> dict[str, Any]:
+    """Readiness check that proves all configured model IDs exist on OpenRouter."""
+    global _model_validation_cache
+    now = time.monotonic()
+    if _model_validation_cache and now - _model_validation_cache[0] < cache_seconds:
+        return _model_validation_cache[1]
+    response = await get_client().models.list()
+    available = {item.id for item in response.data}
+    missing = sorted(APPROVED_MODELS - available)
+    result = {
+        "ready": not missing,
+        "approved_models": sorted(APPROVED_MODELS),
+        "missing_models": missing,
+    }
+    _model_validation_cache = (now, result)
+    return result
+
+
+def list_available_models() -> list[dict[str, str]]:
+    """List the immutable council-role assignments."""
     return [
-        {
-            "tier": t.name,
-            "model": t.model_id,
-            "input_cost": f"${t.input_cost_per_m}/1M",
-            "output_cost": f"${t.output_cost_per_m}/1M",
-            "description": t.description,
-        }
-        for t in MODEL_TIERS.values()
+        {"council": council, "role": role, "model": getattr(profile, role)}
+        for council, profile in COUNCIL_MODEL_PROFILES.items()
+        for role in ("generator", "critic")
     ]
 
 
-def get_model_router_status() -> dict:
-    """
-    Report whether we're currently forced onto the free emergency model due
-    to the OpenRouter key's spending limit, so the dashboard/Telegram can
-    tell the client honestly why responses might be slower/lower-quality
-    right now instead of silently degrading.
-    """
-    import time
-    remaining = _key_limit_exhausted_until - time.monotonic()
-    degraded = remaining > 0
+def get_model_router_status() -> dict[str, Any]:
+    """Synchronous policy status for legacy dashboard callers."""
     return {
-        "degraded": degraded,
-        "reason": "OpenRouter key spending limit exceeded — running on free fallback model only"
-        if degraded else "Normal (cost-efficient paid models)",
-        "retry_paid_models_in_seconds": max(0, int(remaining)) if degraded else 0,
+        "degraded": False,
+        "reason": "Strict model policy active; failures never trigger a model fallback.",
+        "retry_paid_models_in_seconds": 0,
+        "approved_models": sorted(APPROVED_MODELS),
     }

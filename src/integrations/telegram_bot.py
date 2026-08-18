@@ -30,14 +30,33 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-
-from src.core.kill_switch import activate, deactivate, get_status, is_killed
+from src.core.integration_context import integration_value
 
 load_dotenv()
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
-DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://187.124.172.17.sslip.io").rstrip("/")
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://councilos.invalid").rstrip("/")
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "").strip()
+_runtime_token = ""
+_runtime_allowed_chat_ids: set[int] = set()
+
+
+def _service_headers() -> dict[str, str]:
+    if len(INTERNAL_SERVICE_TOKEN) < 32:
+        raise RuntimeError("Telegram service authentication is not configured")
+    return {
+        "X-Service-Token": INTERNAL_SERVICE_TOKEN,
+        "X-Service-Actor": "telegram",
+    }
+
+
+async def _kill_switch_status() -> dict:
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(
+            f"{API_BASE_URL}/api/kill-switch", headers=_service_headers()
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 def _parse_chat_ids(value: str) -> set[int]:
@@ -53,13 +72,40 @@ def _parse_chat_ids(value: str) -> set[int]:
     return ids
 
 
-# Multiple destinations are supported for a future private operations group.
-DESTINATION_CHAT_IDS = _parse_chat_ids(
-    os.getenv("TELEGRAM_CHAT_IDS", "") or os.getenv("TELEGRAM_CHAT_ID", "")
-)
-ALLOWED_CHAT_IDS = _parse_chat_ids(
-    os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", "")
-) or set(DESTINATION_CHAT_IDS)
+def configure_telegram_runtime(values: dict[str, str]) -> None:
+    """Install a verified portal connection without writing it to process env."""
+    global _runtime_token, _runtime_allowed_chat_ids, _bot
+    new_token = values.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if new_token != _runtime_token:
+        _bot = None
+    _runtime_token = new_token
+    _runtime_allowed_chat_ids = _parse_chat_ids(
+        values.get("TELEGRAM_ALLOWED_CHAT_IDS", "")
+    )
+
+
+def _token() -> str:
+    return _runtime_token or integration_value("TELEGRAM_BOT_TOKEN", "").strip()
+
+
+def _allowed_chat_ids() -> set[int]:
+    if _runtime_allowed_chat_ids:
+        return set(_runtime_allowed_chat_ids)
+    configured_destinations = _parse_chat_ids(
+        integration_value("TELEGRAM_CHAT_IDS", "")
+        or integration_value("TELEGRAM_CHAT_ID", "")
+    )
+    return _parse_chat_ids(
+        integration_value("TELEGRAM_ALLOWED_CHAT_IDS", "")
+    ) or configured_destinations
+
+
+def _destination_chat_ids() -> set[int]:
+    configured = _parse_chat_ids(
+        integration_value("TELEGRAM_CHAT_IDS", "")
+        or integration_value("TELEGRAM_CHAT_ID", "")
+    )
+    return configured or _allowed_chat_ids()
 
 _bot: Optional[Bot] = None
 _app: Optional[Application] = None
@@ -81,7 +127,10 @@ COUNCIL_LABELS = {
 def _get_bot() -> Bot:
     global _bot
     if _bot is None:
-        _bot = Bot(token=TOKEN)
+        token = _token()
+        if not token:
+            raise RuntimeError("Telegram bot token is not configured")
+        _bot = Bot(token=token)
     return _bot
 
 
@@ -104,6 +153,16 @@ async def _start_task_entry(chat_id: int, council: str, base_context: dict, edit
     task to specific knowledge base documents before asking for the task text.
     Falls straight through to the text prompt if the knowledge base is empty.
     """
+    if council != "grant":
+        _pending_task[chat_id] = {"council": council, "context": base_context}
+        text = (
+            f"📝 <b>{html.escape(COUNCIL_LABELS.get(council, council.title()))} selected</b>\n\n"
+            "Now send the complete task as your next Telegram message.\n\nUse /cancel to stop."
+        )
+        if edit_message:
+            await edit_message(text, parse_mode=ParseMode.HTML)
+        return
+
     try:
         from src.core.rag_engine import get_all_documents
         available_docs = await get_all_documents()
@@ -128,7 +187,7 @@ async def _start_task_entry(chat_id: int, council: str, base_context: dict, edit
         "selected": set(),
     }
     text = (
-        f"📚 <b>Knowledge base documents</b>\n\n"
+        "📚 <b>Knowledge base documents</b>\n\n"
         "Tap to select specific documents to focus this task on, or use all. "
         "Then tap Continue."
     )
@@ -143,7 +202,12 @@ def _chat_id(update: Update) -> int | None:
 
 def _is_authorized(update: Update) -> bool:
     chat_id = _chat_id(update)
-    return chat_id is not None and chat_id in ALLOWED_CHAT_IDS
+    return bool(
+        update.effective_chat
+        and update.effective_chat.type == "private"
+        and chat_id is not None
+        and chat_id in _allowed_chat_ids()
+    )
 
 
 async def _reject_unauthorized(update: Update):
@@ -160,20 +224,32 @@ async def _reject_unauthorized(update: Update):
 
 
 async def _send_to_destinations(text: str, **kwargs):
-    if not TOKEN or not DESTINATION_CHAT_IDS:
-        return
+    if not _token():
+        raise RuntimeError("Telegram bot token is not configured")
+    destination_chat_ids = _destination_chat_ids()
+    if not destination_chat_ids:
+        raise RuntimeError("No Telegram notification destination is configured")
     bot = _get_bot()
-    for chat_id in DESTINATION_CHAT_IDS:
+    failures: list[str] = []
+    for chat_id in destination_chat_ids:
         try:
             await bot.send_message(chat_id=chat_id, text=text, **kwargs)
         except Exception as exc:
-            print(f"[Telegram] Failed sending to chat {chat_id}: {exc}")
+            failures.append(f"{chat_id}: {type(exc).__name__}: {exc}")
+    if failures:
+        raise RuntimeError("Telegram delivery failed: " + "; ".join(failures))
 
 
 # ── Workflow notifications ───────────────────────────────────────────────
 
 async def notify_workflow_start(workflow_name: str, details: str = ""):
-    kill_status = "🔴 KILLED" if is_killed() else "🟢 ACTIVE"
+    if not _token() or not _destination_chat_ids():
+        return
+    try:
+        switch = await _kill_switch_status()
+        kill_status = "🔴 KILLED" if switch.get("is_active") else "🟢 ACTIVE"
+    except Exception:
+        kill_status = "⚠️ STATUS UNAVAILABLE"
     msg = f"⚡ *Workflow Started: {workflow_name}*\nKill Switch: {kill_status}\n"
     if details:
         msg += f"\n{details}"
@@ -181,6 +257,8 @@ async def notify_workflow_start(workflow_name: str, details: str = ""):
 
 
 async def notify_workflow_complete(workflow_name: str, summary: str):
+    if not _token() or not _destination_chat_ids():
+        return
     await _send_to_destinations(
         f"✅ *Workflow Complete: {workflow_name}*\n\n{summary}",
         parse_mode=ParseMode.MARKDOWN,
@@ -188,6 +266,8 @@ async def notify_workflow_complete(workflow_name: str, summary: str):
 
 
 async def notify_workflow_error(workflow_name: str, error: str):
+    if not _token() or not _destination_chat_ids():
+        return
     # Escape arbitrary exceptions so malformed Markdown cannot suppress alerts.
     await _send_to_destinations(
         f"❌ <b>Workflow Failed: {html.escape(workflow_name)}</b>\n\n"
@@ -206,8 +286,8 @@ async def send_draft_for_approval(
     council: str = "",
 ):
     """Send a persisted task draft with DB-backed approval actions."""
-    if not TOKEN:
-        return
+    if not _token():
+        raise RuntimeError("Telegram bot token is not configured")
 
     display_draft = draft_text[:2400] + "…" if len(draft_text) > 2400 else draft_text
     msg = (
@@ -234,7 +314,9 @@ async def send_draft_for_approval(
         ],
     ])
 
-    recipients = {destination_chat_id} if destination_chat_id else DESTINATION_CHAT_IDS
+    recipients = {destination_chat_id} if destination_chat_id else _destination_chat_ids()
+    if not recipients:
+        raise RuntimeError("No Telegram approval destination is configured")
     bot = _get_bot()
 
     docx_bytes = None
@@ -254,6 +336,7 @@ async def send_draft_for_approval(
         except Exception as exc:
             print(f"[Telegram] DOCX generation failed for {task_id}: {exc}")
 
+    failures: list[str] = []
     for chat_id in recipients:
         if chat_id is None:
             continue
@@ -273,7 +356,9 @@ async def send_draft_for_approval(
                     caption=f"📄 Proposal document for task {task_id} — ready to review and manually submit.",
                 )
         except Exception as exc:
-            print(f"[Telegram] Failed to send approval draft to {chat_id}: {exc}")
+            failures.append(f"{chat_id}: {type(exc).__name__}: {exc}")
+    if failures:
+        raise RuntimeError("Telegram approval delivery failed: " + "; ".join(failures))
 
 
 async def notify_publish_success(workflow_name: str, platform: str, details: str = ""):
@@ -322,9 +407,16 @@ async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         await _reject_unauthorized(update)
         return
-    if is_killed():
+    try:
+        if (await _kill_switch_status()).get("is_active"):
+            await update.effective_message.reply_text(
+                "🛑 The kill switch is active. Use /resume before submitting new work."
+            )
+            return
+    except Exception as exc:
         await update.effective_message.reply_text(
-            "🛑 The kill switch is active. Use /resume before submitting new work."
+            f"❌ The protected backend is unavailable: <code>{html.escape(str(exc))}</code>",
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -355,36 +447,61 @@ async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         await _reject_unauthorized(update)
         return
-    user = update.effective_user.username or str(update.effective_user.id)
     reason = "Manual kill via Telegram"
-    activate(toggled_by=f"telegram:{user}", reason=reason)
-    from src.core.database import set_kill_switch_db
-    await set_kill_switch_db(True, toggled_by=f"telegram:{user}", reason=reason)
-    await update.effective_message.reply_text(
-        "🛑 <b>Kill switch ACTIVATED</b>\nAll workflows and new council tasks are blocked.",
-        parse_mode=ParseMode.HTML,
-    )
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.put(
+                f"{API_BASE_URL}/api/kill-switch",
+                headers=_service_headers(),
+                json={"active": True, "reason": reason},
+            )
+            response.raise_for_status()
+        await update.effective_message.reply_text(
+            "🛑 <b>Kill switch ACTIVATED</b>\nAll workflows and new council tasks are blocked.",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"❌ Kill switch update failed: <code>{html.escape(str(exc))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         await _reject_unauthorized(update)
         return
-    user = update.effective_user.username or str(update.effective_user.id)
-    deactivate(toggled_by=f"telegram:{user}")
-    from src.core.database import set_kill_switch_db
-    await set_kill_switch_db(False, toggled_by=f"telegram:{user}")
-    await update.effective_message.reply_text(
-        "✅ <b>Kill switch DEACTIVATED</b>\nWorkflows and council tasks may run again.",
-        parse_mode=ParseMode.HTML,
-    )
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.put(
+                f"{API_BASE_URL}/api/kill-switch",
+                headers=_service_headers(),
+                json={"active": False, "reason": "Resumed via Telegram"},
+            )
+            response.raise_for_status()
+        await update.effective_message.reply_text(
+            "✅ <b>Kill switch DEACTIVATED</b>\nWorkflows and council tasks may run again.",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"❌ Kill switch update failed: <code>{html.escape(str(exc))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         await _reject_unauthorized(update)
         return
-    status = get_status()
+    try:
+        status = await _kill_switch_status()
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"❌ Backend status unavailable: <code>{html.escape(str(exc))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
     state = "🔴 KILLED" if status["is_active"] else "🟢 ACTIVE"
     msg = (
         f"<b>AI Council OS Status</b>\n\n"
@@ -406,11 +523,6 @@ async def handle_task_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = _chat_id(update)
     if chat_id is None or chat_id not in _pending_task:
         return
-    if is_killed():
-        _pending_task.pop(chat_id, None)
-        await update.effective_message.reply_text("🛑 Task not submitted: kill switch is active.")
-        return
-
     selection = _pending_task.pop(chat_id)
     council = selection["council"]
     task_text = (update.effective_message.text or "").strip()
@@ -423,8 +535,13 @@ async def handle_task_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "council": council,
         "task_description": task_text,
         "priority": "high",
+        "selected_document_hashes": list(selection.get("context", {}).get("selected_docs", [])),
         "context": {
-            **selection.get("context", {}),
+            **{
+                key: value
+                for key, value in selection.get("context", {}).items()
+                if key != "selected_docs"
+            },
             "source": "telegram",
             "telegram_chat_id": chat_id,
             "telegram_user": update.effective_user.username or str(update.effective_user.id),
@@ -432,12 +549,19 @@ async def handle_task_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(f"{API_BASE_URL}/api/councils/run", json=payload)
+            response = await client.post(
+                f"{API_BASE_URL}/api/council-runs",
+                headers={**_service_headers(), "Idempotency-Key": f"telegram:{update.update_id}"},
+                json=payload,
+            )
             response.raise_for_status()
             result = response.json()
+            task_id = (result.get("resource") or {}).get("task_id")
+            if not task_id:
+                raise RuntimeError("Backend response did not contain a task ID")
         await update.effective_message.reply_text(
             f"⚙️ <b>{html.escape(COUNCIL_LABELS[council])} is working</b>\n\n"
-            f"Task ID: <code>{html.escape(result['task_id'])}</code>\n"
+            f"Task ID: <code>{html.escape(task_id)}</code>\n"
             "The agents will generate, critique, and refine the answer. "
             "The completed draft will return here for approval and will also appear in the dashboard.",
             parse_mode=ParseMode.HTML,
@@ -463,8 +587,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if council not in COUNCIL_LABELS:
             await query.answer("Unknown council", show_alert=True)
             return
-        if is_killed():
-            await query.answer("Kill switch is active", show_alert=True)
+        try:
+            if (await _kill_switch_status()).get("is_active"):
+                await query.answer("Kill switch is active", show_alert=True)
+                return
+        except Exception:
+            await query.answer("Protected backend unavailable", show_alert=True)
             return
         chat_id = _chat_id(update)
         await query.answer()
@@ -557,7 +685,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     action, task_id = data.split(":", 1)
-    callback_key = f"{query.message.chat_id}:{data}"
+    callback_key = f"{query.message.chat_id}:{query.id}"
     if callback_key in _handled_callbacks:
         await query.answer("This action was already processed.", show_alert=True)
         return
@@ -565,58 +693,45 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("Processing…")
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            task_response = await client.get(f"{API_BASE_URL}/api/tasks/{task_id}")
+            headers = _service_headers()
+            task_response = await client.get(
+                f"{API_BASE_URL}/api/tasks/{task_id}", headers=headers
+            )
             task_response.raise_for_status()
             task = task_response.json()
+            expected_version = task.get("approval_version")
+            if expected_version is None:
+                raise RuntimeError("Task is not awaiting an approval decision")
+            action_payload = {
+                "action": action,
+                "expected_version": expected_version,
+                "idempotency_key": f"telegram:{query.id}",
+                "notes": f"{action.title()} requested via Telegram",
+            }
+            response = await client.post(
+                f"{API_BASE_URL}/api/approvals/{task_id}/actions",
+                headers=headers,
+                json=action_payload,
+            )
+            response.raise_for_status()
 
             if action == "approve":
-                response = await client.post(
-                    f"{API_BASE_URL}/api/tasks/{task_id}/approve",
-                    json={"approved": True, "notes": "Approved via Telegram"},
-                )
-                response.raise_for_status()
                 result_text = (
                     f"✅ <b>Approved</b> — Task <code>{html.escape(task_id)}</code>\n"
-                    "The dashboard now shows this task as approved and the decision was stored in memory."
+                    "The persisted approval is visible in the dashboard."
                 )
 
             elif action == "reject":
-                response = await client.post(
-                    f"{API_BASE_URL}/api/tasks/{task_id}/approve",
-                    json={"approved": False, "notes": "Rejected via Telegram"},
-                )
-                response.raise_for_status()
                 result_text = (
                     f"❌ <b>Rejected</b> — Task <code>{html.escape(task_id)}</code>\n"
-                    "The dashboard now shows this task as rejected and the decision was stored for learning."
+                    "The persisted decision is visible in the dashboard."
                 )
 
             elif action == "retry":
-                await client.post(
-                    f"{API_BASE_URL}/api/tasks/{task_id}/approve",
-                    json={"approved": False, "notes": "Retry requested via Telegram"},
-                )
-                retry_payload = {
-                    "council": task.get("council", "content"),
-                    "task_description": task.get("task_description", "")
-                        + "\n\nRetry this task with a materially improved answer. Address weaknesses in the previous result.",
-                    "priority": "high",
-                    "context": {
-                        **(task.get("context") or {}),
-                        "source": "telegram_retry",
-                        "retry_of": task_id,
-                    },
-                }
-                retry_response = await client.post(
-                    f"{API_BASE_URL}/api/councils/run", json=retry_payload
-                )
-                retry_response.raise_for_status()
-                new_task_id = retry_response.json()["task_id"]
                 result_text = (
                     f"🔄 <b>Retry started</b>\n"
-                    f"Original: <code>{html.escape(task_id)}</code> (marked rejected)\n"
-                    f"New task: <code>{html.escape(new_task_id)}</code>\n"
-                    "A new improved draft will return here for approval."
+                    f"Task: <code>{html.escape(task_id)}</code>\n"
+                    "A fresh council run was queued and will return here for approval."
                 )
             else:
                 await query.answer("Unknown action", show_alert=True)
@@ -647,31 +762,36 @@ def _register_handlers(app: Application):
 
 
 def start_telegram_bot():
-    if not TOKEN:
+    token = _token()
+    if not token:
         print("[Telegram] No bot token configured. Skipping bot startup.")
         return
-    if not ALLOWED_CHAT_IDS:
+    if not _allowed_chat_ids():
         print("[Telegram] No authorized chat IDs configured. Skipping bot startup.")
         return
     global _app
-    _app = Application.builder().token(TOKEN).build()
+    _app = Application.builder().token(token).build()
     _register_handlers(_app)
     print("🤖 [Telegram] Bot started. Listening for authorized commands...")
     _app.run_polling(stop_signals=None, close_loop=False)
 
 
 async def start_telegram_bot_async():
-    if not TOKEN:
+    token = _token()
+    if not token:
         print("[Telegram] No bot token configured. Skipping bot startup.")
         return
-    if not ALLOWED_CHAT_IDS:
+    if not _allowed_chat_ids():
         print("[Telegram] No authorized chat IDs configured. Skipping bot startup.")
         return
     global _app
-    _app = Application.builder().token(TOKEN).build()
+    _app = Application.builder().token(token).build()
     _register_handlers(_app)
     await _app.initialize()
     await _app.start()
+    # Production uses long polling for the private administrator control
+    # plane. Telegram does not allow getUpdates while an old webhook remains.
+    await _app.bot.delete_webhook(drop_pending_updates=False)
     await _app.bot.set_my_commands([
         BotCommand("task", "Assign work to Content, Sales, or Grant Council"),
         BotCommand("status", "Check system and kill-switch status"),
@@ -682,3 +802,18 @@ async def start_telegram_bot_async():
     ])
     await _app.updater.start_polling()
     print("🤖 [Telegram] Bot started (async). Listening for authorized commands...")
+
+
+async def stop_telegram_bot_async():
+    """Stop the polling application when its durable workflow is disabled."""
+    global _app
+    if _app is None:
+        return
+    try:
+        if _app.updater and _app.updater.running:
+            await _app.updater.stop()
+        if _app.running:
+            await _app.stop()
+        await _app.shutdown()
+    finally:
+        _app = None

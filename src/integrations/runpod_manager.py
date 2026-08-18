@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import httpx
-from typing import Optional, Dict, Any, List
+from typing import Optional, List
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -69,7 +69,7 @@ async def start_pod(pod_id: str, api_key: Optional[str] = None) -> dict:
     try:
         res = await execute_graphql(mutation, variables={"input": {"podId": pod_id, "gpuCount": 1}}, api_key=api_key)
         return res.get("podResume", {}) or {}
-    except Exception as e:
+    except Exception:
         # Fallback if input structure differs
         query_simple = f'mutation {{ podResume(input: {{ podId: "{pod_id}", gpuCount: 1 }}) {{ id desiredStatus }} }}'
         res = await execute_graphql(query_simple, api_key=api_key)

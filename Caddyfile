@@ -1,11 +1,29 @@
-# Replace 'your-domain.com' with your actual domain name pointing to the VM's IP address.
-# Caddy will automatically request and renew free SSL certificates from Let's Encrypt.
-your-domain.com {
-    reverse_proxy api:8000
+{
+	admin off
 }
 
-# (Optional) If you are testing without a domain and just want to access it via IP,
-# comment out the block above, and uncomment the block below:
-# :80 {
-#     reverse_proxy api:8000
-# }
+{$PUBLIC_HOST} {
+	encode zstd gzip
+
+	@backend path /api/* /healthz /readyz
+	handle @backend {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy dashboard:3000
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

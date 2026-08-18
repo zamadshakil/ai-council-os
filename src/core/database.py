@@ -1,354 +1,259 @@
-"""
-database.py — PostgreSQL + pgvector Database Layer
+"""Async database runtime and legacy-compatible persistence helpers.
 
-Replaces in-memory tasks_store with persistent PostgreSQL.
-Uses pgvector for semantic memory (replacing ChromaDB).
-
-Tables:
-- tasks: All council tasks (Reddit leads, YouTube replies, content variants, etc.)
-- seen_items: Deduplication store (replaces SQLite dedup.py for production)
-- embeddings: Vector store for knowledge base (replaces ChromaDB)
-- kill_switch: Global kill switch state
+PostgreSQL is production-only and must be migrated explicitly with Alembic.
+SQLite remains a zero-configuration local-development option.
 """
 
-import os
-from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from __future__ import annotations
+
 import json
+import os
+from typing import Any, List, Optional
 
-from sqlalchemy import (
-    Column, String, Float, Integer, Boolean, Text, DateTime,
-    JSON, create_engine, text as sql_text
-)
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from dotenv import load_dotenv
+from sqlalchemy import delete, inspect, select, text as sql_text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from src.core.models import *  # noqa: F403 - compatibility exports are intentional
+from src.core import integration_models as _integration_models  # noqa: F401
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-# Auto-detect: if no DB URL set, use SQLite for local dev
-if not DATABASE_URL:
-    os.makedirs("./data", exist_ok=True)
-    DATABASE_URL = "sqlite+aiosqlite:///./data/council_os.db"
-    print("[Database] Using SQLite (local dev). Set DATABASE_URL for PostgreSQL in production.")
-elif DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-elif DATABASE_URL.startswith("postgresql://") and "asyncpg" not in DATABASE_URL:
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+def normalize_database_url(raw_url: str | None) -> str:
+    if not raw_url:
+        os.makedirs("./data", exist_ok=True)
+        return "sqlite+aiosqlite:///./data/council_os.db"
+    if raw_url.startswith("postgres://"):
+        return raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    if raw_url.startswith("postgresql://") and "+asyncpg" not in raw_url:
+        return raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return raw_url
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+
+DATABASE_URL = normalize_database_url(os.getenv("DATABASE_URL"))
+engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
+async def init_db() -> None:
+    """Create a local schema or verify that production migrations ran.
 
-class Base(DeclarativeBase):
-    pass
+    This function intentionally does not create or alter production tables.
+    The release command for PostgreSQL is ``alembic upgrade head``.
+    """
+    if DATABASE_URL.startswith("sqlite"):
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)  # noqa: F405
+            task_columns = await connection.run_sync(
+                lambda sync_connection: {
+                    column["name"] for column in inspect(sync_connection).get_columns("tasks")
+                }
+            )
+        if "version" not in task_columns:
+            raise RuntimeError(
+                "The local database uses the legacy schema; run `alembic upgrade head` "
+                "once before starting the application."
+            )
+    else:
+        required = {"alembic_version", "users", "sessions", "workflow_runs", "audit_events"}
 
+        def table_names(sync_connection: Any) -> set[str]:
+            return set(inspect(sync_connection).get_table_names())
 
-# ── Models ───────────────────────────────────────────────────────────────
+        async with engine.connect() as connection:
+            present = await connection.run_sync(table_names)
+        missing = sorted(required - present)
+        if missing:
+            raise RuntimeError(
+                "Production database is not migrated; run `alembic upgrade head` "
+                f"before startup (missing: {', '.join(missing)})."
+            )
 
-class TaskModel(Base):
-    __tablename__ = "tasks"
-
-    task_id: Mapped[str] = mapped_column(String(50), primary_key=True)
-    council: Mapped[str] = mapped_column(String(50), index=True)
-    status: Mapped[str] = mapped_column(String(50), index=True, default="pending")
-    task_description: Mapped[str] = mapped_column(Text, default="")
-    final_output: Mapped[str] = mapped_column(Text, default="")
-    confidence_score: Mapped[float] = mapped_column(Float, default=0.0)
-    iterations: Mapped[int] = mapped_column(Integer, default=0)
-    total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
-    debate_history: Mapped[dict] = mapped_column(JSON, default=list)
-    context: Mapped[dict] = mapped_column(JSON, default=dict)
-    feedback_notes: Mapped[str] = mapped_column(Text, default="")
-    error: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-    )
-
-    def to_dict(self) -> dict:
-        created_iso = ""
-        if self.created_at:
-            dt = self.created_at if self.created_at.tzinfo else self.created_at.replace(tzinfo=timezone.utc)
-            created_iso = dt.isoformat()
-            if not created_iso.endswith("Z") and "+" not in created_iso:
-                created_iso += "Z"
-
-        return {
-            "task_id": self.task_id,
-            "council": self.council,
-            "status": self.status,
-            "task_description": self.task_description,
-            "final_output": self.final_output,
-            "confidence_score": self.confidence_score,
-            "iterations": self.iterations,
-            "total_cost_usd": self.total_cost_usd,
-            "debate_history": self.debate_history or [],
-            "context": self.context or {},
-            "feedback_notes": self.feedback_notes or "",
-            "error": self.error or "",
-            "created_at": created_iso,
-        }
-
-
-class SeenItemModel(Base):
-    __tablename__ = "seen_items"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    item_id: Mapped[str] = mapped_column(String(255), index=True)
-    source: Mapped[str] = mapped_column(String(100), index=True)
-    processed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-    metadata_text: Mapped[str] = mapped_column(Text, default="")
-
-
-class KillSwitchModel(Base):
-    __tablename__ = "kill_switch"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
-    toggled_by: Mapped[str] = mapped_column(String(100), default="system")
-    toggled_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-    reason: Mapped[str] = mapped_column(Text, default="")
-
-class WorkflowSettingsModel(Base):
-    __tablename__ = "workflow_settings"
-
-    workflow_id: Mapped[str] = mapped_column(String(100), primary_key=True)
-    custom_prompt: Mapped[str] = mapped_column(Text, default="")
-    selected_docs: Mapped[str] = mapped_column(JSON, default="[]")
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-
-# ── Database Initialization ──────────────────────────────────────────────
-
-async def init_db():
-    """Create all tables. Call during FastAPI startup."""
-    async with engine.begin() as conn:
-        # Enable pgvector extension (PostgreSQL only, skip for SQLite)
-        if "postgresql" in DATABASE_URL:
-            await conn.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector"))
-        await conn.run_sync(Base.metadata.create_all)
-
-    # Remove legacy demo/sample tasks that were previously auto-seeded into
-    # production. These were placeholder rows (fake models, fake proposals)
-    # that showed up mixed with real client data and must never reappear.
     legacy_demo_ids = [
         "task-sales-01", "task-support-01", "task-content-01",
         "task-content-02", "task-grant-01", "task-strategy-01",
     ]
     async with async_session() as session:
-        from sqlalchemy import delete
-        await session.execute(delete(TaskModel).where(TaskModel.task_id.in_(legacy_demo_ids)))
+        await session.execute(delete(TaskModel).where(TaskModel.task_id.in_(legacy_demo_ids)))  # noqa: F405
         await session.commit()
 
-    print("[Database] Tables initialized.")
 
-
-
-
-# ── CRUD Operations ──────────────────────────────────────────────────────
-
-async def create_task(task_data: dict) -> dict:
-    """Insert a new task into the database with fallback."""
+async def database_ready() -> bool:
     try:
-        async with async_session() as session:
-            task = TaskModel(**{
-                k: v for k, v in task_data.items()
-                if k in TaskModel.__table__.columns.keys()
-            })
-            session.add(task)
-            await session.commit()
-            await session.refresh(task)
-            return task.to_dict()
-    except Exception as e:
-        print(f"[Database Warning] Failed to insert task into DB: {e}. Using in-memory store.")
-        if "created_at" not in task_data:
-            task_data["created_at"] = datetime.now(timezone.utc).isoformat() + "Z"
-        return task_data
+        async with engine.connect() as connection:
+            await connection.execute(sql_text("SELECT 1"))
+        return True
+    except Exception:
+        return False
 
 
-async def get_task(task_id: str) -> Optional[dict]:
-    """Get a single task by ID."""
-    from sqlalchemy import select
+async def create_task(task_data: dict[str, Any]) -> dict[str, Any]:
+    """Persist a task or raise; durable state never falls back to memory."""
     async with async_session() as session:
-        result = await session.execute(
-            select(TaskModel).where(TaskModel.task_id == task_id)
-        )
-        task = result.scalar_one_or_none()
-        return task.to_dict() if task else None
-
-
-async def list_tasks(status: Optional[str] = None, council: Optional[str] = None) -> List[dict]:
-    """List tasks with optional filters."""
-    from sqlalchemy import select
-    async with async_session() as session:
-        query = select(TaskModel)
-        if status:
-            query = query.where(TaskModel.status == status)
-        if council:
-            query = query.where(TaskModel.council == council)
-        query = query.order_by(TaskModel.created_at.desc())
-
-        result = await session.execute(query)
-        tasks = result.scalars().all()
-        return [t.to_dict() for t in tasks]
-
-
-async def update_task(task_id: str, updates: dict) -> Optional[dict]:
-    """Update a task's fields."""
-    from sqlalchemy import select
-    async with async_session() as session:
-        result = await session.execute(
-            select(TaskModel).where(TaskModel.task_id == task_id)
-        )
-        task = result.scalar_one_or_none()
-        if not task:
-            return None
-        for key, value in updates.items():
-            if hasattr(task, key):
-                setattr(task, key, value)
-        task.updated_at = datetime.now(timezone.utc)
+        task = TaskModel(**{  # noqa: F405
+            key: value for key, value in task_data.items()
+            if key in TaskModel.__table__.columns  # noqa: F405
+        })
+        session.add(task)
         await session.commit()
         await session.refresh(task)
         return task.to_dict()
 
 
-async def get_stats() -> dict:
-    """Get dashboard statistics."""
-    from sqlalchemy import select, func
+async def get_task(task_id: str) -> Optional[dict[str, Any]]:
     async with async_session() as session:
-        tasks = await list_tasks()
-        total = len(tasks)
-        pending = len([t for t in tasks if t["status"] == "awaiting_approval"])
-        approved = len([t for t in tasks if t["status"] == "approved"])
-        rejected = len([t for t in tasks if t["status"] == "rejected"])
-        total_cost = sum(t.get("total_cost_usd", 0) for t in tasks)
-        avg_confidence = (
-            sum(t.get("confidence_score", 0) for t in tasks) / total if total > 0 else 0
-        )
-
-        councils = {}
-        for t in tasks:
-            c = t["council"]
-            if c not in councils:
-                councils[c] = {"tasks": 0, "cost": 0, "avg_confidence": 0, "scores": []}
-            councils[c]["tasks"] += 1
-            councils[c]["cost"] += t.get("total_cost_usd", 0)
-            councils[c]["scores"].append(t.get("confidence_score", 0))
-
-        for c in councils.values():
-            c["avg_confidence"] = sum(c["scores"]) / len(c["scores"]) if c["scores"] else 0
-            del c["scores"]
-
-        return {
-            "total_tasks": total,
-            "pending": pending,
-            "approved": approved,
-            "rejected": rejected,
-            "total_cost_usd": round(total_cost, 4),
-            "avg_confidence": round(avg_confidence, 1),
-            "councils": councils,
-        }
+        task = await session.get(TaskModel, task_id)  # noqa: F405
+        return task.to_dict() if task else None
 
 
-# ── Dedup Operations ─────────────────────────────────────────────────────
+async def list_tasks(status: Optional[str] = None, council: Optional[str] = None) -> List[dict]:
+    async with async_session() as session:
+        query = select(TaskModel)  # noqa: F405
+        if status:
+            query = query.where(TaskModel.status == status)  # noqa: F405
+        if council:
+            query = query.where(TaskModel.council == council)  # noqa: F405
+        result = await session.execute(query.order_by(TaskModel.created_at.desc()))  # noqa: F405
+        return [task.to_dict() for task in result.scalars().all()]
+
+
+async def update_task(task_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]:
+    async with async_session() as session:
+        task = await session.get(TaskModel, task_id)  # noqa: F405
+        if not task:
+            return None
+        allowed = set(TaskModel.__table__.columns.keys()) - {"task_id", "created_at"}  # noqa: F405
+        for key, value in updates.items():
+            if key in allowed:
+                setattr(task, key, value)
+        task.version += 1
+        task.updated_at = utcnow()  # noqa: F405
+        await session.commit()
+        await session.refresh(task)
+        return task.to_dict()
+
+
+async def get_stats() -> dict[str, Any]:
+    tasks = await list_tasks()
+    total = len(tasks)
+    councils: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        bucket = councils.setdefault(task["council"], {
+            "tasks": 0, "cost": 0.0, "scores": [], "cost_metrics_complete": True,
+        })
+        bucket["tasks"] += 1
+        if task.get("cost_metrics_complete"):
+            bucket["cost"] += task.get("total_cost_usd") or 0.0
+        else:
+            bucket["cost_metrics_complete"] = False
+        if task.get("confidence_score") is not None:
+            bucket["scores"].append(float(task["confidence_score"]))
+    for bucket in councils.values():
+        scores = bucket.pop("scores")
+        bucket["avg_confidence"] = sum(scores) / len(scores) if scores else None
+    scored = [
+        float(task["confidence_score"])
+        for task in tasks if task.get("confidence_score") is not None
+    ]
+    complete_costs = [
+        float(task.get("total_cost_usd") or 0.0)
+        for task in tasks if task.get("cost_metrics_complete")
+    ]
+    return {
+        "total_tasks": total,
+        "pending": sum(task["status"] == "awaiting_approval" for task in tasks),
+        "approved": sum(task["status"] == "approved" for task in tasks),
+        "rejected": sum(task["status"] == "rejected" for task in tasks),
+        "total_cost_usd": round(sum(complete_costs), 4),
+        "cost_metrics_complete": len(complete_costs) == total,
+        "avg_confidence": round(sum(scored) / len(scored), 1) if scored else None,
+        "councils": councils,
+    }
+
 
 async def is_seen_db(item_id: str, source: str) -> bool:
-    """Check if an item has been processed."""
-    from sqlalchemy import select, and_
     async with async_session() as session:
         result = await session.execute(
-            select(SeenItemModel).where(
-                and_(SeenItemModel.item_id == item_id, SeenItemModel.source == source)
+            select(SeenItemModel.id).where(  # noqa: F405
+                SeenItemModel.item_id == item_id, SeenItemModel.source == source  # noqa: F405
             )
         )
         return result.scalar_one_or_none() is not None
 
 
-async def mark_seen_db(item_id: str, source: str, metadata: str = ""):
-    """Mark an item as processed."""
+async def mark_seen_db(item_id: str, source: str, metadata: str = "") -> bool:
     async with async_session() as session:
-        existing = await is_seen_db(item_id, source)
-        if not existing:
-            session.add(SeenItemModel(item_id=item_id, source=source, metadata_text=metadata))
+        session.add(SeenItemModel(item_id=item_id, source=source, metadata_text=metadata))  # noqa: F405
+        try:
             await session.commit()
+            return True
+        except IntegrityError:
+            await session.rollback()
+            return False
 
 
-# ── Kill Switch Operations ───────────────────────────────────────────────
-
-async def get_kill_switch_db() -> dict:
-    """Get kill switch status from DB."""
-    from sqlalchemy import select
+async def get_kill_switch_db() -> dict[str, Any]:
     async with async_session() as session:
-        result = await session.execute(select(KillSwitchModel).where(KillSwitchModel.id == 1))
-        ks = result.scalar_one_or_none()
-        if ks:
-            return {
-                "is_active": ks.is_active,
-                "toggled_by": ks.toggled_by,
-                "toggled_at": ks.toggled_at.isoformat() if ks.toggled_at else "",
-                "reason": ks.reason or "",
-            }
-        return {"is_active": False, "toggled_by": "system", "toggled_at": "", "reason": ""}
+        switch = await session.get(KillSwitchModel, 1)  # noqa: F405
+        if not switch:
+            return {"is_active": False, "toggled_by": "system", "toggled_at": "", "reason": ""}
+        return {
+            "is_active": switch.is_active, "toggled_by": switch.toggled_by,
+            "toggled_at": iso(switch.toggled_at), "reason": switch.reason or "",  # noqa: F405
+        }
 
 
-async def set_kill_switch_db(is_active: bool, toggled_by: str = "system", reason: str = ""):
+async def set_kill_switch_db(
+    is_active: bool, toggled_by: str = "system", reason: str = ""
+) -> dict[str, Any]:
     async with async_session() as session:
-        from sqlalchemy import select
-        res = await session.execute(select(KillSwitchModel).where(KillSwitchModel.id == 1))
-        ks = res.scalar_one_or_none()
-        if not ks:
-            ks = KillSwitchModel(id=1, is_active=is_active, toggled_by=toggled_by, reason=reason)
-            session.add(ks)
-        else:
-            ks.is_active = is_active
-            ks.toggled_by = toggled_by
-            ks.toggled_at = datetime.now(timezone.utc)
-            ks.reason = reason
+        switch = await session.get(KillSwitchModel, 1)  # noqa: F405
+        if not switch:
+            switch = KillSwitchModel(id=1)  # noqa: F405
+            session.add(switch)
+        switch.is_active = is_active
+        switch.toggled_by = toggled_by
+        switch.toggled_at = utcnow()  # noqa: F405
+        switch.reason = reason
         await session.commit()
+        return {
+            "is_active": switch.is_active, "toggled_by": switch.toggled_by,
+            "toggled_at": iso(switch.toggled_at), "reason": switch.reason,  # noqa: F405
+        }
 
-# ── Workflow Settings ────────────────────────────────────────────────────
 
-async def get_workflow_settings(workflow_id: str) -> dict:
-    """Get settings for a specific workflow."""
+async def get_workflow_settings(workflow_id: str) -> dict[str, Any]:
     async with async_session() as session:
-        from sqlalchemy import select
-        res = await session.execute(select(WorkflowSettingsModel).where(WorkflowSettingsModel.workflow_id == workflow_id))
-        settings = res.scalar_one_or_none()
-        if settings:
-            return {
-                "workflow_id": settings.workflow_id,
-                "custom_prompt": settings.custom_prompt,
-                "selected_docs": json.loads(settings.selected_docs) if settings.selected_docs else []
-            }
-        return {"workflow_id": workflow_id, "custom_prompt": "", "selected_docs": []}
-
-async def set_workflow_settings(workflow_id: str, custom_prompt: str, selected_docs: list[str]):
-    """Set settings for a specific workflow."""
-    async with async_session() as session:
-        from sqlalchemy import select
-        res = await session.execute(select(WorkflowSettingsModel).where(WorkflowSettingsModel.workflow_id == workflow_id))
-        settings = res.scalar_one_or_none()
+        settings = await session.get(WorkflowSettingsModel, workflow_id)  # noqa: F405
         if not settings:
-            settings = WorkflowSettingsModel(
-                workflow_id=workflow_id,
-                custom_prompt=custom_prompt,
-                selected_docs=json.dumps(selected_docs)
-            )
+            return {"workflow_id": workflow_id, "custom_prompt": "", "selected_docs": []}
+        selected = settings.selected_docs or []
+        if isinstance(selected, str):
+            try:
+                selected = json.loads(selected)
+            except json.JSONDecodeError:
+                selected = []
+        return {
+            "workflow_id": workflow_id, "custom_prompt": settings.custom_prompt,
+            "selected_docs": selected,
+        }
+
+
+async def set_workflow_settings(
+    workflow_id: str, custom_prompt: str, selected_docs: list[str]
+) -> dict[str, Any]:
+    async with async_session() as session:
+        settings = await session.get(WorkflowSettingsModel, workflow_id)  # noqa: F405
+        if not settings:
+            settings = WorkflowSettingsModel(workflow_id=workflow_id)  # noqa: F405
             session.add(settings)
-        else:
-            settings.custom_prompt = custom_prompt
-            settings.selected_docs = json.dumps(selected_docs)
-            settings.updated_at = datetime.now(timezone.utc)
+        settings.custom_prompt = custom_prompt
+        settings.selected_docs = list(selected_docs)
+        settings.updated_at = utcnow()  # noqa: F405
         await session.commit()
+        return {
+            "workflow_id": workflow_id, "custom_prompt": custom_prompt,
+            "selected_docs": list(selected_docs),
+        }

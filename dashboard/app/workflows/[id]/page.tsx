@@ -1,291 +1,297 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useParams, useRouter } from 'next/navigation';
-import { 
-  MessageCircle, ArrowLeft, Play, Pause, RefreshCw, 
-  CheckCircle2, XCircle, Shield, ShieldOff, Clock, Zap, 
-  Terminal, ExternalLink, Sparkles, Copy, Check, Info, Server
-} from 'lucide-react';
-import { fetchWorkflowDetails, triggerWorkflow, fetchKillSwitch } from '../../lib/api';
+import Link from 'next/link';
+import { useParams } from 'next/navigation';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ArrowLeft, Check, Clock3, Play, RefreshCw, Save } from 'lucide-react';
+import { fetchWorkflowDetails, triggerWorkflow, updateWorkflow } from '../../lib/api';
+import { JsonObject, SchedulePreset, WorkflowDefinition, WorkflowDetails } from '../../lib/types';
+
+interface ScheduleChoice {
+  id: SchedulePreset;
+  label: string;
+  description: string;
+  recommended?: boolean;
+}
+
+const SCHEDULE_OPTIONS: Partial<Record<string, ScheduleChoice[]>> = {
+  instagram_comments: [
+    { id: 'every_5_minutes', label: 'Quick replies', description: 'Check for new comments every 5 minutes', recommended: true },
+    { id: 'every_15_minutes', label: 'Balanced', description: 'Check every 15 minutes' },
+    { id: 'every_30_minutes', label: 'Light', description: 'Check every 30 minutes' },
+    { id: 'hourly', label: 'Hourly', description: 'Check once an hour' },
+    { id: 'manual', label: 'Manual only', description: 'Run only when you press Queue run' },
+  ],
+  youtube_comments: [
+    { id: 'every_15_minutes', label: 'Active', description: 'Check for comments every 15 minutes', recommended: true },
+    { id: 'every_30_minutes', label: 'Balanced', description: 'Check every 30 minutes' },
+    { id: 'hourly', label: 'Hourly', description: 'Check once an hour' },
+    { id: 'every_6_hours', label: 'Occasional', description: 'Check every 6 hours' },
+    { id: 'manual', label: 'Manual only', description: 'Run only when you press Queue run' },
+  ],
+  reddit_prospector: [
+    { id: 'hourly', label: 'Hourly', description: 'Scan for new leads once an hour', recommended: true },
+    { id: 'every_3_hours', label: 'Every 3 hours', description: 'A balanced lead scan' },
+    { id: 'every_6_hours', label: 'Every 6 hours', description: 'A lighter lead scan' },
+    { id: 'every_12_hours', label: 'Twice daily', description: 'Scan every 12 hours' },
+    { id: 'daily', label: 'Daily', description: 'Scan once each day' },
+    { id: 'manual', label: 'Manual only', description: 'Run only when you press Queue run' },
+  ],
+};
+
+function selectedSchedule(workflowId: string, schedule: JsonObject): SchedulePreset {
+  const options = SCHEDULE_OPTIONS[workflowId] ?? [];
+  const storedPreset = schedule.preset;
+  if (typeof storedPreset === 'string') {
+    const match = options.find((option) => option.id === storedPreset);
+    if (match) return match.id;
+  }
+  if (schedule.type === 'interval' && typeof schedule.seconds === 'number') {
+    const bySeconds: Partial<Record<number, SchedulePreset>> = {
+      300: 'every_5_minutes', 900: 'every_15_minutes', 1800: 'every_30_minutes',
+      3600: 'hourly', 10800: 'every_3_hours', 21600: 'every_6_hours',
+      43200: 'every_12_hours', 86400: 'daily',
+    };
+    const match = bySeconds[schedule.seconds];
+    if (match && options.some((option) => option.id === match)) return match;
+  }
+  return options.find((option) => option.recommended)?.id ?? options[0]?.id ?? 'manual';
+}
+
+function fixedScheduleCopy(workflow: WorkflowDetails): { title: string; description: string } {
+  if (workflow.id === 'telegram_control') {
+    return {
+      title: 'Always listening while enabled',
+      description: 'Telegram responds continuously after its connection is verified. No schedule is needed.',
+    };
+  }
+  return {
+    title: 'Runs when you start it',
+    description: 'This automation needs your content first, so it starts only when you press Queue run.',
+  };
+}
+
+function unwrapWorkflow(result: { resource: WorkflowDefinition } | WorkflowDefinition): WorkflowDefinition {
+  return 'resource' in result ? result.resource : result;
+}
 
 export default function WorkflowDetailPage() {
-  const params = useParams();
-  const router = useRouter();
-  const workflowId = params.id as string;
-
-  const [details, setDetails] = useState<any>(null);
+  const params = useParams<{ id: string }>();
+  const workflowId = params.id;
+  const [workflow, setWorkflow] = useState<WorkflowDetails | null>(null);
+  const [schedulePreset, setSchedulePreset] = useState<SchedulePreset>('manual');
+  const [customPrompt, setCustomPrompt] = useState('');
+  const [videoTitle, setVideoTitle] = useState('');
+  const [videoId, setVideoId] = useState('');
+  const [transcript, setTranscript] = useState('');
+  const [mediaUrl, setMediaUrl] = useState('');
+  const [boilerplate, setBoilerplate] = useState('');
+  const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [isRunning, setIsRunning] = useState(false);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [killSwitch, setKillSwitch] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<'activity' | 'logs' | 'settings'>('activity');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
 
-  const loadData = async () => {
+  const load = useCallback(async () => {
     try {
-      setLoading(true);
-      const data = await fetchWorkflowDetails(workflowId);
-      const ks = await fetchKillSwitch().catch(() => null);
-      setDetails(data);
-      setKillSwitch(ks);
-    } catch (err) {
-      console.error('Failed to load workflow details:', err);
+      const details = await fetchWorkflowDetails(workflowId);
+      setWorkflow(details);
+      setSchedulePreset(selectedSchedule(details.id, details.schedule));
+      const prompt = details.settings.custom_prompt;
+      setCustomPrompt(typeof prompt === 'string' ? prompt : '');
+      setError('');
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load workflow.');
     } finally {
       setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    if (workflowId) {
-      loadData();
-    }
   }, [workflowId]);
 
-  const handleRunNow = async () => {
+  useEffect(() => {
+    let active = true;
+    void fetchWorkflowDetails(workflowId)
+      .then((details) => {
+        if (!active) return;
+        setWorkflow(details);
+        setSchedulePreset(selectedSchedule(details.id, details.schedule));
+        const prompt = details.settings.custom_prompt;
+        setCustomPrompt(typeof prompt === 'string' ? prompt : '');
+        setError('');
+      })
+      .catch((loadError: unknown) => { if (active) setError(loadError instanceof Error ? loadError.message : 'Unable to load workflow.'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [workflowId]);
+
+  const verified = useMemo(() => workflow?.credential_status === 'connected' || workflow?.credential_status === 'verified', [workflow]);
+  const scheduleEditable = workflow?.id === 'youtube_comments' || workflow?.id === 'reddit_prospector' || workflow?.id === 'instagram_comments';
+
+  async function save() {
+    if (!workflow) return;
+    setBusy(true);
+    setError('');
+    setNotice('');
     try {
-      setIsRunning(true);
-      await triggerWorkflow(workflowId);
-      // Wait 3 seconds and reload live activity data
-      setTimeout(() => {
-        loadData();
-        setIsRunning(false);
-      }, 3000);
-    } catch (err) {
-      console.error(err);
-      setIsRunning(false);
+      const result = unwrapWorkflow(await updateWorkflow(workflow.id, {
+        custom_prompt: customPrompt,
+        ...(scheduleEditable ? { schedule_preset: schedulePreset } : {}),
+      }));
+      setWorkflow((current) => current ? { ...current, ...result } : null);
+      setSchedulePreset(selectedSchedule(result.id, result.schedule));
+      const choice = SCHEDULE_OPTIONS[workflow.id]?.find((option) => option.id === schedulePreset);
+      setNotice(choice ? `Changes saved. ${choice.description}.` : 'Changes saved.');
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Unable to save workflow settings.');
+    } finally {
+      setBusy(false);
     }
-  };
-
-  const copyText = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
-  };
-
-  if (loading && !details) {
-    return (
-      <div className="max-w-[1080px] mx-auto py-16 flex flex-col items-center justify-center gap-3 text-zinc-500">
-        <RefreshCw className="w-8 h-8 animate-spin text-blue-600" />
-        <p className="text-[15px] font-medium">Loading live workflow intelligence...</p>
-      </div>
-    );
   }
 
-  const activityList = details?.activity_history || [];
+  async function run() {
+    if (!workflow) return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    const payload: JsonObject = workflow.id === 'content_engine'
+      ? { video_title: videoTitle, transcript, video_id: videoId, metadata: { media_url: mediaUrl } }
+      : workflow.id === 'youtube_descriptions'
+        ? { boilerplate }
+        : {};
+    try {
+      await triggerWorkflow(workflow.id, payload);
+      setNotice('A durable workflow run was queued.');
+      await load();
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : 'Unable to queue workflow.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loading && !workflow) return <div className="flex min-h-96 items-center justify-center text-sm text-slate-500"><RefreshCw className="mr-2 h-5 w-5 animate-spin" /> Loading workflow…</div>;
+  if (!workflow) return <div className="rounded-xl border border-rose-300/20 bg-rose-400/8 p-6 text-sm text-rose-200">{error || 'Workflow not found.'}</div>;
+
+  const canRun = Boolean(verified && workflow.is_enabled && !workflow.is_paused && workflow.id !== 'telegram_control' && (workflow.id !== 'content_engine' || (videoTitle.trim() && videoId.trim() && transcript.trim().length >= 20)));
+  const scheduleOptions = SCHEDULE_OPTIONS[workflow.id] ?? [];
+  const activeSchedule = scheduleOptions.find((option) => option.id === schedulePreset);
+  const fixedSchedule = fixedScheduleCopy(workflow);
+  const needsSimpleSchedule = workflow.schedule.type === 'needs_update';
 
   return (
-    <div className="max-w-[1080px] mx-auto flex flex-col gap-8 animate-in fade-in duration-300 ease-out fill-mode-both pb-16">
-      {/* Top Navigation & Breadcrumb */}
-      <div className="flex items-center justify-between pt-2">
-        <button
-          onClick={() => router.push('/workflows')}
-          className="flex items-center gap-2 text-[14px] font-semibold text-zinc-600 hover:text-zinc-900 transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          <span>Back to Workflows</span>
-        </button>
-
-        <div className="flex items-center gap-3">
-          <button
-            onClick={loadData}
-            className="flex items-center gap-2 h-10 px-4 rounded-[10px] text-[13px] font-semibold text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 transition-all shadow-sm"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            <span>Refresh Data</span>
-          </button>
-
-          <button
-            onClick={handleRunNow}
-            disabled={isRunning || killSwitch?.is_active}
-            className="flex items-center gap-2 h-10 px-6 rounded-[10px] text-[14px] font-semibold bg-zinc-900 text-white hover:bg-zinc-800 active:scale-[0.97] transition-all shadow-sm disabled:opacity-50"
-          >
-            {isRunning ? (
-              <><RefreshCw className="w-4 h-4 animate-spin" /> Executing Pipeline...</>
-            ) : (
-              <><Play className="w-4 h-4 fill-current" /> Run Now</>
-            )}
-          </button>
-        </div>
+    <div className="mx-auto max-w-5xl space-y-7 pb-16">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <Link href="/workflows" className="flex items-center gap-2 text-sm font-semibold text-slate-400"><ArrowLeft className="h-4 w-4" /> Back to workflows</Link>
+        <button onClick={() => void load()} className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-slate-300"><RefreshCw className="h-4 w-4" /> Refresh</button>
       </div>
 
-      {/* Main Workflow Banner Card */}
-      <div className="bg-white border border-zinc-200 rounded-[24px] p-6 shadow-sm flex flex-col gap-6">
-        <div className="flex items-start justify-between gap-6">
-          <div className="flex items-start gap-4">
-            <div className="p-4 rounded-[18px] bg-pink-50 border border-pink-200 shrink-0 shadow-sm">
-              <MessageCircle className="w-7 h-7 text-pink-600" />
-            </div>
-            <div>
-              <div className="flex items-center gap-3">
-                <h1 className="text-[24px] font-bold text-zinc-900 tracking-tight">{details?.name || 'Instagram Comment Auto-Reply'}</h1>
-                <span className="flex items-center gap-1.5 px-3 py-1 bg-emerald-50 border border-emerald-200 rounded-[8px] text-[12px] font-bold text-emerald-700">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                  Active & Listening
-                </span>
-              </div>
-              <p className="text-[15px] text-zinc-500 mt-1 leading-relaxed">
-                Fetches comments from your connected Instagram account, runs RAG business logic via Support AI Council, and posts replies live to Meta Graph API.
-              </p>
-            </div>
-          </div>
+      <section className="surface-card rounded-2xl p-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div><p className="eyebrow">Automation setup</p><h1 className="mt-2 text-2xl font-bold text-slate-50">{workflow.display_name}</h1><p className="mt-2 text-sm text-slate-400">Choose when it runs and add any guidance you want it to follow.</p></div>
+          <span className="rounded-full bg-emerald-300/8 px-3 py-1.5 text-xs font-bold capitalize text-emerald-300">{verified ? 'Connection ready' : 'Connection needs setup'}</span>
         </div>
-
-        {/* Dynamic Metric Cards */}
-        <div className="grid grid-cols-4 gap-4 border-t border-zinc-100 pt-5">
-          <div className="bg-zinc-50/80 border border-zinc-100 rounded-[14px] p-4">
-            <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Connected Account</span>
-            <p className="text-[17px] font-bold text-zinc-900">{details?.account_handle || '@zamdev.me'}</p>
-            <span className="text-[11px] text-zinc-500 mt-1 block">ID: {details?.business_id}</span>
-          </div>
-
-          <div className="bg-zinc-50/80 border border-zinc-100 rounded-[14px] p-4">
-            <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Total Replied Comments</span>
-            <p className="text-[20px] font-bold text-emerald-600">{details?.total_replied || 0}</p>
-            <span className="text-[11px] text-zinc-500 mt-1 block">Deduplicated in DB</span>
-          </div>
-
-          <div className="bg-zinc-50/80 border border-zinc-100 rounded-[14px] p-4">
-            <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Token Authentication</span>
-            <p className="text-[14px] font-bold text-zinc-900 flex items-center gap-1.5 mt-1">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-              Never-Expiring Page
-            </p>
-            <span className="text-[11px] text-emerald-700 font-semibold mt-1 block">100% Valid</span>
-          </div>
-
-          <div className="bg-zinc-50/80 border border-zinc-100 rounded-[14px] p-4">
-            <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Meta Webhook SSL</span>
-            <p className="text-[14px] font-bold text-zinc-900 flex items-center gap-1.5 mt-1">
-              <Sparkles className="w-4 h-4 text-blue-600" />
-              Real-Time Verified
-            </p>
-            <span className="text-[11px] text-zinc-500 mt-1 block font-mono text-[10px] truncate">sslip.io/api/webhooks</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex items-center gap-2 border-b border-zinc-200">
-        {[
-          { id: 'activity', label: 'Live Activity & Execution History', count: activityList.length },
-          { id: 'logs', label: 'System Logs & Real-Time Console' },
-          { id: 'settings', label: 'Integration Settings & Endpoints' },
-        ].map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id as any)}
-            className={`flex items-center gap-2 px-4 py-3 text-[14px] font-semibold border-b-2 transition-all ${
-              activeTab === tab.id
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-zinc-500 hover:text-zinc-900'
-            }`}
-          >
-            <span>{tab.label}</span>
-            {tab.count !== undefined && (
-              <span className="px-2 py-0.5 text-[11px] font-bold bg-zinc-100 text-zinc-700 rounded-full">
-                {tab.count}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-
-      {/* TAB 1: Live Activity & Execution History */}
-      {activeTab === 'activity' && (
-        <div className="bg-white border border-zinc-200 rounded-[20px] shadow-sm overflow-hidden flex flex-col">
-          <div className="p-5 border-b border-zinc-100 flex items-center justify-between bg-zinc-50/50">
-            <div>
-              <h3 className="text-[16px] font-bold text-zinc-900">Executed Activity Feed</h3>
-              <p className="text-[13px] text-zinc-500 mt-0.5">Real comments processed and replied live on Instagram via Meta Graph API.</p>
-            </div>
-            <span className="text-[12px] font-semibold text-zinc-500 bg-white border border-zinc-200 px-3 py-1 rounded-[8px]">
-              Showing last {activityList.length} items
-            </span>
-          </div>
-
-          {activityList.length === 0 ? (
-            <div className="p-12 text-center flex flex-col items-center justify-center gap-2 text-zinc-500">
-              <Info className="w-8 h-8 text-zinc-400" />
-              <p className="text-[15px] font-semibold text-zinc-700">No comment activity logged yet.</p>
-              <p className="text-[13px] text-zinc-400">Click "Run Now" above to trigger a scan or post a comment on @zamdev.me!</p>
-            </div>
-          ) : (
-            <div className="divide-y divide-zinc-100">
-              {activityList.map((act: any, idx: number) => (
-                <div key={idx} className="p-5 hover:bg-zinc-50/60 transition-colors flex flex-col gap-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="px-2.5 py-0.5 bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-bold rounded-[6px]">
-                        REPLIED LIVE
-                      </span>
-                      <span className="text-[13px] font-bold text-zinc-900 font-mono">Comment ID: {act.comment_id}</span>
-                    </div>
-                    <span className="text-[12px] text-zinc-400 font-mono">{act.replied_at}</span>
-                  </div>
-
-                  {/* Reply Content */}
-                  <div className="bg-zinc-50 border border-zinc-200/80 rounded-[12px] p-4 flex flex-col gap-2">
-                    <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">AI Generated Reply</span>
-                    <p className="text-[14px] text-zinc-800 font-medium leading-relaxed">{act.reply_text}</p>
-                  </div>
-
-                  {/* Actions & Specs */}
-                  <div className="flex items-center justify-between text-[12px] text-zinc-500 pt-1">
-                    <span className="text-zinc-500">Media Post ID: <code className="text-zinc-700 font-mono">{act.media_id || '18345092308206826'}</code></span>
+        <div className="mt-6 space-y-6">
+          {scheduleEditable ? (
+            <fieldset>
+              <legend className="flex items-center gap-2 text-sm font-bold text-slate-200"><Clock3 className="h-4 w-4 text-cyan-300" /> How often should this run?</legend>
+              <p className="mt-1 text-xs leading-5 text-slate-400">Pick the pace that fits you. The system handles the timing automatically.</p>
+              {needsSimpleSchedule && <p className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/8 px-3 py-2 text-xs text-amber-100">A previous advanced schedule was found. Choose an option below and save to replace it.</p>}
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {scheduleOptions.map((option) => {
+                  const selected = option.id === schedulePreset;
+                  return (
                     <button
-                      onClick={() => copyText(act.reply_text, act.comment_id)}
-                      className="flex items-center gap-1.5 text-blue-600 font-semibold hover:underline"
+                      key={option.id}
+                      type="button"
+                      aria-pressed={selected}
+                      data-selected={selected}
+                      onClick={() => setSchedulePreset(option.id)}
+                      className="choice-card min-h-24 rounded-xl border border-white/10 bg-white/[0.025] p-4 text-left transition hover:border-cyan-300/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
                     >
-                      {copiedId === act.comment_id ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>{copiedId === act.comment_id ? 'Copied Reply!' : 'Copy Reply'}</span>
+                      <span className="flex items-center justify-between gap-3">
+                        <span className="font-bold text-slate-100">{option.label}</span>
+                        {selected ? <span className="flex h-6 w-6 items-center justify-center rounded-full bg-cyan-300 text-[#04111b]"><Check className="h-4 w-4" /></span> : option.recommended ? <span className="rounded-full bg-emerald-300/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-emerald-200">Recommended</span> : null}
+                      </span>
+                      <span className="mt-2 block text-xs leading-5 text-slate-400">{option.description}</span>
                     </button>
-                  </div>
-                </div>
-              ))}
-            </div>
+                  );
+                })}
+              </div>
+              {activeSchedule && <p aria-live="polite" className="mt-3 text-xs font-semibold text-cyan-200">Selected: {activeSchedule.label} — {activeSchedule.description.toLowerCase()}.</p>}
+            </fieldset>
+          ) : (
+            <div className="rounded-xl border border-white/8 bg-white/[0.025] p-4"><p className="flex items-center gap-2 text-sm font-semibold text-slate-200"><Clock3 className="h-4 w-4 text-cyan-300" /> {fixedSchedule.title}</p><p className="mt-2 text-xs leading-5 text-slate-400">{fixedSchedule.description}</p></div>
           )}
+          <label className="text-sm font-semibold text-slate-300">Custom instructions
+            <span className="mt-1 block text-xs font-normal text-slate-500">Optional guidance this automation should follow each time it runs.</span>
+            <textarea value={customPrompt} onChange={(event) => setCustomPrompt(event.target.value)} maxLength={20_000} className="mt-2 min-h-24 w-full input-shell rounded-xl p-3 text-sm font-normal text-slate-100 outline-none focus:border-cyan-300/40" />
+          </label>
         </div>
+        <button disabled={busy} onClick={() => void save()} className="mt-5 flex h-10 items-center gap-2 rounded-xl bg-cyan-300 px-4 text-sm font-black text-[#04111b] disabled:opacity-50"><Save className="h-4 w-4" /> Save changes</button>
+      </section>
+
+      {workflow.id === 'content_engine' && (
+        <section className="surface-card rounded-2xl p-6">
+          <h2 className="font-bold text-slate-100">Content source</h2>
+          <p className="mt-1 text-sm text-slate-500">Each platform variant receives its own generator/critic validation and approval record.</p>
+          <input value={videoTitle} onChange={(event) => setVideoTitle(event.target.value)} placeholder="Video or source title" className="mt-4 h-11 w-full input-shell rounded-xl px-3 text-sm text-slate-100" />
+          <input required value={videoId} onChange={(event) => setVideoId(event.target.value)} placeholder="Stable source ID or YouTube video ID" className="mt-3 h-11 w-full input-shell rounded-xl px-3 text-sm text-slate-100" />
+          <input type="url" value={mediaUrl} onChange={(event) => setMediaUrl(event.target.value)} placeholder="Public image/video URL (required before Instagram approval)" className="mt-3 h-11 w-full input-shell rounded-xl px-3 text-sm text-slate-100" />
+          <textarea value={transcript} onChange={(event) => setTranscript(event.target.value)} placeholder="Transcript (minimum 20 characters)" className="mt-3 min-h-64 w-full input-shell rounded-xl p-3 text-sm leading-6 text-slate-100" />
+        </section>
       )}
 
-      {/* TAB 2: System Logs */}
-      {activeTab === 'logs' && (
-        <div className="bg-zinc-950 border border-zinc-800 rounded-[20px] p-6 shadow-xl text-zinc-300 font-mono text-[13px] flex flex-col gap-4">
-          <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-            <div className="flex items-center gap-2 text-zinc-100 font-bold">
-              <Terminal className="w-4 h-4 text-blue-400" />
-              <span>Real-Time Hostinger Server Log Stream</span>
-            </div>
-            <span className="text-[11px] text-zinc-500">Service: council-backend.service</span>
-          </div>
-
-          <div className="flex flex-col gap-2 py-2">
-            <p className="text-emerald-400">[INFO] FastAPI Server Online — listening on port 8000</p>
-            <p className="text-blue-400">[INFO] Meta Webhooks active at https://187.124.172.17.sslip.io/api/webhooks/instagram</p>
-            <p className="text-blue-400">[INFO] Background scheduler running every 5 minutes</p>
-            <p className="text-zinc-400">[INFO] Deduplication database loaded: {activityList.length} past records</p>
-            <p className="text-emerald-400">[SUCCESS] Meta Graph API Page Access Token valid (Never-Expiring)</p>
-          </div>
-        </div>
+      {workflow.id === 'youtube_descriptions' && (
+        <section className="surface-card rounded-2xl p-6">
+          <label className="text-sm font-bold text-slate-200">Description boilerplate
+            <textarea value={boilerplate} onChange={(event) => setBoilerplate(event.target.value)} className="mt-2 min-h-32 w-full input-shell rounded-xl p-3 text-sm font-normal text-slate-100" />
+          </label>
+        </section>
       )}
 
-      {/* TAB 3: Settings */}
-      {activeTab === 'settings' && (
-        <div className="bg-white border border-zinc-200 rounded-[20px] p-6 shadow-sm flex flex-col gap-6">
-          <h3 className="text-[17px] font-bold text-zinc-900">Integration Configuration</h3>
-          
-          <div className="grid grid-cols-2 gap-4">
-            <div className="border border-zinc-200 rounded-[12px] p-4 bg-zinc-50">
-              <span className="text-[12px] font-bold text-zinc-500 uppercase tracking-wider block mb-1">Webhook Endpoint</span>
-              <code className="text-[13px] font-mono text-blue-600 block">https://187.124.172.17.sslip.io/api/webhooks/instagram</code>
-            </div>
-
-            <div className="border border-zinc-200 rounded-[12px] p-4 bg-zinc-50">
-              <span className="text-[12px] font-bold text-zinc-500 uppercase tracking-wider block mb-1">Manual Trigger Endpoint</span>
-              <code className="text-[13px] font-mono text-blue-600 block">POST /api/workflows/instagram-comments</code>
-            </div>
+      {workflow.id === 'telegram_control' && (
+        <section className="surface-card rounded-2xl p-6">
+          <h2 className="text-lg font-bold text-white">Telegram administrator controls</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-300">When the verified workflow is enabled, the worker listens only to the configured private administrator chat and sends approval cards and workflow alerts.</p>
+          <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {[
+              ['/task', 'Submit work to Grant, Sales, or Content Council'],
+              ['/status', 'Read backend and kill-switch state'],
+              ['/kill', 'Stop workflow execution immediately'],
+              ['/resume', 'Release the global stop'],
+              ['/help', 'Show the available commands'],
+              ['/cancel', 'Cancel an unfinished task entry'],
+            ].map(([command, description]) => <div key={command} className="rounded-xl border border-white/8 bg-white/[0.025] p-4"><code className="font-bold text-cyan-200">{command}</code><p className="mt-2 text-xs leading-5 text-slate-300">{description}</p></div>)}
           </div>
-        </div>
+          <p className="mt-4 text-xs text-slate-400">Approve, Reject, and Retry buttons use the same versioned backend actions as this dashboard, preventing duplicate decisions.</p>
+        </section>
       )}
+
+      {workflow.id === 'instagram_comments' && (
+        <section className="surface-card rounded-2xl p-6">
+          <h2 className="text-lg font-bold text-white">Approval-first Instagram replies</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-300">The scan checks recent professional-account comments, ignores already staged items, drafts a contextual reply, and places it in Queue & Approvals. Approval is required before Meta receives a reply.</p>
+        </section>
+      )}
+
+      {error && <p role="alert" className="rounded-xl border border-rose-300/20 bg-rose-400/8 p-4 text-sm text-rose-200">{error}</p>}
+      {notice && <p className="rounded-xl border border-emerald-300/20 bg-emerald-300/8 p-4 text-sm text-emerald-200">{notice}</p>}
+
+      {workflow.id !== 'telegram_control' && <div className="flex justify-end">
+        <button disabled={busy || !canRun} onClick={() => void run()} className="flex h-11 items-center gap-2 rounded-xl bg-cyan-300 px-6 text-sm font-black text-[#04111b] disabled:cursor-not-allowed disabled:opacity-40"><Play className="h-4 w-4" /> {busy ? 'Working…' : 'Queue run'}</button>
+      </div>}
+
+      <section className="surface-card rounded-2xl">
+        <div className="border-b border-white/8 p-5"><h2 className="font-bold text-slate-100">Persisted run history</h2></div>
+        {workflow.runs.length === 0 ? <p className="p-8 text-center text-sm text-slate-500">No workflow runs have been recorded.</p> : (
+          <div className="divide-y divide-white/8">{workflow.runs.map((runItem) => (
+            <div key={runItem.id} className="grid gap-2 p-5 text-sm md:grid-cols-[1fr_auto_auto] md:items-center">
+              <div><p className="font-mono text-xs text-slate-600">{runItem.id}</p><p className="mt-1 text-slate-400">{new Date(runItem.created_at).toLocaleString()}</p></div>
+              <span className="font-semibold capitalize text-slate-300">{runItem.status.replaceAll('_', ' ')}</span>
+              <span className="text-xs text-slate-500">Attempt {runItem.attempts}/{runItem.max_attempts}</span>
+              {runItem.error && <p className="text-xs text-rose-300 md:col-span-3">{runItem.error}</p>}
+            </div>
+          ))}</div>
+        )}
+      </section>
     </div>
   );
 }

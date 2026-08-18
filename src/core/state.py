@@ -15,10 +15,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any
+from typing import Any
 
 from pydantic import BaseModel, Field
-from langgraph.graph.message import add_messages
 
 
 # ── Enums ────────────────────────────────────────────────────────────────
@@ -31,6 +30,7 @@ class CouncilStatus(str, Enum):
     REFINING = "refining"          # Generator is revising based on critique
     CONSENSUS = "consensus"        # Confidence threshold met
     AWAITING_APPROVAL = "awaiting_approval"  # Paused for human review
+    NEEDS_MANUAL_REVIEW = "needs_manual_review"  # Threshold missed after final allowed draft
     APPROVED = "approved"          # Human approved
     REJECTED = "rejected"          # Human rejected (will feed back into learning)
     FAILED = "failed"              # Max retries exceeded or error
@@ -60,7 +60,13 @@ class AgentMessage(BaseModel):
     model_used: str = ""
     content: str
     confidence_score: float = 0.0  # 0-100, only set by Critic
-    cost_usd: float = 0.0
+    cost_usd: float | None = None
+    cost_source: str = "unavailable"
+    input_tokens: int = 0
+    output_tokens: int = 0
+    provider_request_id: str | None = None
+    prompt_messages: list[dict[str, str]] = Field(default_factory=list)
+    structured_output: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -96,8 +102,8 @@ class CouncilState(BaseModel):
     status: CouncilStatus = CouncilStatus.PENDING
     current_draft: str = ""          # The latest version of the output
     debate_history: list[AgentMessage] = Field(default_factory=list)
-    iteration: int = 0               # Current debate round
-    max_iterations: int = 3          # Max debate rounds before forced consensus
+    iteration: int = 0               # Number of generator drafts produced
+    max_iterations: int = 3          # Maximum generator drafts (hard production cap)
     confidence_score: float = 0.0    # Latest score from Critic (0-100)
     confidence_threshold: float = 85.0  # Score needed to reach consensus
 
@@ -109,7 +115,9 @@ class CouncilState(BaseModel):
     total_cost_usd: float = 0.0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    cost_metrics_complete: bool = True
 
     # ── Metadata ──
     error: str = ""
+    warnings: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)

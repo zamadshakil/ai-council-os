@@ -1,356 +1,74 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Upload, FileText, Search, Trash2, Brain, BookOpen, 
-  Loader2, CheckCircle, Plus 
-} from 'lucide-react';
-import { formatDistanceToNow } from 'date-fns';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { BookOpenCheck, Check, FileSearch, FileText, RefreshCw, Search, Sparkles, Trash2, UploadCloud } from 'lucide-react';
+import { deleteKnowledgeDocument, fetchKnowledgeDocuments, searchKnowledge, uploadKnowledgeDocument } from '../lib/api';
+import { KnowledgeDoc, KnowledgeSearchResult } from '../lib/types';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
-
-interface Document {
-  doc_hash: string;
-  filename: string;
-  chunk_count: number;
-  ingested_at: string;
-}
-
-interface SearchResult {
-  text: string;
-  doc_name: string;
-  score: number;
-}
-
-export default function KnowledgeHubPage() {
-  const [documents, setDocuments] = useState<Document[]>([]);
+export default function KnowledgePage() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [documents, setDocuments] = useState<KnowledgeDoc[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [results, setResults] = useState<KnowledgeSearchResult[]>([]);
+  const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
 
-  const loadDocuments = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/knowledge/documents`);
-      if (res.ok) {
-        const data = await res.json();
-        setDocuments(data.documents || []);
-      }
-    } catch (err) {
-      console.error('Failed to load documents:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadDocuments();
+  const load = useCallback(async () => {
+    try { setDocuments(await fetchKnowledgeDocuments()); setError(''); }
+    catch (loadError) { setError(loadError instanceof Error ? loadError.message : 'Unable to load documents.'); }
+    finally { setLoading(false); }
   }, []);
 
   useEffect(() => {
-    const timer = setTimeout(async () => {
-      if (!searchQuery.trim()) {
-        setSearchResults([]);
-        return;
-      }
-      setIsSearching(true);
-      try {
-        const res = await fetch(`${API_BASE}/api/knowledge/search?q=${encodeURIComponent(searchQuery)}`);
-        if (res.ok) {
-          const data = await res.json();
-          setSearchResults(data.results || []);
-        }
-      } catch (err) {
-        console.error('Search failed:', err);
-      } finally {
-        setIsSearching(false);
-      }
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [searchQuery]);
-
-  const handleUpload = async (file: File) => {
-    setUploading(true);
-    setUploadProgress(0);
-    const interval = setInterval(() => {
-      setUploadProgress(p => Math.min(p + 10, 90));
-    }, 200);
-
-    const formData = new FormData();
-    formData.append('file', file);
-
-    try {
-      setUploadError(null);
-      const res = await fetch(`${API_BASE}/api/knowledge/upload`, {
-        method: 'POST',
-        body: formData,
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.status === 'error' || data.error) {
-           setUploadError(data.error || 'Failed to parse document. Check if python-docx/PyMuPDF are installed.');
-        } else {
-           setUploadProgress(100);
-           await loadDocuments();
-        }
-      } else {
-        setUploadError(`Server returned ${res.status}: Upload failed`);
-      }
-    } catch (err: any) {
-      console.error('Upload failed:', err);
-      setUploadError(err.message || 'Network error during upload.');
-    } finally {
-      clearInterval(interval);
-      setTimeout(() => {
-        setUploading(false);
-        setUploadProgress(0);
-      }, 500);
-    }
-  };
-
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleUpload(e.dataTransfer.files[0]);
-    }
+    let active = true;
+    void fetchKnowledgeDocuments()
+      .then((items) => { if (active) setDocuments(items); })
+      .catch((loadError: unknown) => { if (active) setError(loadError instanceof Error ? loadError.message : 'Unable to load documents.'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, []);
 
-  const handleDelete = async (docHash: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/api/knowledge/documents/${docHash}`, {
-        method: 'DELETE',
-      });
-      if (res.ok) {
-        setDocuments(documents.filter(d => d.doc_hash !== docHash));
-      }
-    } catch (err) {
-      console.error('Delete failed:', err);
-    }
-  };
+  async function upload(file: File) {
+    setBusy('upload'); setError('');
+    try { await uploadKnowledgeDocument(file); await load(); }
+    catch (uploadError) { setError(uploadError instanceof Error ? uploadError.message : 'Unable to index this document.'); }
+    finally { setBusy(''); if (inputRef.current) inputRef.current.value = ''; }
+  }
 
-  
+  async function remove(document: KnowledgeDoc) {
+    if (!window.confirm(`Delete “${document.filename}” and its retrieval index?`)) return;
+    setBusy(document.id); setError('');
+    try { await deleteKnowledgeDocument(document.id); setDocuments((current) => current.filter((item) => item.id !== document.id)); setSelected((current) => current.filter((hash) => hash !== document.doc_hash)); }
+    catch (deleteError) { setError(deleteError instanceof Error ? deleteError.message : 'Unable to delete document.'); }
+    finally { setBusy(''); }
+  }
 
-  const totalChunks = documents.reduce((acc, doc) => acc + doc.chunk_count, 0);
+  async function search(event: React.FormEvent) {
+    event.preventDefault(); if (!query.trim()) return;
+    setBusy('search'); setError('');
+    try { setResults(await searchKnowledge(query.trim(), selected)); }
+    catch (searchError) { setError(searchError instanceof Error ? searchError.message : 'Knowledge retrieval failed.'); }
+    finally { setBusy(''); }
+  }
+
+  const chunks = documents.reduce((sum, document) => sum + (document.chunk_count ?? 0), 0);
 
   return (
-    <div className="space-y-12 pb-20 animate-in fade-in duration-300 ease-out fill-mode-both">
-      {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-[40px] font-bold text-[#111827] tracking-tight leading-none mb-3 flex items-center gap-3">
-          <Brain className="w-10 h-10 text-indigo-600" />
-          Knowledge Hub
-        </h1>
-        <p className="text-[15px] text-zinc-500 font-medium">Manage your organization's RAG knowledge base to contextually empower your AI workflows.</p>
+    <div className="space-y-7 pb-16">
+      <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="eyebrow">Grounded intelligence</p><h1 className="mt-2 text-3xl font-black tracking-tight text-slate-50">Knowledge Hub</h1><p className="mt-2 max-w-2xl text-sm text-slate-400">Parent-child indexing, hybrid semantic + keyword retrieval, reciprocal-rank fusion, and reranking—with visible source citations.</p></div><div className="flex gap-2"><button onClick={() => void load()} className="flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 text-xs font-bold text-slate-300"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />Refresh</button><button onClick={() => inputRef.current?.click()} disabled={busy === 'upload'} className="flex h-10 items-center gap-2 rounded-xl bg-cyan-300 px-4 text-xs font-black text-[#04111b] disabled:opacity-50"><UploadCloud className="h-4 w-4" />{busy === 'upload' ? 'Indexing…' : 'Upload source'}</button><input ref={inputRef} type="file" accept=".pdf,.docx,.txt,.md" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} /></div></div>
+
+      <section className="grid gap-4 sm:grid-cols-3">{[[documents.length,'Indexed sources',BookOpenCheck],[chunks,'Search passages',FileText],[selected.length || 'All','Current scope',FileSearch]].map(([value,label,Icon]) => { const IconComponent = Icon as typeof FileText; return <div key={String(label)} className="surface-card rounded-2xl p-5"><IconComponent className="h-5 w-5 text-cyan-300" /><p className="mt-5 text-3xl font-black text-slate-50">{String(value)}</p><p className="mt-1 text-xs font-bold uppercase tracking-wide text-slate-500">{String(label)}</p></div>; })}</section>
+      {error && <p role="alert" className="rounded-2xl border border-rose-300/20 bg-rose-400/8 p-4 text-sm text-rose-200">{error}</p>}
+
+      <div className="grid gap-5 xl:grid-cols-[.8fr_1.25fr]">
+        <section className="surface-card h-fit rounded-2xl p-5"><div className="flex items-center justify-between"><div><p className="eyebrow">Source vault</p><h2 className="mt-1 font-bold text-slate-100">Retrieval scope</h2></div><span className="text-xs text-slate-600">PDF · DOCX · TXT · MD</span></div><p className="mt-3 text-xs leading-5 text-slate-500">Select sources to test the same strict scope used by Grant Council. Leave all unchecked to search the full library.</p><div className="mt-5 space-y-2">{loading && documents.length === 0 ? <div className="h-40 animate-pulse rounded-xl bg-white/5" /> : documents.length === 0 ? <p className="rounded-xl border border-dashed border-white/10 py-14 text-center text-xs text-slate-600">No source documents indexed.</p> : documents.map((document) => { const active = selected.includes(document.doc_hash); return <article key={document.id} className={`rounded-xl border p-3 ${active ? 'border-cyan-300/25 bg-cyan-300/7' : 'border-white/8 bg-white/[0.02]'}`}><div className="flex items-start gap-3"><button onClick={() => setSelected((current) => active ? current.filter((hash) => hash !== document.doc_hash) : [...current, document.doc_hash])} className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-md border ${active ? 'border-cyan-300 bg-cyan-300 text-[#04111b]' : 'border-white/15 text-transparent'}`} aria-label={`${active ? 'Remove' : 'Add'} ${document.filename} from search scope`}><Check className="h-3.5 w-3.5" /></button><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-slate-200">{document.filename}</p><p className="mt-1 text-[11px] text-slate-600">{document.chunk_count ?? 0} passages · {document.status ?? 'ready'}</p>{document.warning && <p className="mt-1 text-[11px] text-amber-300">{document.warning}</p>}</div><button disabled={busy === document.id} onClick={() => void remove(document)} className="rounded-lg p-2 text-slate-600 hover:bg-rose-400/10 hover:text-rose-300"><Trash2 className="h-4 w-4" /></button></div></article>; })}</div></section>
+
+        <section className="space-y-4"><form onSubmit={search} className="surface-card rounded-2xl p-4"><div className="flex items-center gap-3"><span className="jarvis-orb grid h-10 w-10 shrink-0 place-items-center rounded-full bg-cyan-300/8 text-cyan-300"><Sparkles className="h-4 w-4" /></span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask a question across your selected evidence…" className="h-12 min-w-0 flex-1 bg-transparent text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none" /><button disabled={busy === 'search' || !query.trim()} className="flex h-10 items-center gap-2 rounded-xl bg-cyan-300 px-4 text-xs font-black text-[#04111b] disabled:opacity-40"><Search className="h-4 w-4" />{busy === 'search' ? 'Searching…' : 'Search'}</button></div></form>
+          <div className="space-y-3">{results.length === 0 ? <div className="surface-card rounded-2xl border-dashed py-24 text-center"><FileSearch className="mx-auto h-7 w-7 text-slate-700" /><p className="mt-3 text-sm text-slate-500">Run a search to inspect grounded passages and citations.</p></div> : results.map((result, index) => <article key={`${result.doc_hash}-${result.chunk_index ?? index}`} className="surface-card rounded-2xl p-5"><div className="flex items-center justify-between gap-4"><span className="rounded-lg border border-cyan-300/15 bg-cyan-300/8 px-2.5 py-1 text-[10px] font-black uppercase tracking-wide text-cyan-300">#{index + 1} source match</span><span className="text-[11px] font-mono text-slate-600">score {result.score.toFixed(4)}</span></div><p className="mt-4 whitespace-pre-wrap text-sm leading-6 text-slate-300">{result.text}</p><div className="mt-5 flex items-center gap-2 border-t border-white/8 pt-4 text-xs text-slate-500"><FileText className="h-4 w-4 text-emerald-300" /><span className="font-semibold text-slate-400">{result.citation || result.doc_name}</span></div></article>)}</div>
+        </section>
       </div>
-
-        {/* Stats Row */}
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1 }}
-          className="grid grid-cols-1 md:grid-cols-2 gap-4"
-        >
-          <div className="bg-white border border-zinc-200 rounded-2xl p-6 shadow-sm relative overflow-hidden">
-            <div className="absolute top-0 right-0 p-4 opacity-5">
-              <BookOpen className="w-24 h-24 text-indigo-900" />
-            </div>
-            <div className="relative z-10">
-              <p className="text-sm font-medium text-zinc-500 uppercase tracking-wider mb-2">Total Documents</p>
-              <p className="text-4xl font-bold text-zinc-900">{documents.length}</p>
-            </div>
-          </div>
-          <div className="bg-white border border-zinc-200 rounded-2xl p-6 shadow-sm relative overflow-hidden">
-            <div className="absolute top-0 right-0 p-4 opacity-5">
-              <Brain className="w-24 h-24 text-indigo-900" />
-            </div>
-            <div className="relative z-10">
-              <p className="text-sm font-medium text-zinc-500 uppercase tracking-wider mb-2">Total Chunks Indexed</p>
-              <p className="text-4xl font-bold text-zinc-900">{totalChunks}</p>
-            </div>
-          </div>
-        </motion.div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Left Column */}
-          <div className="lg:col-span-1 flex flex-col gap-6">
-            <motion.div 
-              initial={{ opacity: 0, x: -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: 0.2 }}
-              className="bg-white border border-zinc-200 rounded-2xl p-6 shadow-sm"
-            >
-              <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                <Upload className="w-5 h-5 text-indigo-500" /> Upload Document
-              </h2>
-              
-              {uploadError && (
-                <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg text-sm font-medium">
-                  {uploadError}
-                </div>
-              )}
-              
-              <div  
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={onDrop}
-                className={`relative border-2 border-dashed rounded-xl p-8 text-center transition-all duration-200 ${
-                  uploading 
-                    ? 'border-indigo-500 bg-indigo-50' 
-                    : 'border-zinc-300 hover:border-indigo-400 hover:bg-zinc-50 cursor-pointer'
-                }`}
-              >
-                <input 
-                  type="file" 
-                  accept=".pdf,.docx,.txt"
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
-                  onChange={(e) => e.target.files?.[0] && handleUpload(e.target.files[0])}
-                  disabled={uploading}
-                />
-                <div className="flex flex-col items-center gap-3">
-                  {uploading ? (
-                    <>
-                      <Loader2 className="w-10 h-10 text-indigo-600 animate-spin" />
-                      <div className="w-full">
-                        <p className="text-sm font-medium text-zinc-700 mb-2">Processing Document...</p>
-                        <div className="w-full h-2 bg-zinc-200 rounded-full overflow-hidden">
-                          <div 
-                            className="h-full bg-indigo-600 transition-all duration-300"
-                            style={{ width: `${uploadProgress}%` }}
-                          />
-                        </div>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="w-12 h-12 bg-zinc-100 rounded-full flex items-center justify-center">
-                        <Upload className="w-6 h-6 text-zinc-500" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-zinc-700">Drag & drop or click</p>
-                        <p className="text-xs text-zinc-500 mt-1">Supports PDF, DOCX, TXT</p>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-            </motion.div>
-          </div>
-
-          {/* Right Column */}
-          <div className="lg:col-span-2 flex flex-col gap-6">
-            <motion.div 
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: 0.3 }}
-              className="bg-white border border-zinc-200 rounded-2xl p-2 shadow-sm"
-            >
-              <div className="relative">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-400" />
-                <input 
-                  type="text"
-                  placeholder="Ask a question or search documents..."
-                  className="w-full bg-transparent border-none focus:ring-0 text-zinc-900 py-4 pl-12 pr-4 outline-none placeholder:text-zinc-400"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-                {isSearching && (
-                  <Loader2 className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 text-indigo-500 animate-spin" />
-                )}
-              </div>
-            </motion.div>
-
-            <AnimatePresence mode="wait">
-              {searchQuery.trim() ? (
-                <motion.div 
-                  key="search-results"
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -20 }}
-                  className="bg-white border border-zinc-200 rounded-2xl p-6 shadow-sm"
-                >
-                  <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                    <Search className="w-5 h-5 text-indigo-500" /> Search Results
-                  </h2>
-                  <div className="flex flex-col gap-4">
-                    {searchResults.length === 0 ? (
-                      <p className="text-zinc-500 text-center py-8">No matching chunks found.</p>
-                    ) : (
-                      searchResults.map((res, i) => (
-                        <div key={i} className="p-4 bg-zinc-50 rounded-xl border border-zinc-200">
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-sm font-medium text-indigo-600 flex items-center gap-1.5">
-                              <FileText className="w-4 h-4" /> {res.doc_name}
-                            </span>
-                            <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full font-medium">
-                              Score: {(res.score * 100).toFixed(0)}%
-                            </span>
-                          </div>
-                          <p className="text-sm text-zinc-600 leading-relaxed">{res.text}</p>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </motion.div>
-              ) : (
-                <motion.div 
-                  key="document-list"
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -20 }}
-                  className="bg-white border border-zinc-200 rounded-2xl p-6 shadow-sm"
-                >
-                  <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                    <FileText className="w-5 h-5 text-indigo-500" /> Document Repository
-                  </h2>
-                  
-                  {loading ? (
-                    <div className="py-12 flex justify-center">
-                      <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
-                    </div>
-                  ) : documents.length === 0 ? (
-                    <div className="text-center py-16">
-                      <div className="w-16 h-16 bg-zinc-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                        <FileText className="w-8 h-8 text-zinc-300" />
-                      </div>
-                      <p className="text-zinc-900 font-medium mb-1">No documents yet</p>
-                      <p className="text-zinc-500 text-sm">Upload your first document to start querying.</p>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col gap-3">
-                      {documents.map((doc) => (
-                        <div key={doc.doc_hash} className="group flex items-center justify-between p-4 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 rounded-xl transition-colors">
-                          <div className="flex items-center gap-4">
-                            <div className="w-10 h-10 bg-white shadow-sm rounded-lg flex items-center justify-center">
-                              <FileText className="w-5 h-5 text-indigo-600" />
-                            </div>
-                            <div>
-                              <p className="font-medium text-zinc-900">{doc.filename}</p>
-                              <div className="flex items-center gap-3 text-xs text-zinc-500 mt-1">
-                                <span>{doc.chunk_count} chunks</span>
-                                <span>•</span>
-                                <span>{doc.ingested_at ? formatDistanceToNow(new Date(doc.ingested_at), { addSuffix: true }) : 'recently'}</span>
-                              </div>
-                            </div>
-                          </div>
-                          <button 
-                            onClick={() => handleDelete(doc.doc_hash)}
-                            className="p-2 text-zinc-400 hover:text-red-500 hover:bg-red-50 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
-                            title="Delete Document"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        </div>
     </div>
   );
 }

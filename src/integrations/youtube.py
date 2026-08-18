@@ -9,13 +9,17 @@ Handles all YouTube Data API v3 communication:
 - Rate limiting and quota awareness
 """
 
+import hashlib
+import json
 import os
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
+from src.core.integration_context import integration_value
 
 load_dotenv()
 
 _youtube_client = None
+_youtube_client_fingerprint = ""
 
 
 def get_youtube_client():
@@ -28,36 +32,81 @@ def get_youtube_client():
     When the client provides OAuth credentials (token.json), the OAuth path
     will be used automatically. Until then, API key works for reads.
     """
-    global _youtube_client
-    if _youtube_client is not None:
+    global _youtube_client, _youtube_client_fingerprint
+    token_json = integration_value("YOUTUBE_OAUTH_TOKEN_JSON", "").strip()
+    token_path = integration_value("YOUTUBE_OAUTH_TOKEN", "./credentials/youtube_token.json").strip()
+    api_key = integration_value("YOUTUBE_API_KEY", "").strip()
+    fingerprint = hashlib.sha256(
+        f"{token_json}|{token_path}|{api_key}".encode("utf-8")
+    ).hexdigest()
+    if _youtube_client is not None and _youtube_client_fingerprint == fingerprint:
         return _youtube_client
 
     from googleapiclient.discovery import build
 
-    token_path = os.getenv("YOUTUBE_OAUTH_TOKEN", "./credentials/youtube_token.json")
-
     # Try OAuth first (needed for writes)
-    if os.path.exists(token_path):
+    if token_json or os.path.exists(token_path):
         try:
             from google.oauth2.credentials import Credentials
-            credentials = Credentials.from_authorized_user_file(
-                token_path,
-                scopes=["https://www.googleapis.com/auth/youtube.force-ssl"]
+            scopes = ["https://www.googleapis.com/auth/youtube.force-ssl"]
+            credentials = (
+                Credentials.from_authorized_user_info(json.loads(token_json), scopes=scopes)
+                if token_json
+                else Credentials.from_authorized_user_file(token_path, scopes=scopes)
             )
             _youtube_client = build('youtube', 'v3', credentials=credentials)
+            _youtube_client_fingerprint = fingerprint
             print("[YouTube] Connected with OAuth2 (read + write)")
             return _youtube_client
         except Exception as e:
             print(f"[YouTube] OAuth failed, falling back to API key: {e}")
 
     # Fallback to API key (read-only)
-    api_key = os.getenv("YOUTUBE_API_KEY")
     if api_key:
         _youtube_client = build('youtube', 'v3', developerKey=api_key)
+        _youtube_client_fingerprint = fingerprint
         print("[YouTube] Connected with API key (read-only)")
         return _youtube_client
 
     raise ValueError("No YouTube credentials configured. Set YOUTUBE_API_KEY or provide OAuth token.")
+
+
+def verify_youtube_connection(channel_id: str, oauth_token_json: str = "") -> dict:
+    """Prove the configured OAuth credential can access the intended channel."""
+    token_json = oauth_token_json.strip() or integration_value("YOUTUBE_OAUTH_TOKEN_JSON", "").strip()
+    token_path = integration_value("YOUTUBE_OAUTH_TOKEN", "").strip()
+    if not token_json and (not token_path or not os.path.isfile(token_path)):
+        raise RuntimeError("A YouTube OAuth token is required for write verification")
+
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
+    scopes = ["https://www.googleapis.com/auth/youtube.force-ssl"]
+    credentials = (
+        Credentials.from_authorized_user_info(json.loads(token_json), scopes=scopes)
+        if token_json
+        else Credentials.from_authorized_user_file(token_path, scopes=scopes)
+    )
+    if credentials.expired and credentials.refresh_token:
+        credentials.refresh(Request())
+    if not credentials.valid:
+        raise RuntimeError("YouTube OAuth credentials are invalid or expired")
+    service = build("youtube", "v3", credentials=credentials, cache_discovery=False)
+    response = service.channels().list(part="id,snippet", id=channel_id).execute()
+    items = response.get("items", [])
+    if not items:
+        raise RuntimeError("YouTube channel was not accessible with the configured OAuth token")
+    global _youtube_client, _youtube_client_fingerprint
+    _youtube_client = service
+    _youtube_client_fingerprint = hashlib.sha256(
+        f"{token_json}|{token_path}|{integration_value('YOUTUBE_API_KEY', '')}".encode("utf-8")
+    ).hexdigest()
+    return {
+        "channel_id": items[0]["id"],
+        "channel_title": items[0].get("snippet", {}).get("title", ""),
+        "oauth": True,
+    }
 
 
 def fetch_channel_videos(channel_id: str, max_results: int = 50) -> List[Dict[str, Any]]:
@@ -101,8 +150,7 @@ def fetch_channel_videos(channel_id: str, max_results: int = 50) -> List[Dict[st
         return videos
 
     except Exception as e:
-        print(f"[YouTube] Failed to fetch channel videos: {e}")
-        return []
+        raise RuntimeError(f"YouTube video fetch failed: {e}") from e
 
 
 def fetch_recent_comments(video_id: str, limit: int = 30) -> List[Dict[str, Any]]:
@@ -142,8 +190,7 @@ def fetch_recent_comments(video_id: str, limit: int = 30) -> List[Dict[str, Any]
         return comments
 
     except Exception as e:
-        print(f"[YouTube] Failed to fetch comments for {video_id}: {e}")
-        return []
+        raise RuntimeError(f"YouTube comment fetch failed for {video_id}: {e}") from e
 
 
 def post_comment_reply(comment_id: str, reply_text: str) -> Optional[dict]:

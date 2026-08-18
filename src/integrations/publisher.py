@@ -1,6 +1,6 @@
 from __future__ import annotations
-import os
 import importlib
+from src.core.integration_context import integration_value
 
 """
 publisher.py — Unified Multi-Platform Publisher
@@ -17,19 +17,29 @@ Usage:
 """
 
 PLATFORM_MAP = {
-    "instagram": "integrations.instagram",
-    "linkedin": "integrations.linkedin",
-    "facebook": "integrations.facebook",
-    "twitter": "integrations.twitter",
+    "instagram": "src.integrations.instagram",
+    "linkedin": "src.integrations.linkedin",
+    "facebook": "src.integrations.facebook",
+    "twitter": "src.integrations.twitter",
+    "discord": "src.integrations.discord",
 }
 
 async def get_platform_status() -> dict:
     """Checks which platforms have credentials configured."""
     return {
-        "instagram": bool(os.environ.get("INSTAGRAM_ACCESS_TOKEN") and os.environ.get("INSTAGRAM_BUSINESS_ID")),
-        "linkedin": bool(os.environ.get("LINKEDIN_ACCESS_TOKEN") and (os.environ.get("LINKEDIN_PERSON_ID") or os.environ.get("LINKEDIN_ORGANIZATION_ID"))),
-        "facebook": bool((os.environ.get("META_ACCESS_TOKEN") or os.environ.get("INSTAGRAM_ACCESS_TOKEN")) and os.environ.get("FACEBOOK_PAGE_ID")),
-        "twitter": bool(os.environ.get("TWITTER_API_KEY") and os.environ.get("TWITTER_ACCESS_TOKEN"))
+        "instagram": bool(integration_value("INSTAGRAM_ACCESS_TOKEN") and integration_value("INSTAGRAM_BUSINESS_ID")),
+        "linkedin": bool(integration_value("LINKEDIN_ACCESS_TOKEN") and (integration_value("LINKEDIN_PERSON_ID") or integration_value("LINKEDIN_ORGANIZATION_ID"))),
+        "facebook": bool((integration_value("META_ACCESS_TOKEN") or integration_value("INSTAGRAM_ACCESS_TOKEN")) and integration_value("FACEBOOK_PAGE_ID")),
+        "twitter": all(
+            bool(integration_value(name))
+            for name in (
+                "TWITTER_API_KEY",
+                "TWITTER_API_SECRET",
+                "TWITTER_ACCESS_TOKEN",
+                "TWITTER_ACCESS_SECRET",
+            )
+        ),
+        "discord": bool(integration_value("DISCORD_WEBHOOK_URL")),
     }
 
 async def publish_to_platforms(content: str, platforms: list[str], media_url: str | None = None) -> dict:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -30,6 +31,22 @@ EMBEDDING_DIM = 384  # sentence-transformers/all-MiniLM-L6-v2 dimensions
 _lance_db = None
 _lance_table = None
 _meta_conn = None
+
+
+def _knowledge_storage_mode() -> str:
+    """Select the durable production store and fail closed on bad config."""
+    from src.core.database import DATABASE_URL
+
+    database_url = DATABASE_URL.lower()
+    if database_url.startswith("postgresql"):
+        return "postgresql"
+    environment = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).lower()
+    if environment in {"production", "prod", "staging"}:
+        raise RuntimeError(
+            "Production Grant knowledge requires PostgreSQL; SQLite/LanceDB "
+            "knowledge storage is restricted to local development"
+        )
+    return "local"
 
 
 def _ensure_dirs():
@@ -81,6 +98,8 @@ def get_table():
 
 def get_meta_conn() -> sqlite3.Connection:
     """Get SQLite metadata connection (tracks ingested files)."""
+    if _knowledge_storage_mode() != "local":
+        raise RuntimeError("SQLite knowledge metadata is disabled outside local development")
     global _meta_conn
     if _meta_conn is not None:
         return _meta_conn
@@ -182,6 +201,9 @@ async def ingest_document(file_bytes: bytes, filename: str) -> dict:
         {"status": "ok"|"duplicate"|"empty", "chunks_indexed": int,
          "doc_hash": str, "filename": str}
     """
+    if _knowledge_storage_mode() == "postgresql":
+        return await _ingest_document_postgres(file_bytes, filename)
+
     doc_hash = hashlib.sha256(file_bytes).hexdigest()
 
     # Deduplication check
@@ -233,6 +255,66 @@ async def ingest_document(file_bytes: bytes, filename: str) -> dict:
             "doc_hash": doc_hash, "filename": filename}
 
 
+async def _ingest_document_postgres(file_bytes: bytes, filename: str) -> dict:
+    """Create the production retrieval index entirely in PostgreSQL."""
+    from sqlalchemy import delete, select
+
+    from src.core import database as db
+    from src.core.models import KnowledgeChunkModel, KnowledgeDocumentModel
+
+    doc_hash = hashlib.sha256(file_bytes).hexdigest()
+    async with db.async_session() as session:
+        existing = (await session.execute(
+            select(KnowledgeDocumentModel.id).where(
+                KnowledgeDocumentModel.sha256 == doc_hash
+            )
+        )).scalar_one_or_none()
+        if existing:
+            return {
+                "status": "duplicate",
+                "chunks_indexed": 0,
+                "doc_hash": doc_hash,
+                "filename": filename,
+            }
+
+    text = _extract_text(file_bytes, filename)
+    if not text.strip():
+        return {
+            "status": "empty", "chunks_indexed": 0,
+            "doc_hash": doc_hash, "filename": filename,
+        }
+    pairs = _chunk_document(text)
+    if not pairs:
+        return {
+            "status": "empty", "chunks_indexed": 0,
+            "doc_hash": doc_hash, "filename": filename,
+        }
+
+    records: list[KnowledgeChunkModel] = []
+    for index, (child, parent) in enumerate(pairs):
+        records.append(KnowledgeChunkModel(
+            doc_hash=doc_hash,
+            doc_name=filename,
+            chunk_index=index,
+            text=child,
+            parent_text=parent,
+            vector=await get_embedding(child),
+        ))
+
+    async with db.async_session() as session:
+        # Clean up a possible orphaned index left by a process failure between
+        # chunk commit and the authoritative KnowledgeDocument commit.
+        await session.execute(delete(KnowledgeChunkModel).where(
+            KnowledgeChunkModel.doc_hash == doc_hash
+        ))
+        session.add_all(records)
+        await session.commit()
+    return {
+        "status": "ok", "chunks_indexed": len(records),
+        "doc_hash": doc_hash, "filename": filename,
+    }
+
+
 # ── Search ────────────────────────────────────────────────────────────────
 
 def _bm25_score(query: str, documents: list[str]) -> list[float]:
@@ -269,25 +351,99 @@ async def search_knowledge_base(query: str, top_k: int = 5, doc_hashes: Optional
     Returns:
         list of {"text": str, "doc_name": str, "doc_hash": str, "score": float}
     """
-    table = get_table()
+    safe_hashes = [
+        value.lower() for value in (doc_hashes or [])
+        if re.fullmatch(r"[a-fA-F0-9]{64}", value)
+    ]
+    if len(safe_hashes) != len(doc_hashes or []):
+        raise ValueError("Invalid document hash in retrieval scope")
 
-    # Check table has data
-    try:
-        if table.count_rows() == 0:
+    if _knowledge_storage_mode() == "postgresql":
+        raw_results = await _search_postgres_candidates(query, safe_hashes)
+    else:
+        table = get_table()
+        try:
+            if table.count_rows() == 0:
+                return []
+        except Exception:
             return []
-    except Exception:
-        return []
+        q_vec = await get_embedding(query)
+        query_obj = table.search(q_vec)
+        if safe_hashes:
+            hashes_str = ", ".join(f"'{value}'" for value in safe_hashes)
+            query_obj = query_obj.where(f"doc_hash IN ({hashes_str})")
+        raw_results = query_obj.limit(20).to_list()
 
-    # 1. Dense vector retrieval (top 20 candidates)
-    q_vec = await get_embedding(query)
-    query_obj = table.search(q_vec)
-    if doc_hashes:
-        hashes_str = ", ".join([f"'{h}'" for h in doc_hashes])
-        query_obj = query_obj.where(f"doc_hash IN ({hashes_str})")
-    
-    raw_results = query_obj.limit(20).to_list()
     if not raw_results:
         return []
+    return _rank_candidates(query, raw_results, top_k)
+
+
+async def _search_postgres_candidates(
+    query: str, doc_hashes: list[str]
+) -> list[dict]:
+    """Retrieve bounded dense and lexical candidate sets inside PostgreSQL.
+
+    The previous implementation selected every chunk and calculated cosine
+    similarity in Python. That made memory and latency grow linearly with the
+    knowledge base. pgvector and PostgreSQL FTS now do both scans using their
+    HNSW/GIN indexes; only the fused candidate window leaves the database.
+    """
+    from sqlalchemy import func, literal, select
+
+    from src.core import database as db
+    from src.core.models import KnowledgeChunkModel
+
+    query_vector = await get_embedding(query)
+    distance = KnowledgeChunkModel.vector.cosine_distance(query_vector)
+    dense = select(KnowledgeChunkModel, distance.label("distance"))
+    if doc_hashes:
+        dense = dense.where(KnowledgeChunkModel.doc_hash.in_(doc_hashes))
+    dense = dense.order_by(distance).limit(30)
+
+    searchable = func.concat(
+        KnowledgeChunkModel.parent_text,
+        literal(" "),
+        KnowledgeChunkModel.text,
+    )
+    ts_query = func.plainto_tsquery("simple", query)
+    ts_vector = func.to_tsvector("simple", searchable)
+    lexical_score = func.ts_rank_cd(ts_vector, ts_query)
+    lexical = select(KnowledgeChunkModel, lexical_score.label("lexical_score")).where(
+        ts_vector.op("@@")(ts_query)
+    )
+    if doc_hashes:
+        lexical = lexical.where(KnowledgeChunkModel.doc_hash.in_(doc_hashes))
+    lexical = lexical.order_by(lexical_score.desc()).limit(30)
+
+    async with db.async_session() as session:
+        dense_rows = (await session.execute(dense)).all()
+        lexical_rows = (await session.execute(lexical)).all()
+
+    fused: dict[str, dict] = {}
+
+    def add_row(chunk, rank: int, signal: str, raw_score: float) -> None:
+        item = fused.setdefault(chunk.id, {
+            "text": chunk.text,
+            "parent_text": chunk.parent_text,
+            "doc_hash": chunk.doc_hash,
+            "doc_name": chunk.doc_name,
+            "chunk_index": chunk.chunk_index,
+            "rrf_score": 0.0,
+        })
+        item["rrf_score"] += 1.0 / (60 + rank + 1)
+        item[f"{signal}_score"] = raw_score
+
+    for rank, (chunk, raw_distance) in enumerate(dense_rows):
+        add_row(chunk, rank, "dense", 1.0 - float(raw_distance))
+    for rank, (chunk, score) in enumerate(lexical_rows):
+        add_row(chunk, rank, "lexical", float(score))
+
+    return sorted(fused.values(), key=lambda item: item["rrf_score"], reverse=True)[:30]
+
+
+def _rank_candidates(query: str, raw_results: list[dict], top_k: int) -> list[dict]:
+    """Apply the same hybrid/reranking policy to local and PostgreSQL data."""
 
     # Use parent_text for context delivery
     texts = [r.get("parent_text") or r["text"] for r in raw_results]
@@ -317,12 +473,14 @@ async def search_knowledge_base(query: str, top_k: int = 5, doc_hashes: Optional
                     "text": t,
                     "doc_name": raw.get("doc_name", "unknown"),
                     "doc_hash": raw.get("doc_hash", ""),
+                    "chunk_index": raw.get("chunk_index"),
+                    "citation": _citation(raw),
                     "score": float(r.get("score", 0.8)),
                 })
         return results
 
-    except Exception as e:
-        print(f"[RAG] FlashRank fallback (no reranking): {e}")
+    except Exception as exc:
+        print(f"[RAG] FlashRank fallback (no reranking): {exc}")
         seen, results = set(), []
         for raw, text in merged[:top_k]:
             if text not in seen:
@@ -331,15 +489,51 @@ async def search_knowledge_base(query: str, top_k: int = 5, doc_hashes: Optional
                     "text": text,
                     "doc_name": raw.get("doc_name", "unknown"),
                     "doc_hash": raw.get("doc_hash", ""),
-                    "score": 0.8,
+                    "chunk_index": raw.get("chunk_index"),
+                    "citation": _citation(raw),
+                    "score": float(raw.get("rrf_score", raw.get("dense_score", 0.0))),
                 })
         return results
+
+
+def _citation(result: dict) -> str:
+    chunk_index = result.get("chunk_index")
+    suffix = f" · passage {int(chunk_index) + 1}" if isinstance(chunk_index, int) else ""
+    return f"{result.get('doc_name', 'Unknown source')}{suffix}"
 
 
 # ── Document Management ────────────────────────────────────────────────────
 
 async def get_all_documents() -> list[dict]:
     """List all ingested documents."""
+    if _knowledge_storage_mode() == "postgresql":
+        from sqlalchemy import func, select
+
+        from src.core import database as db
+        from src.core.models import KnowledgeChunkModel, KnowledgeDocumentModel, iso
+
+        async with db.async_session() as session:
+            documents = (await session.execute(
+                select(KnowledgeDocumentModel).order_by(
+                    KnowledgeDocumentModel.created_at.desc()
+                )
+            )).scalars().all()
+            counts = dict((await session.execute(
+                select(
+                    KnowledgeChunkModel.doc_hash,
+                    func.count(KnowledgeChunkModel.id),
+                ).group_by(KnowledgeChunkModel.doc_hash)
+            )).all())
+        return [
+            {
+                "doc_hash": document.sha256,
+                "filename": document.filename,
+                "chunk_count": int(counts.get(document.sha256, 0)),
+                "ingested_at": iso(document.created_at),
+            }
+            for document in documents
+        ]
+
     conn = get_meta_conn()
     cursor = conn.cursor()
     cursor.execute(
@@ -353,6 +547,28 @@ async def get_all_documents() -> list[dict]:
 
 async def delete_document(doc_hash: str) -> bool:
     """Remove a document from the knowledge base."""
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", doc_hash):
+        raise ValueError("Invalid document hash")
+    if _knowledge_storage_mode() == "postgresql":
+        from sqlalchemy import delete, select
+
+        from src.core import database as db
+        from src.core.models import KnowledgeChunkModel, KnowledgeDocumentModel
+
+        async with db.async_session() as session:
+            exists = (await session.execute(
+                select(KnowledgeDocumentModel.id).where(
+                    KnowledgeDocumentModel.sha256 == doc_hash
+                )
+            )).scalar_one_or_none()
+            if not exists:
+                return False
+            await session.execute(delete(KnowledgeChunkModel).where(
+                KnowledgeChunkModel.doc_hash == doc_hash
+            ))
+            await session.commit()
+        return True
+
     conn = get_meta_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT doc_hash FROM ingested_files WHERE doc_hash = ?", (doc_hash,))
@@ -386,15 +602,11 @@ async def get_rag_context(
     instead of the entire knowledge base — lets a specific task/council run
     target only the relevant docs as the knowledge base grows.
     """
-    try:
-        results = await search_knowledge_base(task_description, top_k=top_k, doc_hashes=doc_hashes)
-        if not results:
-            return ""
-        parts = [
-            f"[Knowledge Context {i+1} — Source: {r['doc_name']}]\n{r['text']}"
-            for i, r in enumerate(results)
-        ]
-        return "\n\n---\n\n".join(parts)
-    except Exception as e:
-        print(f"[RAG] Context retrieval error (non-fatal): {e}")
+    results = await search_knowledge_base(task_description, top_k=top_k, doc_hashes=doc_hashes)
+    if not results:
         return ""
+    parts = [
+        f"[Knowledge Context {i+1} — Source: {r.get('citation') or r['doc_name']}]\n{r['text']}"
+        for i, r in enumerate(results)
+    ]
+    return "\n\n---\n\n".join(parts)

@@ -1,11 +1,9 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
 import './globals.css';
 import { SidebarProvider } from './contexts/SidebarContext';
 import { AuthProvider } from './contexts/AuthContext';
 import { ClientLayoutWrapper } from './components/client-layout-wrapper';
-
-const inter = Inter({ subsets: ['latin'] });
+import { InterfaceMotionProvider } from './components/motion-provider';
 
 export const metadata: Metadata = {
   title: 'Council OS Dashboard',
@@ -21,16 +19,18 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={`${inter.className} bg-app text-foreground antialiased selection:bg-[#111827] selection:text-white`}>
-        <AuthProvider>
-          <SidebarProvider>
-            <Suspense fallback={<div className="min-h-screen bg-[#090D16]" />}>
-              <ClientLayoutWrapper>
-                {children}
-              </ClientLayoutWrapper>
-            </Suspense>
-          </SidebarProvider>
-        </AuthProvider>
+      <body className="bg-app text-foreground antialiased">
+        <InterfaceMotionProvider>
+          <AuthProvider>
+            <SidebarProvider>
+              <Suspense fallback={<div className="min-h-screen bg-[#090D16]" />}>
+                <ClientLayoutWrapper>
+                  {children}
+                </ClientLayoutWrapper>
+              </Suspense>
+            </SidebarProvider>
+          </AuthProvider>
+        </InterfaceMotionProvider>
       </body>
     </html>
   );

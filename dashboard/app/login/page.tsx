@@ -22,8 +22,8 @@ export default function LoginPage() {
     try {
       await login(username, password);
       router.push('/');
-    } catch (err: any) {
-      setError(err.message || 'Invalid credentials. Access denied.');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Invalid credentials. Access denied.');
     } finally {
       setLoading(false);
     }
@@ -37,7 +37,7 @@ export default function LoginPage() {
       <div className="absolute top-10 left-10 w-[300px] h-[300px] bg-emerald-600/10 rounded-full blur-[100px] pointer-events-none" />
 
       {/* Main Glass Card */}
-      <div className="w-full max-w-md bg-white/[0.04] backdrop-blur-2xl border border-white/[0.08] rounded-[24px] p-8 md:p-10 shadow-2xl relative z-10">
+      <div className="liquid-glass relative z-10 w-full max-w-md rounded-[30px] p-8 md:p-10">
         
         {/* Header */}
         <div className="text-center mb-8">
@@ -54,7 +54,7 @@ export default function LoginPage() {
         {/* Security Badge */}
         <div className="mb-6 p-3 rounded-[12px] bg-blue-500/10 border border-blue-500/20 flex items-center justify-center gap-2 text-blue-300 text-xs font-medium">
           <Shield className="w-4 h-4 shrink-0 text-blue-400" />
-          <span>Encrypted Session • HMAC SHA-256 Auth</span>
+          <span>Secure server-managed session</span>
         </div>
 
         {/* Error Alert */}

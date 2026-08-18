@@ -1,125 +1,52 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { fetchStats } from '../lib/api';
-import { Stats } from '../lib/types';
-import { Target, Users, BookOpen, Lightbulb, TrendingUp } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { fetchTasks } from '../lib/api';
+import { CouncilName, Task } from '../lib/types';
 
-const councilIcons: Record<string, any> = {
-  sales: Target,
-  content: BookOpen,
-  grant: Lightbulb,
-  strategy: Users
-};
+const COUNCILS: CouncilName[] = ['grant', 'sales', 'content'];
 
 export default function AnalyticsPage() {
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    fetchStats()
-      .then(setStats)
-      .finally(() => setLoading(false));
+    void fetchTasks().then(setTasks).catch((loadError: unknown) => setError(loadError instanceof Error ? loadError.message : 'Unable to load history.'));
   }, []);
 
-  if (loading || !stats) {
-    return (
-      <div className="space-y-12 animate-pulse">
-        <div className="h-12 w-48 bg-zinc-100 rounded-lg"></div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          <div className="h-64 bg-zinc-100 rounded-[24px]"></div>
-          <div className="h-64 bg-zinc-100 rounded-[24px]"></div>
-        </div>
-      </div>
-    );
-  }
-
-  const councils = Object.entries(stats.councils || {});
-  const maxTasks = Math.max(...councils.map(([, data]) => data.tasks), 1);
+  const scored = useMemo(() => tasks.filter((task) => task.confidence_score !== null), [tasks]);
+  const totalCost = useMemo(() => tasks.reduce((sum, task) => sum + task.total_cost_usd, 0), [tasks]);
+  const costsComplete = useMemo(() => tasks.every((task) => task.cost_metrics_complete), [tasks]);
+  const averageScore = scored.length ? scored.reduce((sum, task) => sum + (task.confidence_score ?? 0), 0) / scored.length : null;
+  const published = tasks.filter((task) => task.status === 'published').length;
 
   return (
-    <div className="space-y-12 animate-in fade-in duration-700 ease-out fill-mode-both pb-20">
-      <div>
-        <h1 className="text-[40px] font-bold text-[#111827] tracking-tight leading-none mb-3">Analytics</h1>
-        <p className="text-[15px] text-zinc-500">Performance and cost tracking across AI councils.</p>
+    <div className="space-y-7 pb-16">
+      <div><p className="eyebrow">Evidence, not estimates</p><h1 className="mt-2 text-3xl font-black tracking-tight text-slate-50">History & analytics</h1><p className="mt-2 text-sm text-slate-400">Metrics are calculated from persisted task records. Missing scores and incomplete costs stay visibly unavailable.</p></div>
+      {error && <p role="alert" className="rounded-xl border border-rose-300/20 bg-rose-400/8 p-4 text-sm text-rose-200">{error}</p>}
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {[['Total runs', tasks.length.toString()], ['Published', published.toString()], ['Recorded cost', costsComplete ? `$${totalCost.toFixed(4)}` : 'Partial'], ['Average score', averageScore === null ? 'Unavailable' : averageScore.toFixed(1)]].map(([label, value]) => (
+          <div key={label} className="surface-card rounded-2xl p-5"><p className="text-xs font-bold uppercase tracking-wide text-slate-500">{label}</p><p className="mt-2 text-2xl font-black text-slate-50">{value}</p></div>
+        ))}
       </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        
-        {/* Council Volume Comparison */}
-        <div className="bg-white p-8 rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] ring-1 ring-transparent hover:shadow-[0_20px_40px_rgb(0,0,0,0.06)] transition-shadow duration-500">
-          <div className="flex items-center justify-between mb-8">
-            <h2 className="text-[20px] font-semibold text-[#111827] tracking-tight">Execution Volume</h2>
-            <div className="p-2 rounded-xl bg-blue-50 text-[#2563EB]">
-              <TrendingUp className="w-5 h-5" />
+      <div className="grid gap-4 md:grid-cols-3">
+        {COUNCILS.map((council) => {
+          const councilTasks = tasks.filter((task) => task.council === council);
+          const councilCost = councilTasks.reduce((sum, task) => sum + task.total_cost_usd, 0);
+          const complete = councilTasks.every((task) => task.cost_metrics_complete);
+          return <div key={council} className="surface-card rounded-2xl p-5"><h2 className="font-bold capitalize text-slate-100">{council} Council</h2><p className="mt-3 text-sm text-slate-500">{councilTasks.length} runs · {complete ? `$${councilCost.toFixed(4)}` : 'cost partial'}</p></div>;
+        })}
+      </div>
+      <section className="surface-card overflow-hidden rounded-2xl">
+        <div className="border-b border-white/8 p-5"><h2 className="font-bold text-slate-100">Task history</h2></div>
+        {tasks.length === 0 ? <p className="p-10 text-center text-sm text-slate-500">No persisted task history.</p> : (
+          <div className="divide-y divide-white/8">{tasks.map((task) => (
+            <div key={task.task_id} className="grid gap-2 p-5 text-sm md:grid-cols-[8rem_1fr_10rem_7rem] md:items-center">
+              <span className="font-semibold capitalize text-slate-300">{task.council}</span><span className="truncate text-slate-300">{task.task_description}</span><span className="capitalize text-slate-500">{task.status.replaceAll('_', ' ')}</span><span className="text-right font-mono text-xs text-slate-500">{task.cost_metrics_complete ? `$${task.total_cost_usd.toFixed(4)}` : 'partial'}</span>
             </div>
-          </div>
-          
-          <div className="space-y-6">
-            {councils.length === 0 && <div className="text-zinc-400 text-sm py-4">No data available.</div>}
-            {councils.map(([name, data]) => {
-              const Icon = councilIcons[name.toLowerCase()] || Users;
-              const width = `${Math.max((data.tasks / maxTasks) * 100, 5)}%`;
-              return (
-                <div key={name} className="space-y-2 group">
-                  <div className="flex justify-between text-[14px] font-semibold text-[#111827]">
-                    <span className="capitalize flex items-center">
-                      <Icon className="w-4 h-4 mr-2 text-zinc-400 group-hover:text-[#2563EB] transition-colors" />
-                      {name}
-                    </span>
-                    <span className="text-zinc-500">{data.tasks} tasks</span>
-                  </div>
-                  <div className="h-3 w-full bg-zinc-100 rounded-full overflow-hidden">
-                    <div 
-                      className="h-full bg-gradient-to-r from-[#2563EB] to-violet-500 rounded-full transition-all duration-1000 ease-out" 
-                      style={{ width }} 
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Confidence Rings */}
-        <div className="bg-white p-8 rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] ring-1 ring-transparent hover:shadow-[0_20px_40px_rgb(0,0,0,0.06)] transition-shadow duration-500">
-          <div className="flex items-center justify-between mb-8">
-            <h2 className="text-[20px] font-semibold text-[#111827] tracking-tight">Average Confidence</h2>
-          </div>
-          
-          <div className="grid grid-cols-2 gap-8">
-            {councils.length === 0 && <div className="text-zinc-400 text-sm py-4 col-span-2">No data available.</div>}
-            {councils.map(([name, data]) => {
-              const confidence = data.avg_confidence > 1 ? data.avg_confidence : data.avg_confidence * 100;
-              const radius = 36;
-              const circumference = 2 * Math.PI * radius;
-              const offset = circumference - (confidence / 100) * circumference;
-              const color = confidence >= 80 ? 'text-[#10B981]' : confidence >= 60 ? 'text-[#F59E0B]' : 'text-[#F43F5E]';
-
-              return (
-                <div key={name} className="flex flex-col items-center justify-center p-6 rounded-[20px] bg-[#F8FAFC] group hover:bg-white hover:shadow-[0_4px_20px_rgb(0,0,0,0.05)] transition-all duration-300">
-                  <div className="relative w-24 h-24 mb-4 flex items-center justify-center">
-                    <svg className="w-full h-full transform -rotate-90">
-                      <circle cx="48" cy="48" r={radius} stroke="currentColor" strokeWidth="8" fill="none" className="text-zinc-200" />
-                      <circle 
-                        cx="48" cy="48" r={radius} 
-                        stroke="currentColor" strokeWidth="8" fill="none" 
-                        strokeDasharray={circumference} strokeDashoffset={offset}
-                        strokeLinecap="round"
-                        className={`${color} transition-all duration-1000 ease-out drop-shadow-sm`} 
-                      />
-                    </svg>
-                    <span className="absolute text-[18px] font-bold text-[#111827]">{confidence.toFixed(0)}%</span>
-                  </div>
-                  <h3 className="text-[14px] font-bold text-[#111827] capitalize">{name}</h3>
-                  <p className="text-[12px] font-medium text-zinc-400 mt-1">${data.cost.toFixed(2)} total cost</p>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-      </div>
+          ))}</div>
+        )}
+      </section>
     </div>
   );
 }

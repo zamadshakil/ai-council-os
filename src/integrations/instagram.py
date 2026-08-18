@@ -1,7 +1,7 @@
 from __future__ import annotations
-import os
 import asyncio
 import httpx
+from src.core.integration_context import integration_value
 
 """
 instagram.py — Instagram Content Publisher
@@ -16,13 +16,14 @@ Supports: Image posts, Reels, Carousels.
 Requires: INSTAGRAM_ACCESS_TOKEN, INSTAGRAM_BUSINESS_ID in .env
 """
 
-API_VERSION = "v21.0"
-BASE_URL = f"https://graph.facebook.com/{API_VERSION}"
+def _base_url() -> str:
+    version = integration_value("META_GRAPH_API_VERSION", "v23.0").strip() or "v23.0"
+    return f"https://graph.facebook.com/{version}"
 
 async def _poll_container(container_id: str, token: str, max_wait: int = 60) -> bool:
     """Polls the container status every 5s until FINISHED or timeout."""
     start_time = asyncio.get_event_loop().time()
-    url = f"{BASE_URL}/{container_id}"
+    url = f"{_base_url()}/{container_id}"
     params = {"fields": "status_code", "access_token": token}
     
     async with httpx.AsyncClient() as client:
@@ -40,14 +41,14 @@ async def _poll_container(container_id: str, token: str, max_wait: int = 60) -> 
 
 async def publish_photo(caption: str, image_url: str) -> dict:
     """Posts an image with caption."""
-    token = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
-    ig_user_id = os.environ.get("INSTAGRAM_BUSINESS_ID")
+    token = integration_value("INSTAGRAM_ACCESS_TOKEN") or integration_value("META_ACCESS_TOKEN")
+    ig_user_id = integration_value("INSTAGRAM_BUSINESS_ID")
     if not token or not ig_user_id:
         raise RuntimeError("Missing Instagram credentials (INSTAGRAM_ACCESS_TOKEN, INSTAGRAM_BUSINESS_ID).")
 
     async with httpx.AsyncClient() as client:
         # 1. Create media container
-        create_url = f"{BASE_URL}/{ig_user_id}/media"
+        create_url = f"{_base_url()}/{ig_user_id}/media"
         payload = {
             "image_url": image_url,
             "caption": caption,
@@ -67,7 +68,7 @@ async def publish_photo(caption: str, image_url: str) -> dict:
             raise RuntimeError("Instagram container timed out.")
             
         # 3. Publish container
-        publish_url = f"{BASE_URL}/{ig_user_id}/media_publish"
+        publish_url = f"{_base_url()}/{ig_user_id}/media_publish"
         publish_payload = {
             "creation_id": container_id,
             "access_token": token
@@ -82,14 +83,14 @@ async def publish_photo(caption: str, image_url: str) -> dict:
 
 async def publish_reel(caption: str, video_url: str) -> dict:
     """Posts a reel."""
-    token = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
-    ig_user_id = os.environ.get("INSTAGRAM_BUSINESS_ID")
+    token = integration_value("INSTAGRAM_ACCESS_TOKEN") or integration_value("META_ACCESS_TOKEN")
+    ig_user_id = integration_value("INSTAGRAM_BUSINESS_ID")
     if not token or not ig_user_id:
         raise RuntimeError("Missing Instagram credentials.")
 
     async with httpx.AsyncClient() as client:
         # 1. Create media container
-        create_url = f"{BASE_URL}/{ig_user_id}/media"
+        create_url = f"{_base_url()}/{ig_user_id}/media"
         payload = {
             "media_type": "REELS",
             "video_url": video_url,
@@ -110,7 +111,7 @@ async def publish_reel(caption: str, video_url: str) -> dict:
             raise RuntimeError("Instagram container timed out.")
             
         # 3. Publish container
-        publish_url = f"{BASE_URL}/{ig_user_id}/media_publish"
+        publish_url = f"{_base_url()}/{ig_user_id}/media_publish"
         publish_payload = {
             "creation_id": container_id,
             "access_token": token

@@ -5,7 +5,7 @@ openai>=1.60.0
 python-dotenv>=1.0.0
 fastapi>=0.115.0
 uvicorn>=0.32.0
-chromadb>=0.5.0
+python-multipart>=0.0.18
 pydantic>=2.0.0
 
 # PostgreSQL + pgvector
@@ -13,13 +13,16 @@ asyncpg>=0.29.0
 sqlalchemy[asyncio]>=2.0.0
 pgvector>=0.3.0
 aiosqlite>=0.20.0
+alembic>=1.14.0
+argon2-cffi>=23.1.0
+cryptography>=43.0.0
+croniter>=2.0.7
 
 # External API Integrations
 google-api-python-client>=2.0.0
 google-auth-oauthlib>=1.0.0
 praw>=7.7.1
 python-telegram-bot>=21.0
-apscheduler>=3.10.4
 
 # Social Platforms
 tweepy>=4.14.0
@@ -32,9 +35,8 @@ pyarrow>=16.0.0
 flashrank>=0.2.0
 pymupdf>=1.24.0
 python-docx>=1.1.0
+reportlab>=4.2.0
 langchain-text-splitters>=0.2.0
 rank-bm25>=0.2.2
 
-# ── Phase 3: MCP ──────────────────────────────────────────────────────────
-fastmcp>=0.4.0
 sentence-transformers>=2.2.0

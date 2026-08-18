@@ -1,1169 +1,1898 @@
-"""
-server.py — FastAPI Backend for AI Council OS
-
-Exposes the LangGraph councils as REST API endpoints.
-The Next.js dashboard communicates with this server.
-Uses PostgreSQL + pgvector for persistent storage.
-
-Run with:
-    uvicorn src.api.server:app --reload --port 8000
-"""
+"""Secure production API for the three-council AI Council OS release."""
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
+import os
+import re
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Optional
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File
+from fastapi import (
+    Cookie, Depends, FastAPI, File, Header, HTTPException, Query, Request,
+    Response, UploadFile,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from src.core.state import CouncilStatus, Priority
-from src.core.scheduler import start_scheduler, set_tasks_store
-from src.core import kill_switch
+from src.api.dependencies import (
+    RequestActor,
+    allowed_browser_origins,
+    auth_service,
+    require_admin,
+    require_admin_or_telegram,
+)
+from src.api.middleware import SecurityHeadersMiddleware
+from src.api.schemas import (
+    ApprovalActionRequest, BlenderPodActionRequest, BlenderTemplateJobRequest,
+    ContentEngineRequest, CouncilRunRequest,
+    IntegrationCredentialsRequest, KillSwitchRequest, LegacyApprovalRequest,
+    LoginRequest, WorkflowIntegrationLinksRequest, WorkflowPatchRequest,
+    WorkflowTriggerRequest,
+)
+from src.core.approvals import (
+    ApprovalConflict, ApprovalInvalidAction, ApprovalNotFound, ApprovalService,
+)
+from src.core.audit import record_audit
 from src.core.database import (
-    init_db, create_task, get_task, list_tasks as db_list_tasks,
-    update_task, get_stats as db_get_stats,
-    get_kill_switch_db, set_kill_switch_db,
+    async_session, database_ready, get_kill_switch_db, get_stats, init_db,
+    set_kill_switch_db,
 )
-from src.integrations.youtube import post_comment_reply, update_video_description
-from src.integrations.reddit import post_reddit_reply
-from src.integrations.telegram_bot import notify_publish_success
-
-
-# ── App ──────────────────────────────────────────────────────────────────
-
-app = FastAPI(
-    title="AI Council OS",
-    description="Multi-agent AI council system with debate-driven consensus",
-    version="0.2.0",
+from src.core.jobs import JobService
+from src.core import integration_vault
+from src.core.integration_context import use_integration_configuration
+from src.core.integration_models import WorkflowIntegrationModel
+from src.core.integration_credentials import (
+    WORKFLOW_REQUIRED_ENV,
+    workflow_credential_fingerprint,
+)
+from src.core.llm_router import validate_approved_models
+from src.core.models import (
+    ApprovalModel, CouncilRunModel, KnowledgeDocumentModel,
+    PublicationAttemptModel, TaskModel, WorkflowDefinitionModel,
+    WorkflowRunModel, iso, utcnow,
+)
+from src.core.security import (
+    CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, AuthInvalidCredentials, AuthLocked,
 )
 
-# In-memory cache (synced with DB, used by scheduler for quick access)
-tasks_store: dict[str, dict] = {}
+PRODUCTION_COUNCILS = frozenset({"grant", "sales", "content"})
+SCHEDULE_PRESETS: dict[str, dict[str, Any]] = {
+    "manual": {"type": "manual", "preset": "manual"},
+    "every_5_minutes": {
+        "type": "interval", "seconds": 300, "preset": "every_5_minutes",
+    },
+    "every_15_minutes": {
+        "type": "interval", "seconds": 900, "preset": "every_15_minutes",
+    },
+    "every_30_minutes": {
+        "type": "interval", "seconds": 1800, "preset": "every_30_minutes",
+    },
+    "hourly": {"type": "interval", "seconds": 3600, "preset": "hourly"},
+    "every_3_hours": {
+        "type": "interval", "seconds": 10800, "preset": "every_3_hours",
+    },
+    "every_6_hours": {
+        "type": "interval", "seconds": 21600, "preset": "every_6_hours",
+    },
+    "every_12_hours": {
+        "type": "interval", "seconds": 43200, "preset": "every_12_hours",
+    },
+    "daily": {"type": "interval", "seconds": 86400, "preset": "daily"},
+}
+WORKFLOW_SCHEDULE_PRESETS: dict[str, tuple[str, ...]] = {
+    "instagram_comments": (
+        "every_5_minutes", "every_15_minutes", "every_30_minutes", "hourly", "manual",
+    ),
+    "youtube_comments": (
+        "every_15_minutes", "every_30_minutes", "hourly", "every_6_hours", "manual",
+    ),
+    "reddit_prospector": (
+        "hourly", "every_3_hours", "every_6_hours", "every_12_hours", "daily", "manual",
+    ),
+}
+WORKFLOW_SPECS: dict[str, dict[str, Any]] = {
+    "telegram_control": {
+        "display_name": "Telegram Control & Approval",
+        "schedule": dict(SCHEDULE_PRESETS["manual"]),
+        "required_env": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_CHAT_IDS", "INTERNAL_SERVICE_TOKEN"],
+    },
+    "youtube_comments": {
+        "display_name": "YouTube Comment Replies",
+        "schedule": dict(SCHEDULE_PRESETS["every_30_minutes"]),
+        "required_env": ["YOUTUBE_API_KEY", "YOUTUBE_CHANNEL_ID", "YOUTUBE_OAUTH_TOKEN"],
+    },
+    "reddit_prospector": {
+        "display_name": "Reddit Lead Prospector",
+        "schedule": dict(SCHEDULE_PRESETS["hourly"]),
+        "required_env": ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"],
+    },
+    "youtube_descriptions": {
+        "display_name": "YouTube Description Updater",
+        "schedule": dict(SCHEDULE_PRESETS["manual"]),
+        "required_env": ["YOUTUBE_API_KEY", "YOUTUBE_CHANNEL_ID", "YOUTUBE_OAUTH_TOKEN"],
+    },
+    "content_engine": {
+        "display_name": "Multi-Platform Content Engine",
+        "schedule": dict(SCHEDULE_PRESETS["manual"]),
+        "required_env": ["OPENROUTER_API_KEY"],
+    },
+    "instagram_comments": {
+        "display_name": "Instagram Comment Replies",
+        "schedule": dict(SCHEDULE_PRESETS["every_5_minutes"]),
+        "required_env": ["OPENROUTER_API_KEY", "META_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ID"],
+    },
+}
+PUBLISHER_ENV: dict[str, tuple[str, ...]] = {
+    "twitter": (
+        "TWITTER_API_KEY", "TWITTER_API_SECRET",
+        "TWITTER_ACCESS_TOKEN", "TWITTER_ACCESS_SECRET",
+    ),
+    "linkedin": ("LINKEDIN_ACCESS_TOKEN",),
+    "facebook": ("FACEBOOK_PAGE_ID",),
+    "instagram": ("INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ID"),
+    "discord": ("DISCORD_WEBHOOK_URL",),
+}
+MAX_KNOWLEDGE_BYTES = 20 * 1024 * 1024
+ALLOWED_KNOWLEDGE_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+job_service = JobService()
+approval_service = ApprovalService()
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database and start background schedulers."""
-    print("[FastAPI] Booting up...")
+def _is_production() -> bool:
+    return os.getenv("ENVIRONMENT", "development").strip().lower() == "production"
+
+
+def _cookie_secure() -> bool:
+    return _is_production() or os.getenv("APP_ORIGIN", "").lower().startswith("https://")
+
+
+def _secure_configuration() -> tuple[str, str]:
+    username = os.getenv("ADMIN_USERNAME", "admin").strip().lower()
+    password = os.getenv("ADMIN_PASSWORD", "")
+    if len(password) < 12 or password.lower().startswith(("change-me", "password")):
+        raise RuntimeError("ADMIN_PASSWORD must be a newly rotated password of at least 12 characters")
+    if _is_production():
+        if len(os.getenv("INTERNAL_SERVICE_TOKEN", "").strip()) < 32:
+            raise RuntimeError("INTERNAL_SERVICE_TOKEN must contain at least 32 random characters")
+        if not os.getenv("APP_ORIGIN", "").strip().startswith("https://"):
+            raise RuntimeError("APP_ORIGIN must be an HTTPS origin in production")
+        integration_vault.validate_encryption_key()
+    return username, password
+
+
+async def _seed_workflows() -> None:
+    async with async_session() as session:
+        for workflow_id, spec in WORKFLOW_SPECS.items():
+            if await session.get(WorkflowDefinitionModel, workflow_id) is None:
+                session.add(WorkflowDefinitionModel(
+                    id=workflow_id, display_name=spec["display_name"],
+                    is_enabled=False, is_paused=False, schedule=spec["schedule"],
+                    settings={}, credential_status="untested",
+                ))
+        await session.commit()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     await init_db()
-
-    # Load existing tasks from DB into memory cache
-    existing = await db_list_tasks()
-    ABANDONED_STATUSES = {"pending", "generating", "critiquing", "refining"}
-    for t in existing:
-        if t.get("status") in ABANDONED_STATUSES:
-            # A server restart kills any in-flight debate loop mid-execution.
-            # Without this, the task sits forever showing "AI agents debating"
-            # even though nothing is actually running anymore.
-            fixed = {
-                **t,
-                "status": "failed",
-                "error": "Task was abandoned by a server restart before it finished. Use Retry to resubmit.",
-            }
-            try:
-                await update_task(t["task_id"], {"status": fixed["status"], "error": fixed["error"]})
-            except Exception as cleanup_err:
-                print(f"[Startup Cleanup] Failed to mark {t['task_id']} as failed: {cleanup_err}")
-            tasks_store[t["task_id"]] = fixed
-        else:
-            tasks_store[t["task_id"]] = t
-
-    set_tasks_store(tasks_store)
-    start_scheduler()
-
-    # Start Telegram control bot
-    try:
-        from src.integrations.telegram_bot import start_telegram_bot_async
-        import asyncio
-        asyncio.create_task(start_telegram_bot_async())
-        print("[FastAPI] Telegram bot initialized.")
-    except Exception as e:
-        print(f"[FastAPI] Telegram bot initialization skipped: {e}")
-
-    print(f"[FastAPI] Loaded {len(tasks_store)} tasks from DB. All systems online.")
+    username, password = _secure_configuration()
+    await auth_service.ensure_admin(
+        username, password,
+        rotate_password=os.getenv("ROTATE_ADMIN_PASSWORD_ON_STARTUP", "0") == "1",
+    )
+    await _seed_workflows()
+    yield
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+docs_enabled = not _is_production()
+app = FastAPI(
+    title="AI Council OS", version="1.0.0",
+    description="Approval-gated Grant, Sales, and Content councils",
+    docs_url="/docs" if docs_enabled else None, redoc_url=None,
+    openapi_url="/openapi.json" if docs_enabled else None, lifespan=lifespan,
 )
+app.add_middleware(SecurityHeadersMiddleware)
+origins = sorted(allowed_browser_origins())
+app.add_middleware(
+    CORSMiddleware, allow_origins=origins, allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID", "Idempotency-Key"],
+)
+hosts = [v.strip() for v in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",") if v.strip()]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
+
+
+def _api_error(code_status: int, code: str, message: str, **details: Any) -> HTTPException:
+    return HTTPException(code_status, detail={"code": code, "message": message, "details": details})
+
+
+@app.exception_handler(HTTPException)
+async def handle_http_error(_: Request, exc: HTTPException):
+    error = exc.detail if isinstance(exc.detail, dict) and "code" in exc.detail else {
+        "code": "HTTP_ERROR", "message": str(exc.detail), "details": {},
+    }
+    return JSONResponse(status_code=exc.status_code, content={"error": error}, headers=exc.headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_validation_error(_: Request, exc: RequestValidationError):
+    fields = [
+        {key: value for key, value in error.items() if key not in {"ctx", "url"}}
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"error": {
+        "code": "VALIDATION_ERROR", "message": "Request validation failed",
+        "details": {"fields": fields},
+    }})
+
+
+def _mutation(resource: dict[str, Any], version: int, audit_event_id: str, **extra: Any) -> dict[str, Any]:
+    return {"resource": resource, "version": version, "audit_event_id": audit_event_id, **extra}
+
+
+def _blender_job_resource(job: WorkflowRunModel) -> dict[str, Any]:
+    payload = job.payload or {}
+    result = job.result or {}
+    return {
+        "id": job.id,
+        "status": job.status,
+        "stage": str(result.get("stage") or job.status),
+        "pod_id": str(payload.get("pod_id", "")),
+        "source_path": str(payload.get("source_path", "")),
+        "output_name": str(payload.get("output_name", "")),
+        "frame": int(payload.get("frame", 1) or 1),
+        "samples": int(payload.get("samples", 64) or 64),
+        "resolution_percent": int(payload.get("resolution_percent", 25) or 25),
+        "auto_stop": bool(payload.get("auto_stop", True)),
+        "attempts": job.attempts,
+        "max_attempts": job.max_attempts,
+        "error": job.error or str(result.get("error", "")),
+        "result": result,
+        "version": job.version,
+        "created_at": iso(job.created_at),
+        "updated_at": iso(job.updated_at),
+        "finished_at": iso(job.finished_at),
+    }
+
+
+def _missing_config(workflow_id: str) -> list[str]:
+    missing: list[str] = []
+    for name in WORKFLOW_SPECS[workflow_id]["required_env"]:
+        value = os.getenv(name, "").strip()
+        if not value or (name == "YOUTUBE_OAUTH_TOKEN" and not Path(value).is_file()):
+            missing.append(name)
+    return missing
+
+
+def _publisher_fingerprint(platform: str) -> str:
+    names = PUBLISHER_ENV[platform]
+    values = [os.getenv(name, "").strip() for name in names]
+    if platform == "linkedin":
+        values.append(
+            os.getenv("LINKEDIN_PERSON_ID", "").strip()
+            or os.getenv("LINKEDIN_ORGANIZATION_ID", "").strip()
+        )
+    elif platform == "facebook":
+        values.append(
+            os.getenv("META_ACCESS_TOKEN", "").strip()
+            or os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
+        )
+    if not all(values):
+        return ""
+    return hashlib.sha256("\0".join(values).encode()).hexdigest()
+
+
+async def _publishing_health() -> dict[str, dict[str, Any]]:
+    from src.integrations.publisher import get_platform_status
+
+    configured = await get_platform_status()
+    vault_connections = {
+        item["id"]: item for item in await integration_vault.list_connections()
+    }
+    async with async_session() as session:
+        definition = await session.get(WorkflowDefinitionModel, "content_engine")
+    records = ((definition.settings or {}).get("publishing_verifications", {}) if definition else {})
+    health: dict[str, dict[str, Any]] = {}
+    for platform in PUBLISHER_ENV:
+        provider = {
+            "twitter": "x",
+            "linkedin": "linkedin",
+            "facebook": "meta",
+            "instagram": "meta",
+            "discord": "discord",
+        }[platform]
+        connection = vault_connections.get(provider, {})
+        if connection.get("configured"):
+            linked = "content_engine" in connection.get("linked_workflows", [])
+            verified = connection.get("status") == "verified" and linked
+            health[platform] = {
+                "configured": True,
+                "credential_status": (
+                    "verified" if verified else "configured" if linked else "unlinked"
+                ),
+                "message": (
+                    "Connection verified"
+                    if verified
+                    else "Link this connection to Content Engine"
+                    if not linked
+                    else connection.get("last_error") or "Not verified"
+                ),
+                "verified_at": connection.get("verified_at") or "",
+            }
+            continue
+        record = records.get(platform, {}) if isinstance(records, dict) else {}
+        fingerprint_matches = bool(
+            record.get("credential_fingerprint")
+            and hmac.compare_digest(
+                str(record.get("credential_fingerprint")),
+                _publisher_fingerprint(platform),
+            )
+        )
+        verified = record.get("status") == "verified" and fingerprint_matches
+        health[platform] = {
+            "configured": bool(configured.get(platform)),
+            "credential_status": (
+                "verified" if verified else "configured" if configured.get(platform) else "missing"
+            ),
+            "message": (
+                str(record.get("message", ""))
+                if fingerprint_matches
+                else "Credentials changed since the last verification"
+                if record
+                else "Not verified"
+            ),
+            "verified_at": str(record.get("verified_at", "")) if fingerprint_matches else "",
+        }
+    return health
+
+
+def _workflow_job_json(run: WorkflowRunModel) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "workflow_id": run.workflow_id,
+        "job_type": run.job_type,
+        "status": run.status,
+        "attempts": run.attempts,
+        "max_attempts": run.max_attempts,
+        "priority": run.priority,
+        "result": run.result or {},
+        "error": run.error,
+        "version": run.version,
+        "created_at": iso(run.created_at),
+        "updated_at": iso(run.updated_at),
+        "started_at": iso(run.started_at),
+        "finished_at": iso(run.finished_at),
+    }
+
+
+def _public_schedule(schedule: dict[str, Any]) -> dict[str, Any]:
+    """Return only the simple scheduling contract exposed by the portal."""
+    schedule_type = str(schedule.get("type", ""))
+    if schedule_type == "manual":
+        return dict(SCHEDULE_PRESETS["manual"])
+    if schedule_type == "interval":
+        seconds = schedule.get("seconds")
+        if isinstance(seconds, int) and seconds > 0:
+            for preset, configured in SCHEDULE_PRESETS.items():
+                if configured.get("type") == "interval" and configured.get("seconds") == seconds:
+                    return dict(configured)
+        return {"type": "needs_update", "preset": ""}
+    # Old installations may contain a cron expression. Never expose that
+    # technical value in the user-facing API; saving a preset replaces it.
+    return {"type": "needs_update", "preset": ""}
+
+
+def _workflow_json(
+    item: WorkflowDefinitionModel, last_run: WorkflowRunModel | None = None
+) -> dict[str, Any]:
+    settings = dict(item.settings or {})
+    # Knowledge documents are selected per Grant Council run. Older workflow
+    # rows may still contain this retired key, but it must never be exposed as
+    # an active automation setting.
+    settings.pop("selected_document_hashes", None)
+    payload = {
+        "id": item.id, "display_name": item.display_name,
+        "is_enabled": item.is_enabled, "is_paused": item.is_paused,
+        "schedule": _public_schedule(item.schedule or {}), "settings": settings,
+        "credential_status": item.credential_status, "version": item.version,
+        "missing_configuration": (
+            [] if item.credential_status == "verified" else _missing_config(item.id)
+        ), "updated_at": iso(item.updated_at),
+    }
+    if last_run is not None:
+        payload["last_run"] = _workflow_job_json(last_run)
+    return payload
+
+
+async def _workflow_credentials_current(
+    session, definition: WorkflowDefinitionModel
+) -> bool:
+    """Accept verified vault links or a still-current legacy env verification."""
+    if definition.credential_status != "verified":
+        return False
+    linked = (await session.execute(
+        select(WorkflowIntegrationModel.provider).where(
+            WorkflowIntegrationModel.workflow_id == definition.id
+        )
+    )).scalars().first()
+    if linked:
+        # Vault credential rotation atomically marks linked definitions
+        # untested and disabled. workflow_environment rechecks every linked
+        # provider immediately before execution.
+        return await integration_vault.workflow_connections_verified(definition.id)
+    if definition.id not in WORKFLOW_REQUIRED_ENV:
+        return True
+    stored = str((definition.settings or {}).get("credential_fingerprint", ""))
+    current = workflow_credential_fingerprint(definition.id)
+    return bool(stored and current and hmac.compare_digest(stored, current))
+
+
+def _run_json(run: CouncilRunModel) -> dict[str, Any]:
+    return {
+        "id": run.id, "task_id": run.task_id, "council": run.council,
+        "status": run.status, "priority": run.priority, "prompt": run.prompt,
+        "context": run.context or {}, "final_output": run.final_output or {},
+        "confidence_score": run.confidence_score,
+        "total_input_tokens": run.total_input_tokens,
+        "total_output_tokens": run.total_output_tokens,
+        "total_cost_usd": run.total_cost_usd, "warning": run.warning,
+        "error": run.error, "version": run.version,
+        "created_at": iso(run.created_at), "updated_at": iso(run.updated_at),
+    }
+
+
+def _task_json(task: TaskModel, approval: ApprovalModel | None = None) -> dict[str, Any]:
+    payload = task.to_dict()
+    payload.update({
+        "approval_id": approval.id if approval else None,
+        "approval_status": approval.status if approval else None,
+        "approval_version": approval.version if approval else None,
+    })
+    return payload
+
+
+async def _task_and_approval(task_id: str) -> tuple[TaskModel, ApprovalModel | None]:
+    async with async_session() as session:
+        task = await session.get(TaskModel, task_id)
+        if task is None:
+            raise _api_error(404, "TASK_NOT_FOUND", "Task does not exist")
+        result = await session.execute(select(ApprovalModel).where(
+            ApprovalModel.resource_type == "task", ApprovalModel.resource_id == task_id,
+        ))
+        return task, result.scalar_one_or_none()
 
 
 @app.get("/")
 @app.get("/healthz")
 async def health_check():
-    return {"status": "online", "system": "AI Council OS", "version": "0.2.0"}
+    return {"status": "online", "service": "AI Council OS", "version": "1.0.0"}
 
 
-
-import os
-import hmac
-import hashlib
-import json
-import base64
-from fastapi import Header, Depends
-
-
-# ── Security & Authentication Config ────────────────────────────────────
-# ADMIN_PASSWORD and JWT_SECRET must be set via environment. There is no
-# hardcoded fallback for either — this codebase is on a client-visible
-# GitHub repo, so a hardcoded default here would be a public secret.
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
-JWT_SECRET = os.getenv("JWT_SECRET", "").strip()
-
-if not ADMIN_PASSWORD:
-    raise ValueError("ADMIN_PASSWORD environment variable is not set on the server.")
-if not JWT_SECRET:
-    raise ValueError("JWT_SECRET environment variable is not set on the server.")
-
-
-def create_auth_token(username: str) -> str:
-    """Create a signed HMAC token for authenticated user session."""
-    payload = {
-        "username": username,
-        "exp": int(datetime.now(timezone.utc).timestamp()) + 86400 * 30  # 30 days valid
-    }
-    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
-    sig = hmac.new(JWT_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
-    return f"{payload_b64}.{sig}"
-
-
-def verify_auth_token(authorization: Optional[str] = Header(None)) -> dict:
-    """Verify Authorization Bearer token."""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Authentication token required")
-    
-    token = authorization.replace("Bearer ", "").strip()
+@app.get("/readyz")
+async def readiness_check():
+    db_ok = await database_ready()
     try:
-        parts = token.split(".")
-        if len(parts) != 2:
-            raise HTTPException(status_code=401, detail="Invalid token format")
-        
-        payload_b64, sig = parts[0], parts[1]
-        expected_sig = hmac.new(JWT_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig, expected_sig):
-            raise HTTPException(status_code=401, detail="Invalid token signature")
-        
-        payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode()).decode())
-        if payload.get("exp", 0) < int(datetime.now(timezone.utc).timestamp()):
-            raise HTTPException(status_code=401, detail="Token has expired")
-        
-        return payload
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=401, detail="Token verification failed")
+        models = await validate_approved_models()
+    except Exception as exc:
+        models = {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
+    ready = db_ok and bool(models.get("ready"))
+    return JSONResponse(status_code=200 if ready else 503, content={"ready": ready, "database": db_ok, "models": models})
 
 
-# ── Request/Response Models ──────────────────────────────────────────────
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-class RunCouncilRequest(BaseModel):
-    council: str
-    task_description: str
-    context: dict[str, Any] = Field(default_factory=dict)
-    priority: str = "high"
-    model: str = ""
-
-
-class ApprovalRequest(BaseModel):
-    approved: bool
-    edited_output: str = ""
-    notes: str = ""
-
-
-class ContentEngineRequest(BaseModel):
-    video_title: str
-    transcript: str
-    video_id: str = ""
-    metadata: dict = Field(default_factory=dict)
-
-
-# ── Auth Endpoints ───────────────────────────────────────────────────────
-
+# Authentication
 @app.post("/api/auth/login")
-async def api_login(request: LoginRequest):
-    """Authenticate user with username and password."""
-    env_user = ADMIN_USERNAME
-    env_pass = ADMIN_PASSWORD
-    
-    if request.username == env_user and request.password == env_pass:
-        token = create_auth_token(request.username)
-        return {
-            "status": "success",
-            "token": token,
-            "user": {
-                "username": request.username,
-                "name": "Zakaria",
-                "role": "Admin",
-                "email": "zakaria@councilos.ai",
-                "avatar": "/avatar-zakaria.png"
-            }
-        }
-    
-    raise HTTPException(status_code=401, detail="Invalid username or password")
+async def login(request: Request, response: Response, credentials: LoginRequest):
+    try:
+        created = await auth_service.authenticate(
+            credentials.username, credentials.password,
+            client_ip=request.client.host if request.client else "unknown",
+            user_agent=request.headers.get("user-agent", ""),
+        )
+    except AuthLocked as exc:
+        raise _api_error(429, exc.code, str(exc), retry_after_seconds=exc.retry_after_seconds) from exc
+    except AuthInvalidCredentials as exc:
+        raise _api_error(401, exc.code, str(exc)) from exc
+    max_age = max(1, int((created.expires_at - utcnow()).total_seconds()))
+    options = {"secure": _cookie_secure(), "samesite": "strict", "path": "/", "max_age": max_age}
+    response.set_cookie(SESSION_COOKIE_NAME, created.session_token, httponly=True, **options)
+    response.set_cookie(CSRF_COOKIE_NAME, created.csrf_token, httponly=False, **options)
+    return {"status": "authenticated", "user": created.user, "csrf_token": created.csrf_token, "expires_at": iso(created.expires_at)}
 
 
-@app.get("/api/auth/me")
-async def api_get_current_user(token_data: dict = Depends(verify_auth_token)):
-    """Return authenticated user profile."""
-    return {
-        "username": token_data.get("username", "zakaria"),
-        "name": "Zakaria",
-        "role": "Admin",
-        "email": "zakaria@councilos.ai",
-        "status": "authenticated"
-    }
+@app.get("/api/auth/session")
+@app.get("/api/auth/me", deprecated=True)
+async def get_session(
+    actor: RequestActor = Depends(require_admin),
+    csrf_cookie: str | None = Cookie(default=None, alias=CSRF_COOKIE_NAME),
+):
+    if actor.actor_type != "user":
+        raise _api_error(401, "USER_SESSION_REQUIRED", "A dashboard user session is required")
+    return {"authenticated": True, "user": {"id": actor.user_id, "username": actor.username, "role": actor.role}, "csrf_token": csrf_cookie or ""}
 
 
-# ── Core Task Endpoints ─────────────────────────────────────────────────
-
-@app.get("/")
-async def root():
-    ks = await get_kill_switch_db()
-    return {
-        "service": "AI Council OS",
-        "version": "0.2.0",
-        "status": "running",
-        "kill_switch": ks["is_active"],
-        "tasks_loaded": len(tasks_store),
-    }
+@app.post("/api/auth/logout")
+async def logout(
+    response: Response, actor: RequestActor = Depends(require_admin),
+    token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+):
+    if actor.actor_type == "user" and token:
+        await auth_service.revoke_session(token)
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(CSRF_COOKIE_NAME, path="/")
+    return {"status": "logged_out"}
 
 
+# Tasks and council runs
 @app.get("/api/tasks")
-async def api_list_tasks(status: str | None = None, council: str | None = None):
-    """List all tasks, optionally filtered by status or council."""
-    db_tasks = await db_list_tasks(status=status, council=council)
-    
-    # Merge with in-memory tasks_store to ensure zero data loss
-    combined = {t["task_id"]: t for t in db_tasks}
-    for tid, tdict in tasks_store.items():
-        if tid not in combined:
-            if status and status != "all" and tdict.get("status") != status:
-                continue
-            if council and tdict.get("council") != council:
-                continue
-            combined[tid] = tdict
-
-    tasks_list = list(combined.values())
-    tasks_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-    return {"tasks": tasks_list, "total": len(tasks_list)}
+async def list_tasks(
+    task_status: str | None = Query(default=None, alias="status"),
+    council: str | None = None, _: RequestActor = Depends(require_admin),
+):
+    async with async_session() as session:
+        query = select(TaskModel, ApprovalModel).outerjoin(
+            ApprovalModel,
+            (ApprovalModel.resource_type == "task") & (ApprovalModel.resource_id == TaskModel.task_id),
+        ).order_by(TaskModel.created_at.desc())
+        if task_status and task_status != "all":
+            query = query.where(TaskModel.status == task_status)
+        if council and council != "all":
+            query = query.where(TaskModel.council == council)
+        rows = (await session.execute(query)).all()
+    tasks = [_task_json(task, approval) for task, approval in rows]
+    return {"tasks": tasks, "total": len(tasks)}
 
 
 @app.get("/api/tasks/{task_id}")
-async def api_get_task(task_id: str):
-    """Get a specific task by ID with in-memory fallback."""
-    task = await get_task(task_id)
-    if not task:
-        task = tasks_store.get(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return task
+async def get_task(task_id: str, _: RequestActor = Depends(require_admin_or_telegram)):
+    task, approval = await _task_and_approval(task_id)
+    return _task_json(task, approval)
 
 
-@app.post("/api/tasks/{task_id}/approve")
-async def approve_task(task_id: str, request: ApprovalRequest):
-    """Approve or reject a pending task. Triggers real API actions on approval."""
-    task = await get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    allowed_statuses = {"pending", "generating", "critiquing", "refining", "awaiting_approval"}
-    if task["status"] not in allowed_statuses and task["status"] != "approved" and task["status"] != "rejected":
-        raise HTTPException(status_code=400, detail="Task cannot be modified")
-
-    new_status = "approved" if request.approved else "rejected"
-    updates = {"status": new_status, "feedback_notes": request.notes}
-    if request.edited_output:
-        updates["final_output"] = request.edited_output
-
-    await update_task(task_id, updates)
-    # Update memory cache
-    task.update(updates)
-    tasks_store[task_id] = task
-
-    # Execute real integration actions on approval
-    if request.approved:
-        output = updates.get("final_output", task["final_output"])
-        workflow = task.get("context", {}).get("workflow", "")
-
-        try:
-            if workflow == "youtube_comments" and "comment_id" in task.get("context", {}):
-                post_comment_reply(task["context"]["comment_id"], output)
-                await notify_publish_success("YouTube Reply", "YouTube",
-                    f"Comment: {task['context']['comment_id']}")
-
-            elif workflow == "reddit_prospector" and "id" in task.get("context", {}):
-                post_reddit_reply(task["context"]["id"], output)
-                await notify_publish_success("Reddit Reply", "Reddit",
-                    f"Post: {task['context'].get('title', '')[:50]}")
-
-            elif workflow == "youtube_descriptions" and "video_id" in task.get("context", {}):
-                update_video_description(task["context"]["video_id"], output)
-                await notify_publish_success("Description Update", "YouTube",
-                    f"Video: {task['context'].get('video_title', '')[:50]}")
-
-            elif workflow == "content_engine" and "platform" in task.get("context", {}):
-                platform = task["context"].get("platform_name", task["context"]["platform"])
-                await notify_publish_success("Content Engine", platform)
-
-        except Exception as e:
-            await update_task(task_id, {"status": "failed", "error": str(e)})
-            tasks_store[task_id]["status"] = "failed"
-            return {"task_id": task_id, "status": "failed", "error": str(e)}
-
-    # Store in episodic memory (learn from this outcome)
-    try:
-        from src.core.memory_manager import store_episode
-        await store_episode(
-            council=task.get("council", "unknown"),
-            task_summary=task.get("task_description", "")[:400],
-            output_summary=(updates.get("final_output") or task.get("final_output", ""))[:400],
-            outcome=new_status,
-            feedback_notes=request.notes,
-            confidence=float(task.get("confidence_score", 0.0)),
+@app.post("/api/council-runs")
+@app.post("/api/councils/run", deprecated=True)
+async def create_council_run(
+    payload: CouncilRunRequest, request: Request,
+    actor: RequestActor = Depends(require_admin_or_telegram),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    if (await get_kill_switch_db())["is_active"]:
+        raise _api_error(423, "KILL_SWITCH_ACTIVE", "Global kill switch is active")
+    if idempotency_key and not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", idempotency_key):
+        raise _api_error(422, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key has an invalid format")
+    job_key = f"council:{idempotency_key or uuid.uuid4()}"
+    async with async_session() as session:
+        existing = (await session.execute(select(WorkflowRunModel).where(WorkflowRunModel.idempotency_key == job_key))).scalar_one_or_none()
+        if existing:
+            task = await session.get(TaskModel, existing.payload.get("task_id"))
+            if task:
+                return _mutation(task.to_dict(), task.version, "", replayed=True, job_id=existing.id)
+        task_id = str(uuid.uuid4())
+        context = dict(payload.context)
+        # Selected knowledge is accepted only through the validated hash list,
+        # never through an arbitrary context object.
+        context.pop("selected_docs", None)
+        if payload.selected_document_hashes:
+            context["selected_docs"] = payload.selected_document_hashes
+        task = TaskModel(
+            task_id=task_id, council=payload.council, status="queued",
+            task_description=payload.task_description, context=context,
         )
-    except Exception as mem_err:
-        print(f"[Memory] Episode storage failed (non-fatal): {mem_err}")
-
-    # Multi-platform publishing is opt-in through the persisted task context.
-    # Approval alone never silently publishes content to an external platform.
-    if request.approved:
-        publish_platforms = task.get("context", {}).get("publish_to", [])
-        if publish_platforms:
-            try:
-                from src.integrations.publisher import publish_to_platforms
-                output = updates.get("final_output") or task.get("final_output", "")
-                media_url = task.get("context", {}).get("media_url")
-                asyncio.create_task(publish_to_platforms(output, publish_platforms, media_url))
-            except Exception as pub_err:
-                print(f"[Publisher] Publish trigger failed (non-fatal): {pub_err}")
-
-        # Best-effort HubSpot sync for approved Sales Council outreach.
-        # Safe no-op until HUBSPOT_ACCESS_TOKEN is configured.
-        if task.get("council") == "sales":
-            try:
-                from src.integrations.hubspot import sync_approved_sales_task
-                sync_result = await sync_approved_sales_task({**task, **updates})
-                if sync_result.get("status") != "skipped":
-                    print(f"[HubSpot] Task {task_id} sync result: {sync_result}")
-            except Exception as hubspot_err:
-                print(f"[HubSpot] Sync failed (non-fatal): {hubspot_err}")
-
-    return {"task_id": task_id, "status": new_status}
-
-
-import asyncio
-
-_background_tasks: set[asyncio.Task] = set()
-
-
-async def _process_council_task(task_id: str, council_name: str, description: str, context: dict, priority: str, model: str = ""):
-    """Executes the multi-agent debate loop via OpenRouter in the background."""
-    try:
-        c_name = council_name.lower()
-        if c_name == "sales":
-            from src.councils.sales.council import SalesCouncil
-            council = SalesCouncil()
-        elif c_name == "content":
-            from src.councils.content.council import ContentCouncil
-            council = ContentCouncil()
-        elif c_name == "grant":
-            from src.councils.grant.council import GrantCouncil
-            council = GrantCouncil()
-        elif c_name == "strategy":
-            from src.councils.strategy.council import StrategyCouncil
-            council = StrategyCouncil()
-        elif c_name == "support":
-            from src.councils.support.council import SupportCouncil
-            council = SupportCouncil()
-        else:
-            from src.councils.sales.council import SalesCouncil
-            council = SalesCouncil()
-
-        final_state = {}
-        async for chunk in council.graph.astream({
-            "task_description": description,
-            "context": context,
-            "priority": priority,
-            "model": model,
-        }):
-            for node_name, node_state in chunk.items():
-                final_state.update(node_state)
-                
-                # Determine current status based on node
-                step_status = "generating"
-                if node_name == "_critique" or node_name == "critique":
-                    step_status = "critiquing"
-                elif node_name == "_synthesize" or node_name == "synthesize":
-                    step_status = "awaiting_approval"
-                elif node_state.get("final_output"):
-                    step_status = "awaiting_approval"
-
-                partial_updates = {
-                    "status": step_status,
-                    "final_output": node_state.get("final_output", final_state.get("final_output", "")),
-                    "confidence_score": float(node_state.get("confidence_score", final_state.get("confidence_score", 0.0))),
-                    "iterations": int(node_state.get("iteration", final_state.get("iteration", 1))),
-                    "total_cost_usd": float(node_state.get("total_cost_usd", final_state.get("total_cost_usd", 0.01))),
-                    "debate_history": node_state.get("debate_history", final_state.get("debate_history", [])),
-                }
-
-                try:
-                    await update_task(task_id, partial_updates)
-                except Exception as stream_db_err:
-                    print(f"[DB Stream Error] {stream_db_err}")
-
-                if task_id in tasks_store:
-                    tasks_store[task_id].update(partial_updates)
-
-        # Final guarantee update
-        final_updates = {
-            "status": "awaiting_approval",
-            "final_output": final_state.get("final_output", final_state.get("current_draft", "")),
-            "confidence_score": float(final_state.get("confidence_score", 90.0)),
-            "iterations": int(final_state.get("iteration", 1)),
-            "total_cost_usd": float(final_state.get("total_cost_usd", 0.02)),
-            "debate_history": final_state.get("debate_history", []),
-        }
-
-        await update_task(task_id, final_updates)
-        if task_id in tasks_store:
-            tasks_store[task_id].update(final_updates)
-
-        # Every completed council task enters the same human approval queue in
-        # both Telegram and the dashboard. Telegram-submitted tasks return to
-        # the originating chat; dashboard tasks use configured destinations.
-        try:
-            from src.integrations.telegram_bot import send_draft_for_approval
-            telegram_chat_id = context.get("telegram_chat_id")
-            await send_draft_for_approval(
-                task_id=task_id,
-                workflow_name=f"{council_name.title()} Council",
-                draft_text=final_updates["final_output"],
-                context_summary=description,
-                confidence=final_updates["confidence_score"],
-                destination_chat_id=int(telegram_chat_id) if telegram_chat_id else None,
-                council=council_name,
-            )
-        except Exception as telegram_error:
-            print(f"[Telegram] Approval delivery failed for task {task_id}: {telegram_error}")
-
-        print(f"[Council Success] Task {task_id} completed streaming by {council_name} council.")
-
-    except Exception as e:
-        print(f"[Council Error] Task {task_id} failed: {e}")
-        try:
-            await update_task(task_id, {"status": "failed", "error": str(e)})
-        except Exception as db_e:
-            print(f"[DB Error] Failed to update error column (schema might be old): {db_e}")
-            try:
-                # Fallback: just update status if 'error' column doesn't exist
-                await update_task(task_id, {"status": "failed"})
-            except Exception as inner_db_e:
-                print(f"[DB Error] Critical failure updating task status: {inner_db_e}")
-        
-        if task_id in tasks_store:
-            tasks_store[task_id]["status"] = "failed"
-            tasks_store[task_id]["error"] = str(e)
-
-
-@app.post("/api/councils/run")
-async def run_council(request: RunCouncilRequest):
-    """Submit a new task to a council."""
-    if kill_switch.is_killed():
-        raise HTTPException(
-            status_code=423,
-            detail="Global kill switch is active. Resume workflows before submitting a council task.",
+        run = CouncilRunModel(
+            task_id=task_id, council=payload.council, status="queued",
+            priority=payload.priority, prompt=payload.task_description, context=context,
         )
-
-    allowed_councils = {"content", "sales", "grant", "strategy", "support"}
-    if request.council.lower() not in allowed_councils:
-        raise HTTPException(status_code=400, detail="Unknown council")
-
-    task_id = str(uuid.uuid4())[:8]
-
-    task_data = {
-        "task_id": task_id,
-        "council": request.council,
-        "status": "pending",
-        "task_description": request.task_description,
-        "final_output": "",
-        "confidence_score": 0,
-        "iterations": 0,
-        "total_cost_usd": 0,
-        "debate_history": [],
-        "context": request.context,
-    }
-
-    saved = await create_task(task_data)
-    tasks_store[task_id] = saved
-
-    # Trigger background multi-agent AI debate via OpenRouter
-    bg_task = asyncio.create_task(
-        _process_council_task(
-            task_id=task_id,
-            council_name=request.council,
-            description=request.task_description,
-            context=request.context,
-            priority=request.priority,
-            model=request.model,
+        approval = ApprovalModel(
+            resource_type="task",
+            resource_id=task_id,
+            status="awaiting_approval",
+            version=1,
         )
-    )
-    _background_tasks.add(bg_task)
-    bg_task.add_done_callback(_background_tasks.discard)
+        session.add_all([task, run, approval])
+        await session.flush()
+        context["run_id"] = run.id
+        context["priority"] = payload.priority
+        task.context = context
+        run.context = context
+        job = WorkflowRunModel(
+            workflow_id=f"{payload.council}-council", job_type="council.run",
+            payload={"task_id": task_id, "run_id": run.id, "council": payload.council,
+                     "task_description": payload.task_description, "context": context,
+                     "priority": payload.priority},
+            idempotency_key=job_key,
+            priority=10 if payload.priority == "high" else 0,
+        )
+        session.add(job)
+        await session.flush()
+        event = await record_audit(
+            session, action="council_run.queued", resource_type="task", resource_id=task_id,
+            actor_type=actor.actor_type, actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={"run_id": run.id, "council": payload.council, "job_id": job.id},
+        )
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise _api_error(409, "COUNCIL_RUN_CONFLICT", "Council run could not be queued") from exc
+    return _mutation(task.to_dict(), task.version, event.id, run=_run_json(run), job_id=job.id)
 
-    return {"task_id": task_id, "status": "pending", "message": "Council AI agents are executing debate loop..."}
+
+@app.get("/api/council-runs")
+async def list_council_runs(_: RequestActor = Depends(require_admin)):
+    async with async_session() as session:
+        runs = (await session.execute(select(CouncilRunModel).order_by(CouncilRunModel.created_at.desc()))).scalars().all()
+    return {"runs": [_run_json(run) for run in runs], "total": len(runs)}
+
+
+@app.get("/api/council-runs/{run_id}")
+async def get_council_run(run_id: str, _: RequestActor = Depends(require_admin)):
+    async with async_session() as session:
+        run = await session.get(CouncilRunModel, run_id)
+    if not run:
+        raise _api_error(404, "COUNCIL_RUN_NOT_FOUND", "Council run does not exist")
+    return _run_json(run)
 
 
 @app.get("/api/stats")
-async def api_get_stats():
-    """Dashboard analytics."""
-    return await db_get_stats()
+async def stats(_: RequestActor = Depends(require_admin)):
+    return await get_stats()
 
 
-# ── Workflow Trigger Endpoints ───────────────────────────────────────────
+# Approval state machine
+async def _queue_after_approval(task: TaskModel, approval: ApprovalModel, action: str) -> None:
+    if action == "retry":
+        job_key = f"retry:{approval.id}:{approval.version}"
+        async with async_session() as session:
+            existing = (await session.execute(
+                select(WorkflowRunModel).where(WorkflowRunModel.idempotency_key == job_key)
+            )).scalar_one_or_none()
+            if existing:
+                return
+            current = await session.get(TaskModel, task.task_id, with_for_update=True)
+            if not current:
+                return
+            context = {
+                **(current.context or {}),
+                "priority": (current.context or {}).get("priority", "normal"),
+                "retry_of_run_id": (current.context or {}).get("run_id", ""),
+            }
+            run = CouncilRunModel(
+                task_id=current.task_id,
+                council=current.council,
+                status="queued",
+                priority=str(context["priority"]),
+                prompt=current.task_description,
+                context=context,
+            )
+            session.add(run)
+            await session.flush()
+            context["run_id"] = run.id
+            run.context = context
+            current.context = context
+            current.status = "queued"
+            current.error = ""
+            current.final_output = ""
+            current.confidence_score = None
+            current.iterations = 0
+            current.version += 1
+            session.add(WorkflowRunModel(
+                workflow_id=f"{current.council}-council",
+                job_type="council.run",
+                payload={
+                    "task_id": current.task_id,
+                    "run_id": run.id,
+                    "council": current.council,
+                    "task_description": current.task_description,
+                    "context": context,
+                    "priority": context["priority"],
+                },
+                idempotency_key=job_key,
+                priority=10 if context["priority"] == "high" else 0,
+            ))
+            await session.commit()
+        return
+    if action != "approve":
+        return
+    context, workflow = task.context or {}, (task.context or {}).get("workflow", "")
+    if not workflow or workflow == "reddit_prospector" or (workflow == "content_engine" and context.get("platform") == "reddit"):
+        if workflow:
+            async with async_session() as session:
+                current = await session.get(TaskModel, task.task_id)
+                if current:
+                    current.context = {**(current.context or {}), "manual_ready": True}
+                    current.version += 1
+                    await session.commit()
+        return
+    if workflow == "youtube_comments":
+        job_type, platform = "publish.youtube_comment", "youtube"
+    elif workflow == "instagram_comments":
+        job_type, platform = "publish.instagram_comment", "instagram"
+    elif workflow == "youtube_descriptions":
+        job_type, platform = "publish.youtube_description", "youtube"
+    elif workflow == "content_engine" and str(context.get("platform", "")).lower() in {"x", "twitter", "linkedin", "facebook", "instagram", "discord"}:
+        job_type, platform = "publish.social", str(context["platform"]).lower()
+    else:
+        return
+    key = f"publish:{approval.id}:{approval.version}"
+    async with async_session() as session:
+        if (await session.execute(select(PublicationAttemptModel).where(PublicationAttemptModel.idempotency_key == key))).scalar_one_or_none():
+            return
+        attempt = PublicationAttemptModel(
+            approval_id=approval.id, platform=platform, status="queued", idempotency_key=key,
+            request_payload={"task_id": task.task_id, "content": task.final_output, "context": context},
+        )
+        session.add(attempt)
+        await session.flush()
+        session.add(WorkflowRunModel(
+            workflow_id=workflow, job_type=job_type,
+            payload={"task_id": task.task_id, "approval_id": approval.id,
+                     "publication_attempt_id": attempt.id, "platform": platform,
+                     "content": task.final_output, "context": context},
+            idempotency_key=key,
+            priority=5,
+            # Most social/YouTube write APIs do not provide a portable
+            # idempotency primitive. Never auto-retry an ambiguous write.
+            max_attempts=1,
+        ))
+        await session.commit()
 
-async def _sync_new_tasks_to_db():
-    """
-    Persist any workflow-created tasks that only exist in the in-memory
-    tasks_store into the database, so they survive a server restart.
 
-    Workflows (Reddit Prospector, YouTube, Content Engine) write directly
-    to tasks_store for immediate dashboard visibility; this bridges that
-    into permanent storage.
-    """
-    for task_id, task_data in list(tasks_store.items()):
-        try:
-            existing = await get_task(task_id)
-            if existing is None:
-                await create_task(task_data)
-        except Exception as e:
-            print(f"[Sync] Failed to sync task {task_id} to DB: {e}")
-
-
-@app.post("/api/workflows/reddit-prospector")
-async def trigger_reddit_prospector():
-    """Manually trigger the Reddit Lead Prospector."""
-    from src.workflows.reddit_prospector import run_reddit_prospector
-    result = await run_reddit_prospector(tasks_store)
-    # Sync any new tasks to DB
-    await _sync_new_tasks_to_db()
-    return result
-
-
-@app.post("/api/workflows/youtube-comments")
-async def trigger_youtube_comments():
-    """Manually trigger YouTube Comment Auto-Reply."""
-    from src.workflows.youtube_comments import run_youtube_comment_workflow
-    result = await run_youtube_comment_workflow(tasks_store)
-    await _sync_new_tasks_to_db()
-    return result
-
-
-@app.post("/api/workflows/youtube-descriptions")
-async def trigger_youtube_descriptions(boilerplate: str = ""):
-    """Trigger YouTube Description Updater (Phase 1: Generate)."""
-    from src.workflows.youtube_descriptions import run_description_generator
-    result = await run_description_generator(tasks_store, boilerplate=boilerplate)
-    await _sync_new_tasks_to_db()
-    return result
-
-
-@app.post("/api/workflows/youtube-descriptions/publish")
-async def trigger_publish_descriptions():
-    """Trigger Phase 2: Publish approved descriptions."""
-    from src.workflows.youtube_descriptions import publish_approved_descriptions
-    result = await publish_approved_descriptions(tasks_store)
-    return result
-
-
-@app.post("/api/workflows/content-engine")
-async def trigger_content_engine(request: ContentEngineRequest):
-    """Trigger Multi-Platform Content Engine."""
-    from src.workflows.content_engine import run_content_engine
-    result = await run_content_engine(
-        video_title=request.video_title,
-        transcript=request.transcript,
-        video_id=request.video_id,
-        tasks_store=tasks_store,
-        metadata=request.metadata,
-    )
-    await _sync_new_tasks_to_db()
-    return result
-
-
-# ── Meta Real-Time Instagram Webhook Endpoints ─────────────────────────
-
-VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "").strip()
-if not VERIFY_TOKEN:
-    print("[WARNING] META_VERIFY_TOKEN is not set — Instagram webhook verification will always fail until it's configured.")
-
-
-@app.get("/api/webhooks/instagram")
-async def verify_instagram_webhook(
-    hub_mode: Optional[str] = Query(None, alias="hub.mode"),
-    hub_challenge: Optional[str] = Query(None, alias="hub.challenge"),
-    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
+@app.post("/api/approvals/{task_id}/actions")
+async def act_on_approval(
+    task_id: str, payload: ApprovalActionRequest, request: Request,
+    actor: RequestActor = Depends(require_admin_or_telegram),
 ):
-    """Meta Webhook Challenge Verification."""
-    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
-        print(f"[Instagram Webhook] Successfully verified with Meta challenge: {hub_challenge}")
-        from fastapi.responses import PlainTextResponse
-        return PlainTextResponse(content=hub_challenge)
-    from fastapi import HTTPException
-    raise HTTPException(status_code=403, detail="Verification token mismatch")
-
-
-@app.post("/api/webhooks/instagram")
-async def receive_instagram_webhook(request: Request):
-    """Receive real-time comment notifications from Meta and reply instantly (< 5 sec)."""
+    task, approval = await _task_and_approval(task_id)
+    if not approval:
+        raise _api_error(404, "APPROVAL_NOT_FOUND", "Task is not awaiting approval")
+    if task.status in {"queued", "running"} and payload.action != "cancel":
+        raise _api_error(
+            409,
+            "TASK_NOT_DECIDABLE",
+            "A queued or running task can only be cancelled",
+        )
+    if (task.context or {}).get("publication_state") == "reconciliation_required":
+        raise _api_error(
+            409,
+            "PUBLICATION_RECONCILIATION_REQUIRED",
+            "The provider outcome is uncertain. Automatic retry is disabled to prevent a duplicate post; verify the destination manually.",
+        )
+    if task.status == "failed" and payload.action != "retry":
+        raise _api_error(
+            409,
+            "TASK_RETRY_REQUIRED",
+            "A failed task can only be retried",
+        )
+    context = task.context or {}
+    workflow = str(context.get("workflow", ""))
+    platform = str(context.get("platform", "")).lower()
+    if payload.action == "approve" and workflow == "content_engine" and platform != "reddit":
+        platform_key = "twitter" if platform == "x" else platform
+        publisher_health = (await _publishing_health()).get(platform_key, {})
+        if not publisher_health.get("configured", False):
+            raise _api_error(
+                409,
+                "DESTINATION_NOT_CONFIGURED",
+                f"{platform_key.title()} credentials must be configured before approval",
+            )
+        if publisher_health.get("credential_status") != "verified":
+            raise _api_error(
+                409,
+                "DESTINATION_NOT_VERIFIED",
+                f"{platform_key.title()} credentials must pass verification before approval",
+            )
+        if platform_key == "instagram" and not context.get("media_url"):
+            raise _api_error(
+                409,
+                "MEDIA_REQUIRED",
+                "Instagram publishing requires an approved public media URL",
+            )
+    if payload.action == "approve" and workflow == "instagram_comments":
+        async with async_session() as session:
+            definition = await session.get(WorkflowDefinitionModel, workflow)
+            ready = bool(definition and await _workflow_credentials_current(session, definition))
+        if not ready or not definition or not definition.is_enabled or definition.is_paused:
+            raise _api_error(
+                409,
+                "INSTAGRAM_COMMENTS_NOT_READY",
+                "Enable Instagram Comment Replies with verified Meta and OpenRouter connections before approval",
+            )
     try:
-        body = await request.json()
-        print(f"[Instagram Webhook Payload Received]: {body}")
-
-        # Kill switch check — must be respected by ALL workflows including webhooks
-        from src.core.kill_switch import is_killed
-        if is_killed():
-            print("🛑 [Instagram Webhook] Kill switch active. Ignoring incoming comment.")
-            return {"status": "killed", "message": "Kill switch active — comment ignored"}
-
-        from src.integrations.instagram_commenter import handle_instant_webhook_comment
-
-        # Parse Meta webhook entries
-        entries = body.get("entry", [])
-        for entry in entries:
-            changes = entry.get("changes", [])
-            for change in changes:
-                if change.get("field") == "comments":
-                    value = change.get("value", {})
-                    comment_id = value.get("id")
-                    comment_text = value.get("text")
-                    from_user = value.get("from", {}).get("username", "user")
-                    media_id = value.get("media", {}).get("id", "")
-
-                    if comment_id and comment_text:
-                        # Process in background task immediately so Meta gets 200 OK within 2 seconds
-                        asyncio.create_task(
-                            handle_instant_webhook_comment(comment_id, comment_text, from_user, media_id)
-                        )
-
-        return {"status": "ok", "message": "Event received"}
-    except Exception as e:
-        print(f"[Instagram Webhook Error]: {e}")
-        return {"status": "error", "error": str(e)}
+        result = await approval_service.act(
+            approval.id, action=payload.action, expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key, actor_user_id=actor.user_id,
+            actor_type=actor.actor_type, actor_id=actor.actor_id,
+            notes=payload.notes,
+            edited_output={"content": payload.edited_output} if payload.edited_output else {},
+            request_id=getattr(request.state, "request_id", ""),
+        )
+    except ApprovalNotFound as exc:
+        raise _api_error(404, exc.code, str(exc)) from exc
+    except ApprovalConflict as exc:
+        raise _api_error(409, exc.code, str(exc)) from exc
+    except ApprovalInvalidAction as exc:
+        raise _api_error(422, exc.code, str(exc)) from exc
+    task, approval = await _task_and_approval(task_id)
+    if payload.edited_output and payload.action == "approve":
+        async with async_session() as session:
+            current = await session.get(TaskModel, task_id)
+            if current:
+                current.final_output, current.version = payload.edited_output, current.version + 1
+                await session.commit()
+        task, approval = await _task_and_approval(task_id)
+    assert approval is not None
+    # Queueing is itself idempotent. Re-run this bridge for replayed requests so
+    # a crash after the approval commit but before job creation can self-heal.
+    await _queue_after_approval(task, approval, payload.action)
+    task, approval = await _task_and_approval(task_id)
+    return _mutation(_task_json(task, approval), approval.version, result.audit_event_id, replayed=result.replayed)
 
 
-@app.get("/api/workflows/{workflow_id}/details")
-async def get_workflow_details_endpoint(workflow_id: str):
-    """Get live connected account details and execution history for a workflow."""
-    if workflow_id == "instagram-comments":
-        from src.integrations.instagram_commenter import get_instagram_workflow_details
-        return get_instagram_workflow_details()
-    
-    # Generic default for other workflows
-    return {
-        "id": workflow_id,
-        "name": workflow_id.replace("-", " ").title(),
-        "status": "active",
-        "total_replied": 0,
-        "activity_history": [],
-    }
-
-
-# Env vars each workflow genuinely needs to run for real (not just to draft
-# with the LLM). Shown to the dashboard so "Active" never lies about whether
-# a workflow can actually reach its external platform.
-WORKFLOW_REQUIRED_ENV: dict[str, list[str]] = {
-    "instagram-comments": ["INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ID"],
-    "reddit": ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"],
-    "youtube-comments": ["YOUTUBE_API_KEY", "YOUTUBE_CHANNEL_ID"],
-    "youtube-descriptions": ["YOUTUBE_API_KEY", "YOUTUBE_CHANNEL_ID"],
-    "content-engine": [],  # Drafting only needs the LLM; publishing is opt-in per platform.
-}
-
-
-@app.get("/api/tasks/{task_id}/export/docx")
-async def export_task_docx(task_id: str):
-    """Download a task's final output as a formatted Word document."""
-    task = await get_task(task_id)
-    if not task:
-        task = tasks_store.get(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    if not task.get("final_output"):
-        raise HTTPException(status_code=400, detail="Task has no final output yet")
-
-    from src.integrations.docx_export import build_task_docx, build_task_docx_filename
-    from fastapi.responses import Response
-
-    file_bytes = build_task_docx(task)
-    filename = build_task_docx_filename(task)
-    return Response(
-        content=file_bytes,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+@app.post("/api/tasks/{task_id}/approve", deprecated=True)
+async def legacy_approval(
+    task_id: str, payload: LegacyApprovalRequest, request: Request,
+    actor: RequestActor = Depends(require_admin_or_telegram),
+):
+    _, approval = await _task_and_approval(task_id)
+    if not approval:
+        raise _api_error(404, "APPROVAL_NOT_FOUND", "Task is not awaiting approval")
+    normalized = ApprovalActionRequest(
+        action="approve" if payload.approved else "reject",
+        expected_version=payload.expected_version or approval.version,
+        idempotency_key=payload.idempotency_key or f"legacy:{uuid.uuid4()}",
+        edited_output=payload.edited_output, notes=payload.notes,
     )
+    return await act_on_approval(task_id, normalized, request, actor)
 
 
-@app.get("/api/integrations/status")
-async def get_integrations_status():
-    """Report real connection status for CRM/publishing integrations (no dummy data)."""
-    from src.integrations.hubspot import get_hubspot_status
-    from src.integrations.publisher import get_platform_status
-    from src.core.llm_router import get_model_router_status
+# Durable workflow management
+@app.get("/api/workflows")
+async def list_workflows(_: RequestActor = Depends(require_admin)):
+    async with async_session() as session:
+        items = (await session.execute(select(WorkflowDefinitionModel).order_by(WorkflowDefinitionModel.id))).scalars().all()
+        runs = (await session.execute(
+            select(WorkflowRunModel)
+            .where(WorkflowRunModel.workflow_id.in_([item.id for item in items]))
+            .order_by(WorkflowRunModel.created_at.desc())
+        )).scalars().all()
+    latest: dict[str, WorkflowRunModel] = {}
+    for run in runs:
+        latest.setdefault(run.workflow_id, run)
+    return {"workflows": [_workflow_json(item, latest.get(item.id)) for item in items]}
 
+
+@app.get("/api/workflows/{workflow_id}")
+async def get_workflow(workflow_id: str, _: RequestActor = Depends(require_admin)):
+    if workflow_id not in WORKFLOW_SPECS:
+        raise _api_error(404, "WORKFLOW_NOT_FOUND", "Workflow does not exist")
+    async with async_session() as session:
+        item = await session.get(WorkflowDefinitionModel, workflow_id)
+        runs = (await session.execute(
+            select(WorkflowRunModel)
+            .where(WorkflowRunModel.workflow_id == workflow_id)
+            .order_by(WorkflowRunModel.created_at.desc())
+            .limit(50)
+        )).scalars().all()
+        providers = (await session.execute(
+            select(WorkflowIntegrationModel.provider)
+            .where(WorkflowIntegrationModel.workflow_id == workflow_id)
+            .order_by(WorkflowIntegrationModel.provider)
+        )).scalars().all()
+    if not item:
+        raise _api_error(404, "WORKFLOW_NOT_FOUND", "Workflow does not exist")
     return {
-        "hubspot": get_hubspot_status(),
-        "publishing": await get_platform_status(),
-        "model_router": get_model_router_status(),
+        **_workflow_json(item),
+        "runs": [_workflow_job_json(run) for run in runs],
+        "integration_providers": list(providers),
     }
 
 
-@app.get("/api/workflows/config-status")
-async def get_workflows_config_status():
-    """
-    Report, per workflow, whether the credentials it needs to actually run
-    are configured on this server. Lets the dashboard show 'Needs Setup'
-    instead of falsely claiming a workflow is Active.
-    """
-    result = {}
-    for workflow_id, required_vars in WORKFLOW_REQUIRED_ENV.items():
-        missing = [v for v in required_vars if not os.getenv(v, "").strip()]
-        result[workflow_id] = {
-            "ready": len(missing) == 0,
-            "missing_env": missing,
-        }
-    return result
+@app.patch("/api/workflows/{workflow_id}")
+async def patch_workflow(
+    workflow_id: str, payload: WorkflowPatchRequest, request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    if workflow_id not in WORKFLOW_SPECS:
+        raise _api_error(404, "WORKFLOW_NOT_FOUND", "Workflow does not exist")
+    if payload.selected_document_hashes:
+        raise _api_error(
+            422,
+            "GRANT_ONLY_SETTING",
+            "Knowledge documents can only be selected for an individual Grant Council run",
+        )
+    async with async_session() as session:
+        item = await session.get(WorkflowDefinitionModel, workflow_id, with_for_update=True)
+        if not item:
+            raise _api_error(404, "WORKFLOW_NOT_FOUND", "Workflow does not exist")
+        if payload.enabled is not None:
+            if payload.enabled and not await _workflow_credentials_current(session, item):
+                raise _api_error(409, "INTEGRATION_NOT_VERIFIED", "Verify credentials before enabling this workflow")
+            item.is_enabled = payload.enabled
+        if payload.paused is not None:
+            item.is_paused = payload.paused
+        if payload.schedule_preset is not None:
+            allowed_presets = WORKFLOW_SCHEDULE_PRESETS.get(workflow_id, ())
+            if payload.schedule_preset not in allowed_presets:
+                raise _api_error(
+                    422,
+                    "INVALID_SCHEDULE_PRESET",
+                    "Choose one of the scheduling options shown for this automation",
+                    allowed_options=list(allowed_presets),
+                )
+            item.schedule = dict(SCHEDULE_PRESETS[payload.schedule_preset])
+        settings = dict(item.settings or {})
+        settings.pop("selected_document_hashes", None)
+        if payload.custom_prompt is not None:
+            settings["custom_prompt"] = payload.custom_prompt
+        item.settings, item.version, item.updated_at = settings, item.version + 1, utcnow()
+        event = await record_audit(
+            session, action="workflow.updated", resource_type="workflow", resource_id=workflow_id,
+            actor_type=actor.actor_type, actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details=payload.model_dump(exclude_none=True),
+        )
+        await session.commit()
+        await session.refresh(item)
+    return _mutation(_workflow_json(item), item.version, event.id)
 
-class WorkflowSettingsRequest(BaseModel):
-    custom_prompt: str
-    selected_docs: list[str]
 
-@app.get("/api/workflows/{workflow_id}/settings")
-async def get_workflow_settings_endpoint(workflow_id: str):
-    """Get custom prompt and selected docs for a workflow."""
-    from src.core.database import get_workflow_settings
-    return await get_workflow_settings(workflow_id)
+@app.post("/api/workflows/{workflow_id}/trigger")
+async def trigger_workflow(
+    workflow_id: str, payload: WorkflowTriggerRequest, request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    if workflow_id not in WORKFLOW_SPECS or workflow_id == "telegram_control":
+        raise _api_error(404, "WORKFLOW_NOT_TRIGGERABLE", "Workflow cannot be manually triggered")
+    if payload.payload.get("selected_document_hashes"):
+        raise _api_error(
+            422,
+            "GRANT_ONLY_SETTING",
+            "Knowledge documents can only be selected for an individual Grant Council run",
+        )
+    if (await get_kill_switch_db())["is_active"]:
+        raise _api_error(423, "KILL_SWITCH_ACTIVE", "Global kill switch is active")
+    async with async_session() as session:
+        definition = await session.get(WorkflowDefinitionModel, workflow_id)
+        credentials_current = bool(
+            definition and await _workflow_credentials_current(session, definition)
+        )
+    if not definition or not definition.is_enabled or definition.is_paused:
+        raise _api_error(409, "WORKFLOW_INACTIVE", "Workflow is disabled or paused")
+    if not credentials_current:
+        raise _api_error(409, "INTEGRATION_NOT_VERIFIED", "Workflow credentials are not verified")
+    job = await job_service.enqueue(
+        workflow_id=workflow_id,
+        job_type=f"workflow.{workflow_id}",
+        payload={
+            **{
+                key: value
+                for key, value in (definition.settings or {}).items()
+                if key != "selected_document_hashes"
+            },
+            **{
+                key: value
+                for key, value in payload.payload.items()
+                if key != "selected_document_hashes"
+            },
+        },
+        idempotency_key=f"trigger:{workflow_id}:{payload.idempotency_key}",
+    )
+    async with async_session() as session:
+        event = await record_audit(
+            session, action="workflow.triggered", resource_type="workflow_run", resource_id=job.id,
+            actor_type=actor.actor_type, actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""), details={"workflow_id": workflow_id},
+        )
+        await session.commit()
+    return _mutation({"id": job.id, "workflow_id": job.workflow_id, "status": job.status, "version": job.version}, job.version, event.id)
 
-@app.post("/api/workflows/{workflow_id}/settings")
-async def update_workflow_settings_endpoint(workflow_id: str, settings: WorkflowSettingsRequest):
-    """Update custom prompt and selected docs for a workflow."""
-    from src.core.database import set_workflow_settings
-    await set_workflow_settings(workflow_id, settings.custom_prompt, settings.selected_docs)
-    return {"status": "success", "message": "Workflow settings saved."}
+
+@app.post("/api/workflows/content-engine", deprecated=True)
+async def legacy_content_trigger(
+    payload: ContentEngineRequest, request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    trigger = WorkflowTriggerRequest(payload=payload.model_dump(), idempotency_key=f"content:{uuid.uuid4()}")
+    return await trigger_workflow("content_engine", trigger, request, actor)
 
 
-
-@app.post("/api/workflows/instagram-comments")
-async def trigger_instagram_commenter():
-    """Manually trigger Instagram Comment Auto-Reply workflow (Client Priority #1)."""
-    from src.integrations.instagram_commenter import run_instagram_commenter
-    asyncio.create_task(run_instagram_commenter(tasks_store))
-    return {
-        "status": "started",
-        "workflow": "instagram-comments",
-        "message": "Instagram comment auto-reply workflow triggered! AI is fetching comments and generating replies."
-    }
-
-
-# ── Kill Switch Endpoints ────────────────────────────────────────────────
-
+# Kill switch
 @app.get("/api/kill-switch")
-async def api_get_kill_switch():
-    """Get current kill switch state."""
+async def get_kill_switch(_: RequestActor = Depends(require_admin_or_telegram)):
     return await get_kill_switch_db()
 
 
-@app.post("/api/kill-switch/activate")
-async def api_activate_kill_switch(reason: str = "Activated via Dashboard"):
-    """Activate kill switch — all workflows stop."""
-    await set_kill_switch_db(True, toggled_by="dashboard", reason=reason)
-    kill_switch.activate(toggled_by="dashboard", reason=reason)
-    return {"status": "activated", "message": "All workflows stopped."}
+@app.put("/api/kill-switch")
+async def put_kill_switch(
+    payload: KillSwitchRequest, request: Request,
+    actor: RequestActor = Depends(require_admin_or_telegram),
+):
+    resource = await set_kill_switch_db(payload.active, toggled_by=f"{actor.actor_type}:{actor.actor_id}", reason=payload.reason)
+    async with async_session() as session:
+        event = await record_audit(
+            session, action="kill_switch.activated" if payload.active else "kill_switch.deactivated",
+            resource_type="kill_switch", resource_id="global",
+            actor_type=actor.actor_type, actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""), details={"reason": payload.reason},
+        )
+        await session.commit()
+    return _mutation(resource, 1, event.id)
 
 
-@app.post("/api/kill-switch/deactivate")
-async def api_deactivate_kill_switch():
-    """Deactivate kill switch — workflows resume."""
-    await set_kill_switch_db(False, toggled_by="dashboard")
-    kill_switch.deactivate(toggled_by="dashboard")
-    return {"status": "deactivated", "message": "Workflows resumed."}
+@app.post("/api/kill-switch/activate", deprecated=True)
+async def legacy_activate(request: Request, reason: str = "Activated via dashboard", actor: RequestActor = Depends(require_admin)):
+    return await put_kill_switch(KillSwitchRequest(active=True, reason=reason), request, actor)
 
 
-# ── Knowledge Base (RAG) Endpoints ─────────────────────────────────────────
+@app.post("/api/kill-switch/deactivate", deprecated=True)
+async def legacy_deactivate(request: Request, actor: RequestActor = Depends(require_admin)):
+    return await put_kill_switch(KillSwitchRequest(active=False), request, actor)
 
+
+# Integration verification and truthful health
+async def _verify_integration(workflow_id: str) -> dict[str, Any]:
+    if _missing_config(workflow_id):
+        return {"verified": False, "message": "Required configuration is missing"}
+    try:
+        if workflow_id == "content_engine":
+            result = await validate_approved_models(cache_seconds=0)
+            if not result.get("ready"):
+                return {"verified": False, "message": "An approved model is unavailable"}
+        elif workflow_id == "telegram_control":
+            import httpx
+            raw_chat_ids = [
+                value.strip()
+                for value in os.environ["TELEGRAM_ALLOWED_CHAT_IDS"].split(",")
+                if value.strip()
+            ]
+            if len(raw_chat_ids) != 1:
+                return {"verified": False, "message": "Exactly one administrator private-chat ID is required"}
+            try:
+                int(raw_chat_ids[0])
+            except ValueError:
+                return {"verified": False, "message": "Administrator chat ID must be numeric"}
+            token = os.environ["TELEGRAM_BOT_TOKEN"]
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+                response.raise_for_status()
+                if not response.json().get("ok"):
+                    return {"verified": False, "message": "Telegram rejected the bot token"}
+        elif workflow_id in {"youtube_comments", "youtube_descriptions"}:
+            from src.integrations.youtube import verify_youtube_connection
+            await asyncio.to_thread(
+                verify_youtube_connection, os.environ["YOUTUBE_CHANNEL_ID"]
+            )
+        elif workflow_id == "reddit_prospector":
+            from src.integrations.reddit import get_reddit_client
+            client = get_reddit_client()
+            await asyncio.to_thread(lambda: next(iter(client.subreddit("all").new(limit=1)), None))
+        elif workflow_id == "instagram_comments":
+            from src.integrations.instagram_comments import verify_comment_access
+
+            await verify_comment_access()
+        return {
+            "verified": True,
+            "message": "Connection verified",
+            "credential_fingerprint": workflow_credential_fingerprint(workflow_id),
+        }
+    except Exception as exc:
+        return {"verified": False, "message": f"{type(exc).__name__}: {str(exc)[:300]}"}
+
+
+async def _verify_publisher(platform: str) -> dict[str, Any]:
+    fingerprint = _publisher_fingerprint(platform)
+    if not fingerprint:
+        return {"verified": False, "message": "Required configuration is missing"}
+    try:
+        import httpx
+
+        if platform == "discord":
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(os.environ["DISCORD_WEBHOOK_URL"])
+                response.raise_for_status()
+        elif platform == "instagram":
+            graph_version = os.getenv("META_GRAPH_API_VERSION", "v23.0")
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(
+                    f"https://graph.facebook.com/{graph_version}/{os.environ['INSTAGRAM_BUSINESS_ID']}",
+                    params={"fields": "id,username", "access_token": os.environ["INSTAGRAM_ACCESS_TOKEN"]},
+                )
+                response.raise_for_status()
+        elif platform == "facebook":
+            graph_version = os.getenv("META_GRAPH_API_VERSION", "v23.0")
+            token = os.getenv("META_ACCESS_TOKEN") or os.getenv("INSTAGRAM_ACCESS_TOKEN")
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(
+                    f"https://graph.facebook.com/{graph_version}/{os.environ['FACEBOOK_PAGE_ID']}",
+                    params={"fields": "id,name", "access_token": token},
+                )
+                response.raise_for_status()
+        elif platform == "linkedin":
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(
+                    "https://api.linkedin.com/v2/me",
+                    headers={"Authorization": f"Bearer {os.environ['LINKEDIN_ACCESS_TOKEN']}"},
+                )
+                response.raise_for_status()
+        elif platform == "twitter":
+            import tweepy
+
+            def verify_twitter():
+                client = tweepy.Client(
+                    consumer_key=os.environ["TWITTER_API_KEY"],
+                    consumer_secret=os.environ["TWITTER_API_SECRET"],
+                    access_token=os.environ["TWITTER_ACCESS_TOKEN"],
+                    access_token_secret=os.environ["TWITTER_ACCESS_SECRET"],
+                )
+                result = client.get_me(user_auth=True)
+                if not result or result.data is None:
+                    raise RuntimeError("X/Twitter did not return the authenticated account")
+
+            await asyncio.to_thread(verify_twitter)
+        return {
+            "verified": True,
+            "message": "Connection verified",
+            "credential_fingerprint": fingerprint,
+        }
+    except Exception as exc:
+        return {
+            "verified": False,
+            "message": f"{type(exc).__name__}: {str(exc)[:300]}",
+            "credential_fingerprint": fingerprint,
+        }
+
+
+@app.post("/api/integrations/{workflow_id}/verify")
+async def verify_integration(
+    workflow_id: str, request: Request, actor: RequestActor = Depends(require_admin),
+):
+    if workflow_id not in WORKFLOW_SPECS:
+        raise _api_error(404, "INTEGRATION_NOT_FOUND", "Integration does not exist")
+    result = await _verify_integration(workflow_id)
+    async with async_session() as session:
+        item = await session.get(WorkflowDefinitionModel, workflow_id, with_for_update=True)
+        assert item is not None
+        item.credential_status = "verified" if result["verified"] else "failed"
+        item.settings = {
+            **(item.settings or {}),
+            "verification_message": result["message"],
+            "verified_at": iso(utcnow()) if result["verified"] else "",
+            "credential_fingerprint": result.get("credential_fingerprint", ""),
+        }
+        item.version += 1
+        event = await record_audit(
+            session, action="integration.verified" if result["verified"] else "integration.failed",
+            resource_type="workflow", resource_id=workflow_id,
+            actor_type=actor.actor_type, actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""), details={"message": result["message"]},
+        )
+        await session.commit()
+        await session.refresh(item)
+    return _mutation(_workflow_json(item), item.version, event.id, verification=result)
+
+
+@app.post("/api/integrations/publishing/{platform}/verify")
+async def verify_publishing_integration(
+    platform: str, request: Request, actor: RequestActor = Depends(require_admin),
+):
+    platform = platform.lower()
+    if platform == "x":
+        platform = "twitter"
+    if platform not in PUBLISHER_ENV:
+        raise _api_error(404, "PUBLISHING_INTEGRATION_NOT_FOUND", "Publishing destination does not exist")
+    result = await _verify_publisher(platform)
+    async with async_session() as session:
+        definition = await session.get(WorkflowDefinitionModel, "content_engine", with_for_update=True)
+        if not definition:
+            raise _api_error(503, "WORKFLOW_NOT_INITIALIZED", "Content Engine is not initialized")
+        settings = dict(definition.settings or {})
+        verifications = dict(settings.get("publishing_verifications") or {})
+        verifications[platform] = {
+            "status": "verified" if result["verified"] else "failed",
+            "message": result["message"],
+            "verified_at": iso(utcnow()) if result["verified"] else "",
+            "credential_fingerprint": result.get("credential_fingerprint", ""),
+        }
+        settings["publishing_verifications"] = verifications
+        definition.settings = settings
+        definition.version += 1
+        event = await record_audit(
+            session,
+            action="publishing_integration.verified" if result["verified"] else "publishing_integration.failed",
+            resource_type="publishing_integration",
+            resource_id=platform,
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={"message": result["message"]},
+        )
+        await session.commit()
+    health = (await _publishing_health())[platform]
+    return _mutation({"platform": platform, **health}, definition.version, event.id)
+
+
+def _connection_resource(item: dict[str, Any]) -> dict[str, Any]:
+    """Return portal-safe connection metadata without credential values."""
+    return {
+        key: value
+        for key, value in item.items()
+        if key not in {"credentials", "encrypted_credentials", "credential_fingerprint"}
+    }
+
+
+@app.get("/api/integrations/catalog")
+async def integration_catalog(_: RequestActor = Depends(require_admin)):
+    """List reusable integration connections; secret values are write-only."""
+    return {"integrations": [
+        _connection_resource(item)
+        for item in await integration_vault.list_connections()
+    ]}
+
+
+@app.put("/api/integrations/{provider}/credentials")
+async def save_integration_credentials(
+    provider: str,
+    payload: IntegrationCredentialsRequest,
+    request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    provider = provider.strip().lower()
+    try:
+        row = await integration_vault.put_credentials(
+            provider,
+            payload.credentials,
+            display_name=payload.display_name,
+        )
+    except integration_vault.VaultConfigurationError as exc:
+        raise _api_error(503, "INTEGRATION_VAULT_UNAVAILABLE", str(exc)) from exc
+    except ValueError as exc:
+        raise _api_error(422, "INVALID_INTEGRATION_CREDENTIALS", str(exc)) from exc
+    async with async_session() as session:
+        event = await record_audit(
+            session,
+            action="integration.credentials_saved",
+            resource_type="integration",
+            resource_id=provider,
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={"configured_fields": sorted(row.credential_fields or [])},
+        )
+        await session.commit()
+    connection = next(
+        item for item in await integration_vault.list_connections()
+        if item["id"] == provider
+    )
+    return _mutation(_connection_resource(connection), row.version, event.id)
+
+
+@app.delete("/api/integrations/{provider}/credentials")
+async def remove_integration_credentials(
+    provider: str,
+    request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    provider = provider.strip().lower()
+    if provider not in integration_vault.PROVIDERS:
+        raise _api_error(404, "INTEGRATION_NOT_FOUND", "Integration does not exist")
+    if not await integration_vault.delete_credentials(provider):
+        raise _api_error(404, "INTEGRATION_NOT_CONFIGURED", "Integration is not configured")
+    async with async_session() as session:
+        event = await record_audit(
+            session,
+            action="integration.credentials_removed",
+            resource_type="integration",
+            resource_id=provider,
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={},
+        )
+        await session.commit()
+    return _mutation({"id": provider, "status": "not_configured"}, 0, event.id)
+
+
+async def _verify_vault_connection(provider: str) -> tuple[bool, str]:
+    """Verify a provider with decrypted credentials scoped to this call only."""
+    try:
+        values = await integration_vault.decrypted_provider_env(
+            provider, require_verified=False
+        )
+        with use_integration_configuration(values):
+            if provider == "openrouter":
+                result = await validate_approved_models(cache_seconds=0)
+                if not result.get("ready"):
+                    raise RuntimeError("Approved models are unavailable")
+            elif provider == "telegram":
+                import httpx
+
+                chat_ids = [
+                    value.strip()
+                    for value in values["TELEGRAM_ALLOWED_CHAT_IDS"].split(",")
+                    if value.strip()
+                ]
+                if len(chat_ids) != 1 or not re.fullmatch(r"-?\d+", chat_ids[0]):
+                    raise RuntimeError("Exactly one numeric administrator chat ID is required")
+                async with httpx.AsyncClient(timeout=15) as client:
+                    base = f"https://api.telegram.org/bot{values['TELEGRAM_BOT_TOKEN']}"
+                    response = await client.get(f"{base}/getMe")
+                    response.raise_for_status()
+                    if not response.json().get("ok"):
+                        raise RuntimeError("Telegram rejected the bot token")
+                    chat = await client.get(f"{base}/getChat", params={"chat_id": chat_ids[0]})
+                    chat.raise_for_status()
+                    chat_payload = chat.json()
+                    if not chat_payload.get("ok") or (chat_payload.get("result") or {}).get("type") != "private":
+                        raise RuntimeError("Telegram administrator target must be a reachable private chat")
+            elif provider == "youtube":
+                from src.integrations.youtube import verify_youtube_connection
+
+                await asyncio.to_thread(
+                    verify_youtube_connection,
+                    values["YOUTUBE_CHANNEL_ID"],
+                    values.get("YOUTUBE_OAUTH_TOKEN_JSON", ""),
+                )
+            elif provider == "reddit":
+                import praw
+
+                client = praw.Reddit(
+                    client_id=values["REDDIT_CLIENT_ID"],
+                    client_secret=values["REDDIT_CLIENT_SECRET"],
+                    user_agent=values["REDDIT_USER_AGENT"],
+                )
+                await asyncio.to_thread(
+                    lambda: next(iter(client.subreddit("all").new(limit=1)), None)
+                )
+            elif provider == "discord":
+                import httpx
+
+                async with httpx.AsyncClient(timeout=15) as client:
+                    response = await client.get(values["DISCORD_WEBHOOK_URL"])
+                    response.raise_for_status()
+            elif provider == "linkedin":
+                import httpx
+
+                organization = values.get("LINKEDIN_ORGANIZATION_ID", "")
+                endpoint = (
+                    f"https://api.linkedin.com/v2/organizations/{organization}"
+                    if organization else "https://api.linkedin.com/v2/me"
+                )
+                async with httpx.AsyncClient(timeout=15) as client:
+                    response = await client.get(
+                        endpoint,
+                        headers={"Authorization": f"Bearer {values['LINKEDIN_ACCESS_TOKEN']}"},
+                    )
+                    response.raise_for_status()
+            elif provider == "meta":
+                import httpx
+
+                instagram_id = values.get("INSTAGRAM_BUSINESS_ID", "")
+                target = instagram_id or values.get("FACEBOOK_PAGE_ID")
+                version = values.get("META_GRAPH_API_VERSION", "v23.0")
+                async with httpx.AsyncClient(timeout=15) as client:
+                    response = await client.get(
+                        f"https://graph.facebook.com/{version}/{target}",
+                        params={
+                            "fields": (
+                                "id,username,media.limit(1){id,comments.limit(1){id}}"
+                                if instagram_id else "id,name"
+                            ),
+                            "access_token": values["META_ACCESS_TOKEN"],
+                        },
+                    )
+                    response.raise_for_status()
+                    app_id = values.get("META_APP_ID", "")
+                    if app_id:
+                        token_info = await client.get(
+                            f"https://graph.facebook.com/{version}/debug_token",
+                            params={
+                                "input_token": values["META_ACCESS_TOKEN"],
+                                "access_token": f"{app_id}|{values['META_APP_SECRET']}",
+                            },
+                        )
+                        token_info.raise_for_status()
+                        token_data = (token_info.json() or {}).get("data") or {}
+                        if not token_data.get("is_valid"):
+                            raise RuntimeError("Meta reported that the access token is invalid")
+                        if instagram_id:
+                            scopes = set(token_data.get("scopes") or [])
+                            if not scopes.intersection({"instagram_manage_comments", "instagram_business_manage_comments"}):
+                                raise RuntimeError("Meta token does not include Instagram comment-management permission")
+            elif provider == "runpod":
+                from src.integrations.runpod import verify_connection
+
+                await verify_connection()
+            elif provider == "x":
+                import tweepy
+
+                def verify_x():
+                    client = tweepy.Client(
+                        consumer_key=values["TWITTER_API_KEY"],
+                        consumer_secret=values["TWITTER_API_SECRET"],
+                        access_token=values["TWITTER_ACCESS_TOKEN"],
+                        access_token_secret=values["TWITTER_ACCESS_SECRET"],
+                    )
+                    result = client.get_me(user_auth=True)
+                    if not result or result.data is None:
+                        raise RuntimeError("X did not return the authenticated account")
+
+                await asyncio.to_thread(verify_x)
+            else:
+                raise ValueError("Unsupported integration provider")
+        return True, "Connection verified"
+    except (integration_vault.VaultConfigurationError, KeyError, ValueError) as exc:
+        return False, str(exc)[:300]
+    except Exception:
+        # Provider exception text can contain a secret-bearing URL. Never return it.
+        return False, "The provider rejected the credentials or could not be reached"
+
+
+async def _provider_runtime(provider: str) -> dict[str, str]:
+    try:
+        return await integration_vault.decrypted_provider_env(provider)
+    except integration_vault.VaultConfigurationError as exc:
+        raise _api_error(
+            409,
+            "INTEGRATION_NOT_VERIFIED",
+            f"Verify the {provider.title()} connection in Settings & Integrations first",
+        ) from exc
+
+
+@app.get("/api/blender/pods")
+async def get_blender_pods(_: RequestActor = Depends(require_admin)):
+    """Return live RunPod state; never fabricate placeholder machines or costs."""
+    from src.integrations.runpod import RunPodError, list_pods
+
+    values = await _provider_runtime("runpod")
+    try:
+        with use_integration_configuration(values):
+            pods = await list_pods()
+    except RunPodError as exc:
+        raise _api_error(502, "RUNPOD_UNAVAILABLE", str(exc)) from exc
+    return {"pods": pods, "provider": "runpod", "status": "verified"}
+
+
+@app.post("/api/blender/pods/{pod_id}/actions")
+async def act_on_blender_pod(
+    pod_id: str,
+    payload: BlenderPodActionRequest,
+    request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    """Resume or stop a RunPod pod with a persisted administrator audit event."""
+    from src.integrations.runpod import RunPodError, resume_pod, stop_pod
+
+    if payload.action == "resume" and (await get_kill_switch_db())["is_active"]:
+        raise _api_error(423, "KILL_SWITCH_ACTIVE", "The system is stopped; resume it before starting GPU billing")
+    values = await _provider_runtime("runpod")
+    try:
+        with use_integration_configuration(values):
+            pod = await (resume_pod(pod_id) if payload.action == "resume" else stop_pod(pod_id))
+    except ValueError as exc:
+        raise _api_error(422, "INVALID_POD_ID", str(exc)) from exc
+    except RunPodError as exc:
+        raise _api_error(502, "RUNPOD_ACTION_FAILED", str(exc)) from exc
+    async with async_session() as session:
+        event = await record_audit(
+            session,
+            action=f"blender.pod_{payload.action}",
+            resource_type="runpod_pod",
+            resource_id=pod_id,
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={"desired_status": pod.get("desired_status", "")},
+        )
+        await session.commit()
+    return _mutation(pod, 1, event.id)
+
+
+@app.get("/api/blender/jobs")
+async def list_blender_jobs(_: RequestActor = Depends(require_admin)):
+    async with async_session() as session:
+        jobs = (await session.execute(
+            select(WorkflowRunModel)
+            .where(WorkflowRunModel.workflow_id == "blender_manager")
+            .order_by(WorkflowRunModel.created_at.desc())
+            .limit(50)
+        )).scalars().all()
+    return {"jobs": [_blender_job_resource(job) for job in jobs]}
+
+
+@app.get("/api/blender/jobs/{job_id}")
+async def get_blender_job(job_id: str, _: RequestActor = Depends(require_admin)):
+    async with async_session() as session:
+        job = await session.get(WorkflowRunModel, job_id)
+    if job is None or job.workflow_id != "blender_manager":
+        raise _api_error(404, "BLENDER_JOB_NOT_FOUND", "Blender job does not exist")
+    return _blender_job_resource(job)
+
+
+@app.post("/api/blender/jobs")
+async def create_blender_job(
+    payload: BlenderTemplateJobRequest,
+    request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    """Queue an idempotent, allowlisted GPU repair job for a workspace template."""
+    from src.integrations.runpod import RunPodError, list_pods
+
+    if (await get_kill_switch_db())["is_active"]:
+        raise _api_error(423, "KILL_SWITCH_ACTIVE", "The system is stopped; resume it before starting GPU work")
+    values = await _provider_runtime("runpod")
+    if len(values.get("BLENDER_AGENT_TOKEN", "")) < 32:
+        raise _api_error(
+            409,
+            "BLENDER_AGENT_NOT_CONFIGURED",
+            "Add a separate Blender agent token to the RunPod integration before running templates",
+        )
+    try:
+        with use_integration_configuration(values):
+            pods = await list_pods()
+    except RunPodError as exc:
+        raise _api_error(502, "RUNPOD_UNAVAILABLE", str(exc)) from exc
+    if not any(pod.get("id") == payload.pod_id for pod in pods):
+        raise _api_error(404, "RUNPOD_POD_NOT_FOUND", "The selected pod is not in the verified RunPod account")
+    job = await job_service.enqueue(
+        workflow_id="blender_manager",
+        job_type="blender.template_repair",
+        payload={
+            "pod_id": payload.pod_id,
+            "source_path": payload.source_path,
+            "output_name": payload.output_name,
+            "frame": payload.frame,
+            "samples": payload.samples,
+            "resolution_percent": payload.resolution_percent,
+            "auto_stop": payload.auto_stop,
+        },
+        idempotency_key=f"blender:{payload.idempotency_key}",
+        priority=10,
+        max_attempts=3,
+    )
+    async with async_session() as session:
+        event = await record_audit(
+            session,
+            action="blender.template_job_queued",
+            resource_type="workflow_run",
+            resource_id=job.id,
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={"pod_id": payload.pod_id, "auto_stop": payload.auto_stop},
+        )
+        await session.commit()
+    return _mutation(_blender_job_resource(job), job.version, event.id)
+
+
+@app.post("/api/integrations/connections/{provider}/verify")
+async def verify_vault_connection(
+    provider: str,
+    request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    provider = provider.strip().lower()
+    if provider not in integration_vault.PROVIDERS:
+        raise _api_error(404, "INTEGRATION_NOT_FOUND", "Integration does not exist")
+    verified, message = await _verify_vault_connection(provider)
+    try:
+        await integration_vault.mark_verification(provider, verified, "" if verified else message)
+    except ValueError as exc:
+        raise _api_error(409, "INTEGRATION_NOT_CONFIGURED", str(exc)) from exc
+    async with async_session() as session:
+        event = await record_audit(
+            session,
+            action="integration.verified" if verified else "integration.failed",
+            resource_type="integration",
+            resource_id=provider,
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={"message": message},
+        )
+        await session.commit()
+    connection = next(
+        item for item in await integration_vault.list_connections()
+        if item["id"] == provider
+    )
+    return _mutation(
+        _connection_resource(connection),
+        connection["version"],
+        event.id,
+        verification={"verified": verified, "message": message},
+    )
+
+
+@app.patch("/api/workflows/{workflow_id}/integrations")
+async def update_workflow_integrations(
+    workflow_id: str,
+    payload: WorkflowIntegrationLinksRequest,
+    request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    if workflow_id not in WORKFLOW_SPECS:
+        raise _api_error(404, "WORKFLOW_NOT_FOUND", "Workflow does not exist")
+    try:
+        providers = await integration_vault.set_workflow_links(
+            workflow_id, payload.providers
+        )
+    except ValueError as exc:
+        raise _api_error(422, "INVALID_WORKFLOW_INTEGRATIONS", str(exc)) from exc
+    async with async_session() as session:
+        definition = await session.get(WorkflowDefinitionModel, workflow_id)
+        assert definition is not None
+        event = await record_audit(
+            session,
+            action="workflow.integrations_updated",
+            resource_type="workflow",
+            resource_id=workflow_id,
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={"providers": providers},
+        )
+        await session.commit()
+    resource = _workflow_json(definition)
+    resource["integration_providers"] = providers
+    return _mutation(resource, definition.version, event.id)
+
+
+@app.get("/api/integrations/health")
+@app.get("/api/integrations/status", deprecated=True)
+async def integration_health(_: RequestActor = Depends(require_admin)):
+    async with async_session() as session:
+        items = (await session.execute(select(WorkflowDefinitionModel).order_by(WorkflowDefinitionModel.id))).scalars().all()
+    connections = {item["id"]: item for item in await integration_vault.list_connections()}
+    openrouter = connections.get("openrouter", {})
+    return {
+        "workflows": {item.id: {"credential_status": item.credential_status,
+                                 "configured": not _missing_config(item.id),
+                                 "enabled": item.is_enabled, "paused": item.is_paused,
+                                 "message": (item.settings or {}).get("verification_message", "")}
+                      for item in items},
+        "publishing": await _publishing_health(),
+        "model_gateway": {
+            "configured": bool(openrouter.get("configured") or os.getenv("OPENROUTER_API_KEY", "").strip()),
+            "status": openrouter.get("status", "configured" if os.getenv("OPENROUTER_API_KEY", "").strip() else "missing"),
+        },
+    }
+
+
+# Knowledge base and Grant exports
 @app.post("/api/knowledge/upload")
-async def upload_knowledge_document(file: UploadFile = File(...)):
-    """Upload a document to the RAG knowledge base."""
+async def upload_knowledge(file: UploadFile = File(...), actor: RequestActor = Depends(require_admin)):
+    filename = Path(file.filename or "document").name
+    if Path(filename).suffix.lower() not in ALLOWED_KNOWLEDGE_EXTENSIONS:
+        raise _api_error(415, "UNSUPPORTED_DOCUMENT_TYPE", "Only PDF, DOCX, TXT, and Markdown are accepted")
+    contents = await file.read(MAX_KNOWLEDGE_BYTES + 1)
+    if len(contents) > MAX_KNOWLEDGE_BYTES:
+        raise _api_error(413, "DOCUMENT_TOO_LARGE", "Knowledge documents are limited to 20 MB")
+    digest = hashlib.sha256(contents).hexdigest()
+    async with async_session() as session:
+        existing = (await session.execute(select(KnowledgeDocumentModel).where(KnowledgeDocumentModel.sha256 == digest))).scalar_one_or_none()
+    if existing:
+        raise _api_error(409, "DUPLICATE_DOCUMENT", "This document is already stored")
     from src.core.rag_engine import ingest_document
-    file_bytes = await file.read()
-    result = await ingest_document(file_bytes, file.filename)
-    return result
-
-
-@app.get("/api/knowledge/search")
-async def search_knowledge(q: str = ""):
-    """Search the RAG knowledge base."""
-    from src.core.rag_engine import search_knowledge_base
-    if not q.strip():
-        return {"results": []}
-    results = await search_knowledge_base(q, top_k=5)
-    return {"results": results, "query": q}
+    try:
+        ingest = await ingest_document(contents, filename)
+    except Exception as exc:
+        raise _api_error(422, "DOCUMENT_INGESTION_FAILED", str(exc)) from exc
+    if ingest.get("status") not in {"ok", "duplicate"}:
+        raise _api_error(
+            422,
+            "DOCUMENT_HAS_NO_INDEXABLE_TEXT",
+            "The document did not contain extractable text",
+        )
+    async with async_session() as session:
+        document = KnowledgeDocumentModel(
+            filename=filename, content_type=file.content_type or "application/octet-stream",
+            size_bytes=len(contents), sha256=digest,
+            storage_key=str(ingest.get("doc_hash", digest)), status="ready",
+        )
+        session.add(document)
+        await session.flush()
+        event = await record_audit(
+            session, action="knowledge.uploaded", resource_type="knowledge_document",
+            resource_id=document.id, actor_type=actor.actor_type, actor_id=actor.actor_id,
+            details={"filename": filename, "size_bytes": len(contents)},
+        )
+        await session.commit()
+        await session.refresh(document)
+    return _mutation({"id": document.id, "filename": document.filename, "sha256": document.sha256,
+                      "status": document.status, "size_bytes": document.size_bytes}, 1, event.id)
 
 
 @app.get("/api/knowledge/documents")
-async def list_knowledge_documents():
-    """List all ingested documents."""
-    from src.core.rag_engine import get_all_documents
-    docs = await get_all_documents()
-    return {"documents": docs, "total": len(docs)}
+async def list_knowledge(_: RequestActor = Depends(require_admin)):
+    async with async_session() as session:
+        items = (await session.execute(select(KnowledgeDocumentModel).order_by(KnowledgeDocumentModel.created_at.desc()))).scalars().all()
+        from src.core.models import KnowledgeChunkModel
+        counts = dict((await session.execute(
+            select(KnowledgeChunkModel.doc_hash, func.count(KnowledgeChunkModel.id))
+            .group_by(KnowledgeChunkModel.doc_hash)
+        )).all())
+    documents = [{"id": i.id, "filename": i.filename, "doc_hash": i.storage_key,
+                   "sha256": i.sha256, "status": i.status, "size_bytes": i.size_bytes,
+                   "chunk_count": int(counts.get(i.storage_key, 0)),
+                   "selected_for_grant": i.selected_for_grant, "warning": i.warning,
+                   "created_at": iso(i.created_at)} for i in items]
+    return {"documents": documents, "total": len(documents)}
 
 
-@app.delete("/api/knowledge/documents/{doc_hash}")
-async def delete_knowledge_document(doc_hash: str):
-    """Remove a document from the knowledge base."""
+@app.get("/api/knowledge/search")
+async def search_knowledge(
+    q: str = Query(min_length=1, max_length=1000),
+    doc_hash: list[str] = Query(default=[]),
+    _: RequestActor = Depends(require_admin),
+):
+    from src.core.rag_engine import search_knowledge_base
+    return {
+        "results": await search_knowledge_base(q, top_k=8, doc_hashes=doc_hash),
+        "query": q,
+        "scope": doc_hash,
+    }
+
+
+@app.delete("/api/knowledge/documents/{document_id}")
+async def delete_knowledge(document_id: str, actor: RequestActor = Depends(require_admin)):
     from src.core.rag_engine import delete_document
-    success = await delete_document(doc_hash)
-    if not success:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return {"status": "deleted", "doc_hash": doc_hash}
-
-
-@app.get("/api/memory/preferences")
-async def get_memory_preferences():
-    """Get stored brand guidelines and preferences."""
-    try:
-        import sqlite3
-        conn = sqlite3.connect("./data/memory.db")
-        conn.execute("CREATE TABLE IF NOT EXISTS guidelines (id INTEGER PRIMARY KEY AUTOINCREMENT, guideline TEXT, created_at TEXT DEFAULT (datetime('now')))")
-        rows = conn.execute("SELECT id, guideline, created_at FROM guidelines ORDER BY created_at DESC").fetchall()
-        conn.close()
-        return {"guidelines": [{"id": r[0], "guideline": r[1], "created_at": r[2]} for r in rows]}
-    except Exception as e:
-        return {"guidelines": [], "error": str(e)}
-
-
-class GuidelineRequest(BaseModel):
-    guideline: str
-
-
-@app.post("/api/memory/guidelines")
-async def add_brand_guideline(request: GuidelineRequest):
-    """Add a brand guideline to the memory store."""
-    import sqlite3
-    conn = sqlite3.connect("./data/memory.db")
-    conn.execute("CREATE TABLE IF NOT EXISTS guidelines (id INTEGER PRIMARY KEY AUTOINCREMENT, guideline TEXT, created_at TEXT DEFAULT (datetime('now')))")
-    conn.execute("INSERT INTO guidelines (guideline) VALUES (?)", (request.guideline,))
-    conn.commit()
-    conn.close()
-    return {"status": "saved", "guideline": request.guideline}
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────
-
-# ── Memory API Endpoints ─────────────────────────────────────────────────────
-
-@app.get("/api/memory/stats")
-async def api_memory_stats():
-    """Memory system statistics."""
-    from src.core.memory_manager import get_memory_stats
-    return await get_memory_stats()
-
-
-@app.get("/api/memory/episodes")
-async def api_get_episodes(council: str = "all", outcome: str = "approved", limit: int = 10):
-    """Get episodic memory entries."""
-    from src.core.memory_manager import get_recent_episodes
-    return {"episodes": await get_recent_episodes(council, outcome, limit)}
-
-
-@app.post("/api/memory/preferences")
-async def api_save_preference(key: str, value: str, council: str = "all"):
-    """Save a brand preference."""
-    from src.core.memory_manager import save_preference
-    return await save_preference(key, value, council)
-
-
-@app.delete("/api/memory/guidelines/{guideline_id}")
-async def api_delete_guideline(guideline_id: int):
-    """Delete a brand guideline."""
-    from src.core.memory_manager import delete_guideline
-    await delete_guideline(guideline_id)
-    return {"status": "deleted", "id": guideline_id}
-
-
-# ── Publisher API Endpoints ───────────────────────────────────────────────────
-
-@app.get("/api/platforms/status")
-async def api_platform_status():
-    """Check which social platforms have credentials configured."""
-    from src.integrations.publisher import get_platform_status
-    return await get_platform_status()
-
-
-class PublishRequest(BaseModel):
-    content: str
-    platforms: list[str]
-    media_url: Optional[str] = None
-
-
-@app.post("/api/publish")
-async def api_publish(request: PublishRequest):
-    """Publish content to one or more social platforms immediately."""
-    from src.integrations.publisher import publish_to_platforms
-    return await publish_to_platforms(request.content, request.platforms, request.media_url)
-
-
-# ── RunPod GPU Pod Management Endpoints ──────────────────────────────
-
-@app.get("/api/runpod/pods")
-async def list_runpod_pods_endpoint():
-    """List all active and paused RunPod GPU instances under configured API key."""
-    try:
-        from src.integrations.runpod_manager import list_user_pods
-        pods = await list_user_pods()
-        return {"status": "ok", "pods": pods}
-    except Exception as e:
-        return {"status": "error", "error": str(e), "pods": []}
-
-
-@app.get("/api/runpod/pods/{pod_id}")
-async def get_runpod_pod_endpoint(pod_id: str):
-    """Get status, uptime, IP and GPU metrics for a specific pod."""
-    try:
-        from src.integrations.runpod_manager import get_pod_status
-        pod = await get_pod_status(pod_id)
-        return {"status": "ok", "pod": pod}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-
-@app.post("/api/runpod/pods/{pod_id}/start")
-async def start_runpod_pod_endpoint(pod_id: str):
-    """Start a paused RunPod instance (podStart)."""
-    try:
-        from src.integrations.runpod_manager import start_pod
-        res = await start_pod(pod_id)
-        return {"status": "ok", "result": res}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-
-@app.post("/api/runpod/pods/{pod_id}/stop")
-async def stop_runpod_pod_endpoint(pod_id: str):
-    """Stop/Pause a running RunPod instance (podStop) to prevent idle billing."""
-    try:
-        from src.integrations.runpod_manager import stop_pod
-        res = await stop_pod(pod_id)
-        return {"status": "ok", "result": res}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-
-# ── CAD Floorplan Generator Endpoints ────────────────────────────────────────
-
-from fastapi.responses import FileResponse
-
-class CadRequest(BaseModel):
-    crew_size: int = 15
-    sol_duration: int = 14
-    crop_selection: str = "Spirulina, Dwarf Sunflower, Sugar Beet"
-
-@app.post("/api/cad/generate-dxf")
-async def generate_cad_dxf_endpoint(req: CadRequest):
-    """Generate parametric DXF greenhouse floorplan with AI layout optimization & PNG preview."""
-    try:
-        import os
-        from src.integrations.cad_generator import generate_greenhouse_dxf
-        res = generate_greenhouse_dxf(
-            crew_size=req.crew_size,
-            sol_duration=req.sol_duration,
-            crop_selection=req.crop_selection
+    async with async_session() as session:
+        document = await session.get(KnowledgeDocumentModel, document_id)
+        if not document:
+            raise _api_error(404, "DOCUMENT_NOT_FOUND", "Knowledge document does not exist")
+        await delete_document(document.storage_key)
+        await session.delete(document)
+        event = await record_audit(
+            session, action="knowledge.deleted", resource_type="knowledge_document",
+            resource_id=document_id, actor_type=actor.actor_type, actor_id=actor.actor_id,
+            details={"filename": document.filename},
         )
-        # Clear PNG preview cache so image updates fresh
-        png_cache = res["file_path"].replace('.dxf', '.png')
-        if os.path.exists(png_cache):
-            os.remove(png_cache)
-            
-        res["ai_optimization_notes"] = f"AI Architectural Layout: Optimized 4-corridor recirculating hydroponic layout for {req.crew_size} crew members. Recirculating nutrient lines grouped along North-South axis with 1.4m central clearance for automated harvester pods."
-        return res
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        await session.commit()
+    return _mutation({"id": document_id, "status": "deleted"}, 1, event.id)
 
-@app.post("/api/cad/upload-excel")
-async def upload_excel_cad_endpoint(file: UploadFile = File(...)):
-    """Parse uploaded DSFC Excel sheet and generate dynamic CAD floorplan with AI layout optimization + visual preview."""
+
+async def _grant_task(task_id: str) -> TaskModel:
+    task, _ = await _task_and_approval(task_id)
+    if task.council != "grant":
+        raise _api_error(404, "GRANT_NOT_FOUND", "Grant task does not exist")
+    if not task.final_output:
+        raise _api_error(409, "GRANT_NOT_READY", "Grant output has not been generated")
+    return task
+
+
+@app.get("/api/grants/{task_id}/export.docx")
+@app.get("/api/tasks/{task_id}/export/docx", deprecated=True)
+async def export_grant_docx(task_id: str, _: RequestActor = Depends(require_admin)):
+    from src.integrations.docx_export import build_task_docx, build_task_docx_filename
+    data = (await _grant_task(task_id)).to_dict()
+    return Response(content=build_task_docx(data),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    headers={"Content-Disposition": f'attachment; filename="{build_task_docx_filename(data)}"'})
+
+
+@app.get("/api/grants/{task_id}/export.pdf")
+async def export_grant_pdf(task_id: str, _: RequestActor = Depends(require_admin)):
+    from src.integrations.docx_export import build_task_pdf, build_task_pdf_filename
+    data = (await _grant_task(task_id)).to_dict()
+    return Response(content=build_task_pdf(data), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{build_task_pdf_filename(data)}"'})
+
+
+# Verified provider webhook ingress; payloads are parsed into bounded durable jobs.
+async def _webhook_values(provider: str) -> dict[str, str]:
     try:
-        import warnings
-        warnings.filterwarnings('ignore')
-        import openpyxl
-        import io
-        import re
+        return await integration_vault.decrypted_provider_env(provider)
+    except integration_vault.VaultConfigurationError:
+        if provider == "telegram":
+            return {
+                "TELEGRAM_WEBHOOK_SECRET": os.getenv("TELEGRAM_WEBHOOK_SECRET", ""),
+            }
+        if provider == "meta":
+            return {
+                "META_APP_SECRET": os.getenv("META_APP_SECRET", ""),
+                "META_WEBHOOK_VERIFY_TOKEN": os.getenv("META_WEBHOOK_VERIFY_TOKEN", ""),
+            }
+        return {}
 
-        contents = await file.read()
-        
-        # Load workbook safely
+
+@app.get("/api/webhooks/meta")
+async def verify_meta_webhook(
+    mode: str = Query(default="", alias="hub.mode"),
+    verify_token: str = Query(default="", alias="hub.verify_token"),
+    challenge: str = Query(default="", alias="hub.challenge"),
+):
+    values = await _webhook_values("meta")
+    expected = values.get("META_WEBHOOK_VERIFY_TOKEN", "").strip()
+    if mode != "subscribe" or not expected or not hmac.compare_digest(expected, verify_token):
+        raise _api_error(403, "WEBHOOK_VERIFICATION_FAILED", "Meta webhook verification failed")
+    return Response(content=challenge, media_type="text/plain")
+
+
+def _instagram_webhook_comments(payload: Any) -> list[dict[str, str]]:
+    comments: list[dict[str, str]] = []
+    if not isinstance(payload, dict) or payload.get("object") not in {"instagram", "page"}:
+        return comments
+    for entry in payload.get("entry") or []:
+        if not isinstance(entry, dict):
+            continue
+        for change in entry.get("changes") or []:
+            if not isinstance(change, dict) or change.get("field") not in {"comments", "live_comments"}:
+                continue
+            value = change.get("value") or {}
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                comment_id = str(item.get("id") or item.get("comment_id") or "").strip()
+                comment_text = str(item.get("text") or "").strip()
+                if not comment_id or not comment_text:
+                    continue
+                author = item.get("from") if isinstance(item.get("from"), dict) else {}
+                media = item.get("media") if isinstance(item.get("media"), dict) else {}
+                comments.append({
+                    "comment_id": comment_id,
+                    "comment_text": comment_text,
+                    "username": str(item.get("username") or author.get("username") or "instagram_user"),
+                    "media_id": str(item.get("media_id") or media.get("id") or ""),
+                    "caption": "",
+                    "timestamp": str(item.get("timestamp") or ""),
+                })
+    return comments[:100]
+
+
+@app.post("/api/webhooks/{provider}")
+async def receive_webhook(
+    provider: str, request: Request,
+    telegram_secret: str | None = Header(default=None, alias="X-Telegram-Bot-Api-Secret-Token"),
+    signature: str | None = Header(default=None, alias="X-Hub-Signature-256"),
+):
+    provider, body = provider.lower(), await request.body()
+    if len(body) > 2 * 1024 * 1024:
+        raise _api_error(413, "WEBHOOK_TOO_LARGE", "Webhook payload is too large")
+    if provider == "telegram":
+        values = await _webhook_values("telegram")
+        expected = values.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
+        valid = bool(expected and telegram_secret and hmac.compare_digest(expected, telegram_secret))
+    elif provider == "meta":
+        values = await _webhook_values("meta")
+        secret = values.get("META_APP_SECRET", "").encode()
+        expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest() if secret else ""
+        valid = bool(expected and signature and hmac.compare_digest(expected, signature))
+    elif provider == "youtube":
+        expected, supplied = os.getenv("YOUTUBE_WEBHOOK_SECRET", "").strip(), request.headers.get("X-Webhook-Secret", "")
+        valid = bool(expected and supplied and hmac.compare_digest(expected, supplied))
+    else:
+        raise _api_error(404, "WEBHOOK_NOT_FOUND", "Webhook provider is unsupported")
+    if not valid:
+        raise _api_error(401, "INVALID_WEBHOOK_SIGNATURE", "Webhook signature is invalid")
+    event_id = request.headers.get("X-Event-ID", "")[:128] or hashlib.sha256(body).hexdigest()
+    if provider == "meta":
         try:
-            wb = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=True)
-        except Exception:
-            wb = openpyxl.load_workbook(filename=io.BytesIO(contents), data_only=False)
-
-        sheet_names = wb.sheetnames
-        crop_details = []
-        crew_size = 15
-        
-        # Look for 'Ingredient Demand', 'Ingredient', 'Crop', 'Demand', 'Resource Summary'
-        target_sheet = None
-        for name in sheet_names:
-            n_lower = name.lower()
-            if "ingredient" in n_lower and "demand" in n_lower:
-                target_sheet = wb[name]
-                break
-        if not target_sheet:
-            for name in sheet_names:
-                n_lower = name.lower()
-                if "ingredient" in n_lower or "demand" in n_lower or "crop" in n_lower:
-                    target_sheet = wb[name]
-                    break
-        if not target_sheet and len(sheet_names) > 0:
-            target_sheet = wb[sheet_names[0]]
-            
-        if target_sheet:
-            for r in range(1, target_sheet.max_row + 1):
-                c1 = target_sheet.cell(r, 1).value
-                c2 = target_sheet.cell(r, 2).value
-                c3 = target_sheet.cell(r, 3).value
-                
-                # Check for Crew Size in Assumptions sheet or row
-                if c1 and "crew" in str(c1).lower():
-                    try:
-                        m = re.search(r'\d+', str(c1))
-                        if m: crew_size = int(m.group(0))
-                    except: pass
-
-                # Extract crop ingredient rows
-                if c1 and isinstance(c1, str) and not c1.startswith("Ref") and not c1.startswith("Ingredient") and not c1.startswith("Astrofood"):
-                    mass = None
-                    for val in [c3, c2, target_sheet.cell(r, 4).value]:
-                        if isinstance(val, (int, float)) and val > 0:
-                            mass = int(val)
-                            break
-                    if mass and mass > 0:
-                        crop_details.append({
-                            "name": c1.strip(),
-                            "unit": str(c2).strip() if c2 else "g",
-                            "mass_g": mass
-                        })
-
-        from src.integrations.cad_generator import generate_greenhouse_dxf
-        res = generate_greenhouse_dxf(
-            crew_size=crew_size,
-            sol_duration=14,
-            crop_selection=f"DSFC Plan: {file.filename} ({len(crop_details)} crops parsed)",
-            crop_details=crop_details if len(crop_details) > 0 else None,
-            filename=f"dxf_{file.filename.replace('.xlsx', '').replace(' ', '_')}.dxf"
+            parsed = await request.json()
+        except ValueError as exc:
+            raise _api_error(422, "INVALID_WEBHOOK_PAYLOAD", "Meta webhook body is not valid JSON") from exc
+        comments = _instagram_webhook_comments(parsed)
+        if not comments:
+            return {"accepted": True, "ignored": True, "reason": "no_supported_comment_events"}
+        job = await job_service.enqueue(
+            workflow_id="instagram_comments",
+            job_type="workflow.instagram_comments",
+            payload={"webhook_comments": comments},
+            idempotency_key=f"webhook:{provider}:{event_id}",
+            priority=8,
         )
-        
-        # Clear PNG cache so image updates fresh
-        png_cache = res["file_path"].replace('.dxf', '.png')
-        if os.path.exists(png_cache):
-            os.remove(png_cache)
-            
-        res["excel_sheets_parsed"] = sheet_names
-        res["crops_extracted"] = [c["name"] for c in crop_details[:10]]
-        res["ai_optimization_notes"] = f"AI Crop Optimization: Parsed {len(crop_details)} unique DSFC crops. Automatically calculated vertical rack count to 57 modules across a 60.5m length habitat footprint. Assigned high-light crops (Wheat/Sunflower) to central bays and root crops (Potato/Carrot) to aeroponic lower bays."
-        return res
-    except Exception as e:
-        from src.integrations.cad_generator import generate_greenhouse_dxf
-        return generate_greenhouse_dxf(crew_size=15, crop_selection=f"Parsed {file.filename}: {str(e)}")
-
-@app.get("/api/cad/preview/{filename}")
-async def preview_cad_png_endpoint(filename: str):
-    """Render and return high-res PNG image preview of generated DXF file."""
-    import os
-    import ezdxf
-    from ezdxf.addons.drawing import RenderContext, Frontend
-    from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
-    import matplotlib.pyplot as plt
-
-    dxf_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "cad_exports")
-    dxf_path = os.path.join(dxf_dir, filename if filename.endswith('.dxf') else f"{filename}.dxf")
-    png_path = dxf_path.replace('.dxf', '.png')
-
-    if not os.path.exists(dxf_path):
-        raise HTTPException(status_code=404, detail="DXF file not found")
-
-    if not os.path.exists(png_path):
-        doc = ezdxf.readfile(dxf_path)
-        msp = doc.modelspace()
-        fig = plt.figure(figsize=(10, 16))
-        ax = fig.add_axes([0, 0, 1, 1])
-        ctx = RenderContext(doc)
-        out = MatplotlibBackend(ax)
-        Frontend(ctx, out).draw_layout(msp, finalize=True)
-        fig.savefig(png_path, dpi=150)
-        plt.close(fig)
-
-    return FileResponse(png_path, media_type="image/png")
-
-@app.get("/api/cad/download/{filename}")
-async def download_cad_dxf_endpoint(filename: str):
-    """Download generated DXF CAD file."""
-    import os
-    file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "cad_exports", filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="CAD file not found")
-    return FileResponse(file_path, filename=filename, media_type="application/dxf")
-
-@app.post("/api/gdrive/sync")
-async def sync_gdrive_endpoint():
-    """Manually trigger Google Drive knowledge sync."""
-    try:
-        from src.integrations.gdrive_manager import sync_drive_to_knowledge
-        return await sync_drive_to_knowledge()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-class GitHubPushRequest(BaseModel):
-    content: str
-    filename: str
-    commit_message: str = ""
-
-@app.post("/api/github/push")
-async def api_github_push(request: GitHubPushRequest):
-    """Push a file (like a bpy script or dxf) directly to the configured GitHub repository."""
-    from src.integrations.github import push_file_to_github
-    try:
-        result = await push_file_to_github(
-            content=request.content,
-            filename=request.filename,
-            commit_message=request.commit_message
+    else:
+        job = await job_service.enqueue(
+            workflow_id=f"webhook-{provider}", job_type=f"webhook.{provider}",
+            payload={"body_sha256": hashlib.sha256(body).hexdigest()},
+            idempotency_key=f"webhook:{provider}:{event_id}",
         )
-        if result.get("status") == "error":
-            raise HTTPException(status_code=400, detail=result.get("error"))
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ── MCP Server Mount ──────────────────────────────────────────────────────────
-
-try:
-    from src.core.mcp_server import mcp
-    app.mount("/mcp", mcp.http_app())
-    print("[MCP] FastMCP server mounted at /mcp")
-except Exception as mcp_err:
-    print(f"[MCP] Mount skipped (non-fatal): {mcp_err}")
-
-
+    return {"accepted": True, "job_id": job.id}

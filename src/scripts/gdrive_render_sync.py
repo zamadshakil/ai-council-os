@@ -9,8 +9,6 @@ Target Google Drive Folder ID: 1cBqJt2Yb0eRsV1ikWt0vbhSPABU4O2FV
 """
 
 import os
-import sys
-import time
 import subprocess
 import httpx
 from dotenv import load_dotenv
@@ -51,7 +49,7 @@ def upload_to_gdrive(file_path: str, folder_id: str = GDRIVE_FOLDER_ID) -> str:
         cmd = ["rclone", "copy", file_path, f"gdrive:{folder_id}"]
         subprocess.run(cmd, check=True)
         print("Upload to Google Drive SUCCESS via rclone!")
-    except Exception as e:
+    except Exception:
         print(f"GDrive Sync logged for folder {folder_id} (Local backup ready)")
     return f"https://drive.google.com/drive/folders/{folder_id}"
 
@@ -73,7 +71,7 @@ def execute_render_and_autostop():
     render_out = run_headless_blender("/workspace/greenhouse.blend", "/workspace/scene_script.py")
     
     # 2. Upload to Google Drive
-    gdrive_link = upload_to_gdrive(render_out, GDRIVE_FOLDER_ID)
+    upload_to_gdrive(render_out, GDRIVE_FOLDER_ID)
     
     # 3. Auto Stop Pod to save GPU cost
     auto_stop_pod(POD_ID)

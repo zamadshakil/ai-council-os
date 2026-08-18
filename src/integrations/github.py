@@ -1,7 +1,6 @@
 import os
 import base64
 import httpx
-from datetime import datetime
 
 GITHUB_PAT = os.getenv("GITHUB_PAT", "").strip()
 GITHUB_REPO = os.getenv("GITHUB_REPO", "").strip() # Format: "username/repo"

@@ -1,5 +1,3 @@
-export const instant = false;
-
 import { TaskDetailContent } from './client-content';
 
 export default async function TaskDetailPage({

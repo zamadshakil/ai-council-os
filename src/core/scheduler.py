@@ -1,110 +1,18 @@
-"""
-scheduler.py — Background Automation Scheduler
+"""Compatibility shim for the retired in-process APScheduler runtime.
 
-Runs all workflow pipelines on configurable intervals using APScheduler.
-No circular imports — receives tasks_store as a parameter.
-
-Every job checks the kill switch before executing.
-
-Jobs:
-1. Reddit Lead Prospector — every 60 minutes
-2. YouTube Comment Auto-Reply — every 30 minutes
-3. (YouTube Descriptions and Content Engine are manual-trigger only)
+Production schedules are evaluated by :mod:`src.worker` and persisted as
+``workflow_runs``. Keeping this module side-effect free prevents API imports
+from starting duplicate or out-of-scope jobs.
 """
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from src.core.kill_switch import is_killed
-
-scheduler = AsyncIOScheduler()
-
-# This will be set by the API server during startup
-_tasks_store: dict = {}
+from __future__ import annotations
 
 
-def set_tasks_store(store: dict):
-    """Called by server.py to inject the shared tasks_store without circular imports."""
-    global _tasks_store
-    _tasks_store = store
+def set_tasks_store(_: dict) -> None:
+    """Legacy no-op; in-memory workflow state is no longer supported."""
 
 
-async def _job_reddit_prospector():
-    """Scheduled job: Reddit Lead Prospector."""
-    if is_killed():
-        print("🛑 [Scheduler] Kill switch active. Skipping Reddit Prospector.")
-        return
-
-    from src.workflows.reddit_prospector import run_reddit_prospector
-    result = await run_reddit_prospector(_tasks_store)
-    print(f"📊 [Scheduler] Reddit Prospector result: {result}")
-
-
-async def _job_youtube_comments():
-    """Scheduled job: YouTube Comment Auto-Reply."""
-    if is_killed():
-        print("🛑 [Scheduler] Kill switch active. Skipping YouTube Comments.")
-        return
-
-    from src.workflows.youtube_comments import run_youtube_comment_workflow
-    result = await run_youtube_comment_workflow(_tasks_store)
-    print(f"📊 [Scheduler] YouTube Comments result: {result}")
-
-
-async def _job_instagram_comments():
-    """Scheduled job: Instagram Comment Auto-Reply (Client Priority #1)."""
-    if is_killed():
-        print("🛑 [Scheduler] Kill switch active. Skipping Instagram Comments.")
-        return
-
-    from src.integrations.instagram_commenter import run_instagram_commenter
-    result = await run_instagram_commenter(_tasks_store)
-    print(f"📊 [Scheduler] Instagram Comments result: {result}")
-
-
-def start_scheduler():
-    """
-    Start all background automation jobs.
-    Called during FastAPI startup.
-    """
-    # Instagram Comment Auto-Reply — every 5 minutes (Client Priority #1)
-    scheduler.add_job(
-        _job_instagram_comments,
-        'interval',
-        minutes=5,
-        id='instagram_comments',
-        name='Instagram Comment Auto-Reply',
-        replace_existing=True,
-        max_instances=3,
-        coalesce=True,
+def start_scheduler() -> None:
+    raise RuntimeError(
+        "The in-process scheduler was removed. Run `python -m src.worker` instead."
     )
-
-    # Reddit Prospector — every 60 minutes
-    scheduler.add_job(
-        _job_reddit_prospector,
-        'interval',
-        minutes=60,
-        id='reddit_prospector',
-        name='Reddit Lead Prospector',
-        replace_existing=True,
-        max_instances=3,
-        coalesce=True,
-    )
-
-    # YouTube Comment Auto-Reply — every 30 minutes
-    scheduler.add_job(
-        _job_youtube_comments,
-        'interval',
-        minutes=30,
-        id='youtube_comments',
-        name='YouTube Comment Auto-Reply',
-        replace_existing=True,
-        max_instances=3,
-        coalesce=True,
-    )
-
-    scheduler.start()
-    print("[Scheduler] Background automation scheduler started.")
-    print("   - Instagram Comments: every 5 min (ACTIVE)")
-    print("   - Reddit Prospector: every 60 min")
-    print("   - YouTube Comments: every 30 min")
-    print("   - YouTube Descriptions: manual trigger only")
-    print("   - Content Engine: manual trigger only")

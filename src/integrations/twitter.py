@@ -1,6 +1,6 @@
 from __future__ import annotations
-import os
 import tweepy
+from src.core.integration_context import integration_value
 
 """
 twitter.py — Twitter/X Publisher
@@ -18,11 +18,11 @@ Requires:
 
 async def _get_client() -> tweepy.Client:
     """Returns authenticated v2 client."""
-    api_key = os.environ.get("TWITTER_API_KEY")
-    api_secret = os.environ.get("TWITTER_API_SECRET")
-    access_token = os.environ.get("TWITTER_ACCESS_TOKEN")
-    access_secret = os.environ.get("TWITTER_ACCESS_SECRET")
-    bearer_token = os.environ.get("TWITTER_BEARER_TOKEN")
+    api_key = integration_value("TWITTER_API_KEY")
+    api_secret = integration_value("TWITTER_API_SECRET")
+    access_token = integration_value("TWITTER_ACCESS_TOKEN")
+    access_secret = integration_value("TWITTER_ACCESS_SECRET")
+    bearer_token = integration_value("TWITTER_BEARER_TOKEN")
     
     if not all([api_key, api_secret, access_token, access_secret]):
         raise RuntimeError("Missing one or more required Twitter credentials.")

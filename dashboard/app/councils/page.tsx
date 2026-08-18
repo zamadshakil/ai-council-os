@@ -1,198 +1,149 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
-import { runCouncil, fetchKnowledgeDocuments, KnowledgeDoc } from '../lib/api';
-import { Target, Users, BookOpen, Lightbulb, Paperclip, Send, Sparkles, FileText, Check } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { BookOpen, Check, FileText, Lightbulb, Send, Target, Users } from 'lucide-react';
+import { fetchKnowledgeDocuments, runCouncil } from '../lib/api';
+import { CouncilName, KnowledgeDoc, MutationEnvelope, Priority, Task } from '../lib/types';
 
-const COUNCILS = [
-  { id: 'sales', name: 'Sales Council', icon: Target, desc: 'Personalized B2B outreach and lead qualification.', process: 'Generate → Critique → Synthesize (min. 2 debate rounds)', recommended: true },
-  { id: 'content', name: 'Content Council', icon: BookOpen, desc: 'Platform-native social posts from source material.', process: 'Generate → Critique → Synthesize (min. 2 debate rounds)' },
-  { id: 'grant', name: 'Grant Council', icon: Lightbulb, desc: 'Scientific/technical grant proposal sections, exportable as DOCX.', process: 'Generate → Critique → Synthesize (min. 2 debate rounds)' },
-  { id: 'strategy', name: 'Strategy Council', icon: Users, desc: 'Market analysis and strategic recommendations.', process: 'Generate → Critique → Synthesize (min. 2 debate rounds)' },
+const COUNCILS: Array<{ id: CouncilName; name: string; description: string; threshold: number; icon: typeof Target }> = [
+  { id: 'grant', name: 'Grant Council', description: 'Draft and review grant sections using selected knowledge.', threshold: 88, icon: Lightbulb },
+  { id: 'sales', name: 'Sales Council', description: 'Score prospects and draft personalized outreach.', threshold: 85, icon: Target },
+  { id: 'content', name: 'Content Council', description: 'Create platform-specific content variants.', threshold: 85, icon: BookOpen },
 ];
 
-const SUGGESTIONS = [
-  "Draft a cold email sequence for VP of Engineering regarding our new API...",
-  "Analyze the recent Q3 earnings report and extract 3 key marketing angles...",
-  "Write a 1500-word SEO optimized blog post about AI in supply chain..."
-];
+function extractTask(result: MutationEnvelope<Task> | Task): Task {
+  return 'resource' in result ? result.resource : result;
+}
 
 export default function CouncilsPage() {
   const router = useRouter();
-  const [selected, setSelected] = useState(COUNCILS[0].id);
-  const [taskDesc, setTaskDesc] = useState('');
-  const [priority, setPriority] = useState('medium');
-  const [loading, setLoading] = useState(false);
-  const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
-  const [selectedDocs, setSelectedDocs] = useState<string[]>([]);
+  const searchParams = useSearchParams();
+  const requested = searchParams.get('select');
+  const initialCouncil = COUNCILS.some((item) => item.id === requested) ? requested as CouncilName : 'grant';
+  const [selected, setSelected] = useState<CouncilName>(initialCouncil);
+  const [taskDescription, setTaskDescription] = useState('');
+  const [priority, setPriority] = useState<Priority>('normal');
+  const [documents, setDocuments] = useState<KnowledgeDoc[]>([]);
+  const [selectedDocuments, setSelectedDocuments] = useState<string[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    fetchKnowledgeDocuments().then(setDocs).catch(() => {});
+    void fetchKnowledgeDocuments().then(setDocuments).catch(() => setDocuments([]));
   }, []);
 
-  const toggleDoc = (hash: string) => {
-    setSelectedDocs((prev) =>
-      prev.includes(hash) ? prev.filter((h) => h !== hash) : [...prev, hash]
-    );
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError('');
     try {
-      const res = await runCouncil({
+      const task = extractTask(await runCouncil({
         council: selected,
-        task_description: taskDesc,
-        context: {
-          priority,
-          ...(selectedDocs.length > 0 ? { selected_docs: selectedDocs } : {}),
-        },
-      });
-      if (res && res.task_id) {
-        router.push(`/approvals/${res.task_id}`);
-      } else {
-        router.push('/approvals');
-      }
-    } catch (error) {
-      console.error('Failed to run council', error);
-      setLoading(false);
+        task_description: taskDescription,
+        context: {},
+        priority,
+        selected_document_hashes: selected === 'grant' ? selectedDocuments : [],
+      }));
+      router.push(`/approvals/${task.task_id}`);
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Unable to start the council run.');
+    } finally {
+      setSubmitting(false);
     }
-  };
+  }
 
   return (
-    <div className="max-w-[960px] mx-auto flex flex-col gap-10 animate-in fade-in duration-300 ease-out fill-mode-both pb-16">
-      <div className="text-center pt-6 flex flex-col gap-3">
-        <h1 className="text-[32px] font-bold text-zinc-900 tracking-tight leading-none">Select Council</h1>
-        <p className="text-[15px] text-zinc-600 max-w-md mx-auto leading-relaxed">Choose a specialized AI council to route your task. Each council is optimized with specific agent roles.</p>
+    <div className="mx-auto max-w-5xl space-y-8 pb-16">
+      <div>
+        <p className="eyebrow">Structured multi-model review</p><h1 className="mt-2 text-3xl font-black tracking-tight text-slate-50">Run a council</h1>
+        <p className="mt-2 text-sm text-slate-400">Every run is persisted, scored by a critic, and held for human approval.</p>
       </div>
 
-      <form onSubmit={handleSubmit} className="flex flex-col gap-10">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {COUNCILS.map((c, idx) => {
-            const Icon = c.icon;
-            const isSelected = selected === c.id;
+      <form onSubmit={submit} className="space-y-8">
+        <div className="grid gap-4 md:grid-cols-3">
+          {COUNCILS.map((council) => {
+            const Icon = council.icon;
+            const active = selected === council.id;
             return (
-              <div
-                key={c.id}
-                onClick={() => setSelected(c.id)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(c.id); } }}
-                className={`relative p-6 rounded-[20px] cursor-pointer transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-600 ${
-                  isSelected 
-                    ? 'bg-white border-2 border-blue-600 shadow-[0_8px_30px_rgb(37,99,235,0.12)] scale-[1.01]' 
-                    : 'bg-white border border-zinc-200 hover:border-zinc-300 shadow-sm hover:shadow-floating hover:-translate-y-[2px]'
-                }`}
+              <button
+                key={council.id}
+                type="button"
+                onClick={() => setSelected(council.id)}
+                aria-pressed={active}
+                data-selected={active}
+                className="choice-card surface-card interactive-surface min-h-56 rounded-2xl border p-5 text-left"
               >
-                {c.recommended && (
-                  <span className="absolute -top-3 right-6 px-3 py-1 bg-gradient-to-r from-blue-600 to-violet-600 text-white text-[11px] font-bold tracking-widest uppercase rounded-[6px] shadow-sm flex items-center">
-                    <Sparkles className="w-3 h-3 mr-1.5" /> Recommended
-                  </span>
-                )}
-                <div className="flex items-start gap-5">
-                  <div className={`p-4 rounded-[12px] border transition-colors duration-200 ${isSelected ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-zinc-50 text-zinc-600 border-zinc-200'}`}>
-                    <Icon className="w-6 h-6" />
-                  </div>
-                  <div className="flex flex-col gap-1 flex-1 pt-1">
-                    <h3 className={`text-[16px] font-bold transition-colors ${isSelected ? 'text-zinc-900' : 'text-zinc-800'}`}>{c.name}</h3>
-                    <p className="text-[14px] text-zinc-600 mb-2">{c.desc}</p>
-                    <div className="flex items-center gap-4 text-[13px] font-semibold text-zinc-500">
-                      <span className="flex items-center"><Users className="w-4 h-4 mr-1.5 text-zinc-400"/> {c.process}</span>
-                    </div>
-                  </div>
+                <div className="flex items-center justify-between">
+                  <Icon className={`h-6 w-6 ${active ? 'text-cyan-300' : 'text-slate-500'}`} />
+                  <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${active ? 'border-cyan-200/40 bg-cyan-200/15 text-cyan-100' : 'border-white/5 bg-white/5 text-slate-400'}`}>{active ? 'Selected' : `Threshold ${council.threshold}`}</span>
                 </div>
-              </div>
+                <h2 className="mt-4 text-lg font-bold text-slate-50">{council.name}</h2>
+                <p className={`mt-2 text-sm leading-6 ${active ? 'text-slate-200' : 'text-slate-300'}`}>{council.description}</p>
+                <p className={`mt-4 flex items-center gap-1.5 text-xs font-semibold ${active ? 'text-cyan-100' : 'text-slate-400'}`}><Users className="h-3.5 w-3.5" /> Generator + critic, up to 3 drafts</p>
+              </button>
             );
           })}
         </div>
 
-        <div className="flex flex-col gap-4">
-          <div className="flex items-center justify-between px-1">
-            <h2 className="text-[18px] font-semibold text-zinc-900 tracking-tight">Task Prompt</h2>
-            <div className="flex items-center gap-2">
-              <span className="text-[13px] font-semibold text-zinc-600 px-3 py-1 rounded-[6px] bg-white border border-zinc-200 shadow-sm">
-                Priority: Normal
-              </span>
-            </div>
+        <div className="surface-card rounded-2xl p-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <label htmlFor="task-description" className="font-bold text-slate-100">Task instructions</label>
+            <label className="flex items-center gap-2 text-sm font-medium text-slate-400">
+              Priority
+              <select value={priority} onChange={(event) => setPriority(event.target.value as Priority)} className="input-shell rounded-lg px-3 py-2 text-slate-100">
+                <option value="normal">Normal</option>
+                <option value="high">High</option>
+              </select>
+            </label>
           </div>
-          
-          <div className="bg-white p-2 rounded-[24px] shadow-premium ring-1 ring-zinc-200 focus-within:ring-2 focus-within:ring-blue-600 focus-within:shadow-floating transition-all duration-200 relative">
-            <textarea
-              value={taskDesc}
-              onChange={(e) => setTaskDesc(e.target.value)}
-              required
-              placeholder="What would you like the council to execute? Be as specific as possible..."
-              className="w-full bg-transparent text-[16px] p-6 pb-20 min-h-[240px] resize-none outline-none placeholder:text-zinc-500 text-zinc-900 leading-relaxed font-medium"
-            />
-            
-            <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between">
-              <div className="flex gap-2">
-              </div>
-              <button
-                type="submit"
-                disabled={loading || !taskDesc}
-                className="h-11 px-8 bg-zinc-900 text-white font-semibold text-[14px] rounded-[12px] shadow-[0_4px_12px_rgba(24,24,27,0.1)] hover:bg-zinc-800 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center"
-              >
-                {loading ? 'Dispatching...' : 'Run Council'}
-                {!loading && <Send className="w-4 h-4 ml-2" />}
-              </button>
-            </div>
-          </div>
+          <textarea
+            id="task-description"
+            required
+            minLength={3}
+            maxLength={50_000}
+            value={taskDescription}
+            onChange={(event) => setTaskDescription(event.target.value)}
+            placeholder="Describe the exact output, audience, constraints, and source information."
+            className="mt-4 min-h-56 w-full resize-y input-shell rounded-xl p-4 text-sm leading-6 text-slate-100 outline-none focus:border-cyan-300/40 focus:ring-2 focus:ring-cyan-300/10"
+          />
 
-          {docs.length > 0 && (
-            <div className="bg-white p-5 rounded-[20px] border border-zinc-200 shadow-sm flex flex-col gap-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-[14px] font-bold text-zinc-900 flex items-center gap-2">
-                  <FileText className="w-4 h-4 text-zinc-400" /> Knowledge Base Documents
-                </h3>
-                <span className="text-[12px] font-semibold text-zinc-400">
-                  {selectedDocs.length === 0 ? 'Searching all documents' : `${selectedDocs.length} selected`}
-                </span>
+          {selected === 'grant' && (
+            <div className="mt-5 border-t border-white/8 pt-5">
+              <div className="flex items-center gap-2">
+                <FileText className="h-4 w-4 text-cyan-300" />
+                <h3 className="text-sm font-bold text-slate-200">Allowed knowledge documents</h3>
               </div>
-              <p className="text-[13px] text-zinc-500 -mt-1">
-                Leave nothing selected to search your entire knowledge base, or pick specific documents to keep this task focused as your library grows.
-              </p>
-              <div className="flex flex-col gap-1.5 max-h-[180px] overflow-y-auto">
-                {docs.map((doc) => {
-                  const isChecked = selectedDocs.includes(doc.doc_hash);
-                  return (
-                    <button
-                      key={doc.doc_hash}
-                      type="button"
-                      onClick={() => toggleDoc(doc.doc_hash)}
-                      className={`flex items-center gap-3 px-3 py-2 rounded-[10px] border text-left transition-all ${
-                        isChecked
-                          ? 'bg-blue-50 border-blue-200 text-blue-800'
-                          : 'bg-zinc-50 border-zinc-100 text-zinc-600 hover:border-zinc-200'
-                      }`}
-                    >
-                      <span className={`w-4 h-4 rounded-[5px] border flex items-center justify-center shrink-0 ${isChecked ? 'bg-blue-600 border-blue-600' : 'bg-white border-zinc-300'}`}>
-                        {isChecked && <Check className="w-3 h-3 text-white" />}
-                      </span>
-                      <span className="text-[13px] font-medium truncate">{doc.filename}</span>
-                      {typeof doc.chunk_count === 'number' && (
-                        <span className="text-[11px] text-zinc-400 ml-auto shrink-0">{doc.chunk_count} chunks</span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+              <p className="mt-1 text-xs text-slate-500">Only selected documents can be retrieved for this Grant Council run.</p>
+              {documents.length === 0 ? (
+                <p className="mt-3 rounded-lg bg-white/5 p-3 text-sm text-slate-500">No ready documents are available in Knowledge.</p>
+              ) : (
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  {documents.map((document) => {
+                    const active = selectedDocuments.includes(document.doc_hash);
+                    return (
+                      <button
+                        key={document.doc_hash}
+                        type="button"
+                        onClick={() => setSelectedDocuments((current) => active ? current.filter((hash) => hash !== document.doc_hash) : [...current, document.doc_hash])}
+                        className={`flex items-center gap-3 rounded-xl border p-3 text-left text-sm ${active ? 'border-cyan-300/30 bg-cyan-300/8 text-cyan-100' : 'border-white/10 text-slate-400'}`}
+                      >
+                        <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border ${active ? 'border-cyan-300 bg-cyan-300' : 'border-white/20'}`}>{active && <Check className="h-3.5 w-3.5 text-[#04111b]" />}</span>
+                        <span className="truncate font-medium">{document.filename}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-2 px-1">
-            <span className="text-[13px] font-semibold text-zinc-500 py-1 mr-2">Suggestions:</span>
-            {SUGGESTIONS.map((suggestion, idx) => (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => setTaskDesc(suggestion)}
-                className="text-[13px] font-semibold text-zinc-600 bg-white border border-zinc-200 shadow-sm hover:shadow-floating hover:border-zinc-300 hover:-translate-y-[1px] hover:text-zinc-900 active:scale-[0.98] h-8 px-4 rounded-[8px] transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-zinc-800"
-              >
-                {suggestion.slice(0, 35)}...
-              </button>
-            ))}
+          {error && <p role="alert" className="mt-4 rounded-lg border border-rose-300/20 bg-rose-400/8 p-3 text-sm text-rose-200">{error}</p>}
+          <div className="mt-6 flex justify-end">
+            <button disabled={submitting || taskDescription.trim().length < 3} className="flex h-11 items-center gap-2 rounded-xl bg-cyan-300 px-6 text-sm font-black text-[#04111b] hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50">
+              {submitting ? 'Queueing…' : 'Run council'}
+              {!submitting && <Send className="h-4 w-4" />}
+            </button>
           </div>
         </div>
       </form>

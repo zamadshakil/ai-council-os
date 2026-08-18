@@ -15,7 +15,6 @@ reviewed by the Critic for personalization quality, tone, and strategy.
 from __future__ import annotations
 
 from src.core.council_base import BaseCouncil
-from src.core.memory import get_relevant_guidelines
 
 
 class SalesCouncil(BaseCouncil):
@@ -24,6 +23,13 @@ class SalesCouncil(BaseCouncil):
     council_name = "sales"
     confidence_threshold = 85.0
     max_iterations = 3
+    critic_categories = {
+        "personalization": 20,
+        "value_proposition": 20,
+        "tone": 20,
+        "call_to_action": 20,
+        "length": 20,
+    }
 
     def get_generator_prompt(self, state: dict) -> list[dict]:
         """
@@ -39,6 +45,7 @@ class SalesCouncil(BaseCouncil):
         context = state.get("context", {})
         history = state.get("debate_history", [])
         iteration = state.get("iteration", 0)
+        channel = context.get("channel", "outreach")
 
         # Build context section
         context_text = ""
@@ -55,16 +62,26 @@ class SalesCouncil(BaseCouncil):
                     last_critique = msg["content"]
                     break
 
+        channel_rules = (
+            "- This is a Reddit reply: answer the post's problem first, sound community-native, "
+            "stay under 200 words, and never include a forced pitch or unsolicited CTA.\n"
+            if channel == "reddit"
+            else (
+                "- Lead with value, not a pitch\n"
+                "- Keep it under 150 words\n"
+                "- No generic openings like 'I hope this finds you well'\n"
+                "- Include a clear, low-friction CTA\n"
+            )
+        )
         system_prompt = (
             "You are the Sales Generator — an expert B2B outreach specialist.\n\n"
             "Your job is to craft highly personalized, compelling outreach messages "
             "that feel human-written, not templated.\n\n"
             "RULES:\n"
             "- Reference specific details about the prospect's company/role\n"
-            "- Lead with value, not a pitch\n"
-            "- Keep it under 150 words\n"
-            "- No generic openings like 'I hope this finds you well'\n"
-            "- Include a clear, low-friction CTA\n"
+            f"{channel_rules}"
+            "Return the message in the structured content field. Return explicit assumptions "
+            "and warnings as lists; use empty lists when there are none.\n"
         )
 
         user_content = f"TASK:\n{task}\n\n"
@@ -101,6 +118,7 @@ class SalesCouncil(BaseCouncil):
         draft = state.get("current_draft", "")
         task = state.get("task_description", "")
         context = state.get("context", {})
+        channel = context.get("channel", "outreach")
 
         context_text = ""
         if context:
@@ -115,13 +133,12 @@ class SalesCouncil(BaseCouncil):
             "1. PERSONALIZATION: Does it reference specific prospect details?\n"
             "2. VALUE PROP: Is the benefit to the prospect crystal clear?\n"
             "3. TONE: Professional but human? Not salesy or robotic?\n"
-            "4. CTA: Clear, specific, low-friction call to action?\n"
-            "5. LENGTH: Concise? Under 150 words?\n\n"
-            "FORMAT YOUR RESPONSE AS:\n"
-            "- Per-criteria scores and specific feedback\n"
-            "- What's working well\n"
-            "- What needs improvement (be specific)\n"
-            "- End with: CONFIDENCE: X/100\n\n"
+            f"4. CTA: {'No forced promotion or unsolicited CTA?' if channel == 'reddit' else 'Clear, specific, low-friction call to action?'}\n"
+            f"5. LENGTH: Concise? Under {'200' if channel == 'reddit' else '150'} words?\n\n"
+            "Return the required structured critic object. category_scores must contain "
+            "exactly these keys, each scored from 0 to 100: personalization, "
+            "value_proposition, tone, call_to_action, length. Include concrete "
+            "strengths, weaknesses, and required edits.\n\n"
             "Score 85+ means ready to send. Below 85 means it needs revision.\n"
             "Be tough but fair. Generic outreach should score below 60."
         )
@@ -133,7 +150,7 @@ class SalesCouncil(BaseCouncil):
         if context_text:
             user_content += f"PROSPECT CONTEXT:\n{context_text}\n\n"
 
-        user_content += f"DRAFT TO REVIEW:\n{draft}\n\nProvide your critique and CONFIDENCE score:"
+        user_content += f"DRAFT TO REVIEW:\n{draft}\n\nProvide the structured critique:"
 
         return [
             {"role": "system", "content": system_prompt},
