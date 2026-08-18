@@ -4,12 +4,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from src.core.integration_context import use_integration_configuration
 from src.integrations import hubspot
 
 
 @pytest.mark.asyncio
 async def test_verify_connection_requires_contact_read_and_write(monkeypatch):
-    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "private-token")
+    monkeypatch.delenv("HUBSPOT_ACCESS_TOKEN", raising=False)
     request = AsyncMock(return_value={
         "hubId": 42,
         "appId": 7,
@@ -20,7 +21,8 @@ async def test_verify_connection_requires_contact_read_and_write(monkeypatch):
     })
     monkeypatch.setattr(hubspot, "_request", request)
 
-    result = await hubspot.verify_connection()
+    with use_integration_configuration({"HUBSPOT_ACCESS_TOKEN": "private-token"}):
+        result = await hubspot.verify_connection()
 
     assert result["hub_id"] == "42"
     assert result["scopes"] == sorted(hubspot.REQUIRED_SCOPES)

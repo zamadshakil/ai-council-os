@@ -8,12 +8,13 @@ retry can recover without creating duplicate timeline entries.
 
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+
+from src.core.integration_context import integration_value
 
 
 BASE_URL = "https://api.hubapi.com"
@@ -34,7 +35,7 @@ class HubSpotIntegrationError(RuntimeError):
 
 
 def _get_token() -> str:
-    return os.getenv("HUBSPOT_ACCESS_TOKEN", "").strip()
+    return integration_value("HUBSPOT_ACCESS_TOKEN", "").strip()
 
 
 def is_configured() -> bool:
