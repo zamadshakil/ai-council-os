@@ -24,6 +24,12 @@
 
 	log {
 		output stdout
-		format json
+		format filter {
+			request>headers>X-Csrf-Token replace REDACTED
+			request>headers>X-Service-Token replace REDACTED
+			request>headers>X-Telegram-Bot-Api-Secret-Token replace REDACTED
+			request>headers>X-Hub-Signature-256 replace REDACTED
+			request>headers>X-Webhook-Secret replace REDACTED
+		}
 	}
 }
