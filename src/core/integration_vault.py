@@ -18,6 +18,7 @@ from sqlalchemy import delete, select
 
 from src.core.database import async_session
 from src.core.integration_models import (
+    CouncilIntegrationModel,
     IntegrationConnectionModel,
     WorkflowIntegrationModel,
 )
@@ -92,15 +93,35 @@ PROVIDERS: dict[str, ProviderSpec] = {
     "discord": ProviderSpec("discord", "Discord", "Approved Discord webhook publishing.", (
         CredentialField("webhook_url", "Webhook URL", "DISCORD_WEBHOOK_URL"),
     )),
+    "hubspot": ProviderSpec(
+        "hubspot",
+        "HubSpot CRM",
+        "Sync approved Sales Council leads to HubSpot contacts with an audited outreach note.",
+        (
+            CredentialField(
+                "access_token",
+                "Private app access token",
+                "HUBSPOT_ACCESS_TOKEN",
+                help_text=(
+                    "Create a HubSpot private app with crm.objects.contacts.read "
+                    "and crm.objects.contacts.write scopes."
+                ),
+            ),
+        ),
+    ),
 }
 
 WORKFLOW_ALLOWED_PROVIDERS: dict[str, set[str]] = {
     "telegram_control": {"telegram", "openrouter"},
     "youtube_comments": {"youtube", "openrouter"},
-    "reddit_prospector": {"reddit", "openrouter"},
+    "reddit_prospector": {"reddit", "openrouter", "hubspot"},
     "youtube_descriptions": {"youtube", "openrouter"},
     "content_engine": {"openrouter", "x", "linkedin", "meta", "discord"},
     "instagram_comments": {"openrouter", "meta"},
+}
+
+COUNCIL_ALLOWED_PROVIDERS: dict[str, set[str]] = {
+    "sales": {"hubspot"},
 }
 
 WORKFLOW_REQUIRED_PROVIDERS: dict[str, set[str]] = {
@@ -211,10 +232,16 @@ async def list_connections() -> list[dict[str, Any]]:
     async with async_session() as session:
         rows = (await session.execute(select(IntegrationConnectionModel))).scalars().all()
         links = (await session.execute(select(WorkflowIntegrationModel))).scalars().all()
+        council_links = (
+            await session.execute(select(CouncilIntegrationModel))
+        ).scalars().all()
     by_provider = {row.provider: row for row in rows}
     workflows: dict[str, list[str]] = {}
     for link in links:
         workflows.setdefault(link.provider, []).append(link.workflow_id)
+    councils: dict[str, list[str]] = {}
+    for link in council_links:
+        councils.setdefault(link.provider, []).append(link.council_id)
     result: list[dict[str, Any]] = []
     for item in catalog_shape():
         row = by_provider.get(item["id"])
@@ -227,6 +254,7 @@ async def list_connections() -> list[dict[str, Any]]:
             "verified_at": row.verified_at.isoformat() if row and row.verified_at else None,
             "version": row.version if row else 0,
             "linked_workflows": sorted(workflows.get(item["id"], [])),
+            "linked_councils": sorted(councils.get(item["id"], [])),
         })
     return result
 
@@ -296,6 +324,14 @@ async def delete_credentials(provider: str) -> bool:
                 definition.credential_status = "untested"
                 definition.is_enabled = False
                 definition.version += 1
+        # Explicitly remove links so behavior is consistent on SQLite, where
+        # foreign-key cascades are not guaranteed to be enabled by every tool.
+        await session.execute(delete(WorkflowIntegrationModel).where(
+            WorkflowIntegrationModel.provider == provider
+        ))
+        await session.execute(delete(CouncilIntegrationModel).where(
+            CouncilIntegrationModel.provider == provider
+        ))
         await session.delete(row)
         await session.commit()
         return True
@@ -414,6 +450,76 @@ async def set_workflow_links(workflow_id: str, providers: list[str]) -> list[str
             definition.version += 1
         await session.commit()
     return normalized
+
+
+async def set_council_links(council_id: str, providers: list[str]) -> list[str]:
+    """Replace reusable provider links for a council approval destination."""
+
+    council_id = council_id.strip().lower()
+    allowed = COUNCIL_ALLOWED_PROVIDERS.get(council_id)
+    if allowed is None:
+        raise ValueError("Unsupported council integration target")
+    normalized = list(dict.fromkeys(providers))
+    invalid = sorted(set(normalized) - allowed)
+    if invalid:
+        raise ValueError(
+            f"Providers are not supported by this council: {', '.join(invalid)}"
+        )
+    async with async_session() as session:
+        provider_rows = (await session.execute(
+            select(
+                IntegrationConnectionModel.provider,
+                IntegrationConnectionModel.status,
+            ).where(
+                IntegrationConnectionModel.provider.in_(normalized)
+            )
+        )).all() if normalized else []
+        configured = {provider for provider, _ in provider_rows}
+        not_configured = sorted(set(normalized) - configured)
+        if not_configured:
+            raise ValueError(
+                f"Configure providers before linking: {', '.join(not_configured)}"
+            )
+        unverified = sorted(
+            provider for provider, status in provider_rows if status != "verified"
+        )
+        if unverified:
+            raise ValueError(
+                f"Verify providers before linking: {', '.join(unverified)}"
+            )
+        await session.execute(delete(CouncilIntegrationModel).where(
+            CouncilIntegrationModel.council_id == council_id
+        ))
+        session.add_all([
+            CouncilIntegrationModel(council_id=council_id, provider=provider)
+            for provider in normalized
+        ])
+        await session.commit()
+    return normalized
+
+
+async def provider_linked_to_target(
+    provider: str,
+    *,
+    workflow_id: str = "",
+    council_id: str = "",
+) -> bool:
+    """Return whether a provider remains explicitly linked at point of use."""
+
+    async with async_session() as session:
+        if workflow_id:
+            row = await session.get(
+                WorkflowIntegrationModel,
+                {"workflow_id": workflow_id, "provider": provider},
+            )
+            return row is not None
+        if council_id:
+            row = await session.get(
+                CouncilIntegrationModel,
+                {"council_id": council_id, "provider": provider},
+            )
+            return row is not None
+    return False
 
 
 async def workflow_environment(workflow_id: str) -> dict[str, str]:

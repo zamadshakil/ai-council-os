@@ -38,6 +38,8 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 After the first login, use **Settings & Integrations** to add each provider. The browser can write a replacement credential set but can never read stored values back. Verify the provider, then link it to a compatible workflow. Replacing or removing a connection automatically disables linked workflows until their required connections verify again. Environment-based credentials remain only as a first-bootstrap fallback; the portal vault is the normal operating path. Configure RunPod here if Blender Manager is needed. Configure Meta with an Instagram professional account and comment-management permission before enabling Instagram Comment Replies.
 
+For HubSpot, create a private app with `crm.objects.contacts.read` and `crm.objects.contacts.write`, then save its access token in the HubSpot portal card. Verification checks those scopes before the connection can be linked. HubSpot is optional: link it to **Sales Council approved leads** or **Reddit Lead Prospector** only when approved outputs should sync. A Sales run must contain an explicit valid contact email; otherwise approval succeeds and CRM synchronization is visibly skipped. The sync upserts by email and uses a durable task marker to avoid duplicate outreach notes during retries.
+
 ### RunPod Blender agent
 
 Pod power control and template execution are separate security boundaries. The RunPod integration stores a rotated RunPod API key plus a different, random `BLENDER_AGENT_TOKEN` of at least 32 characters. Put the same agent token on the pod, expose port `8001/http` in its RunPod template, and keep the `.blend` source on the persistent `/workspace` volume.

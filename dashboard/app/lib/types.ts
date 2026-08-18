@@ -199,6 +199,7 @@ export interface IntegrationConnection {
   verified_at: string | null;
   version: number;
   linked_workflows: string[];
+  linked_councils: string[];
 }
 
 export interface KnowledgeSearchResult {

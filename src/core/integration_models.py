@@ -35,3 +35,17 @@ class WorkflowIntegrationModel(Base):
     )
     purpose: Mapped[str] = mapped_column(String(80), default="primary")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CouncilIntegrationModel(Base):
+    """Reusable provider links for approval-driven council destinations."""
+
+    __tablename__ = "council_integrations"
+
+    council_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    provider: Mapped[str] = mapped_column(
+        ForeignKey("integration_connections.provider", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    purpose: Mapped[str] = mapped_column(String(80), default="approved_output")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

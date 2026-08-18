@@ -30,6 +30,7 @@ from src.core.integration_models import WorkflowIntegrationModel
 from src.core.integration_vault import (
     VaultConfigurationError,
     decrypted_provider_env,
+    provider_linked_to_target,
     workflow_environment,
     workflow_connections_verified,
 )
@@ -101,6 +102,7 @@ class DurableWorker:
         self.register("publish.youtube_description", self._publish_youtube_description)
         self.register("publish.social", self._publish_social)
         self.register("publish.instagram_comment", self._publish_instagram_comment)
+        self.register("crm.hubspot_sync", self._sync_hubspot_sales)
         self.register("blender.template_repair", self._run_blender_template_job)
         for provider in ("telegram", "youtube", "meta"):
             self.register(f"webhook.{provider}", self._accept_webhook)
@@ -162,6 +164,8 @@ class DurableWorker:
                 return await decrypted_provider_env("openrouter")
             if claim.job_type == "blender.template_repair":
                 return await decrypted_provider_env("runpod")
+            if claim.job_type == "crm.hubspot_sync":
+                return await decrypted_provider_env("hubspot")
             configuration = await workflow_environment(claim.workflow_id)
             if claim.job_type.startswith("workflow."):
                 try:
@@ -286,6 +290,28 @@ class DurableWorker:
                     await decrypted_provider_env("runpod")
                 except VaultConfigurationError:
                     return False, "RunPod credentials are not verified"
+                return True, ""
+            if claim.job_type == "crm.hubspot_sync":
+                payload = claim.payload or {}
+                linked = await provider_linked_to_target(
+                    "hubspot",
+                    workflow_id=(
+                        str(payload.get("target_id") or "")
+                        if payload.get("target_type") == "workflow"
+                        else ""
+                    ),
+                    council_id=(
+                        str(payload.get("target_id") or "")
+                        if payload.get("target_type") == "council"
+                        else ""
+                    ),
+                )
+                if not linked:
+                    return False, "HubSpot is no longer linked to this target"
+                try:
+                    await decrypted_provider_env("hubspot")
+                except VaultConfigurationError:
+                    return False, "HubSpot credentials are not verified"
                 return True, ""
             definition = await session.get(WorkflowDefinitionModel, claim.workflow_id)
             if not definition:
@@ -523,6 +549,150 @@ class DurableWorker:
             if not await self._credentials_current(session, definition):
                 raise RuntimeError("Workflow credentials are not verified")
 
+    async def _assert_hubspot_write_allowed(self, payload: dict[str, Any]) -> None:
+        """Re-check kill switch, verified secret, and the explicit target link."""
+
+        async with self.jobs.sessions() as session:
+            switch = await session.get(KillSwitchModel, 1)
+            if switch and switch.is_active:
+                raise RuntimeError("Global kill switch activated before HubSpot write")
+        target_type = str(payload.get("target_type") or "")
+        target_id = str(payload.get("target_id") or "")
+        linked = await provider_linked_to_target(
+            "hubspot",
+            workflow_id=target_id if target_type == "workflow" else "",
+            council_id=target_id if target_type == "council" else "",
+        )
+        if not linked:
+            raise RuntimeError("HubSpot is no longer linked to this approval target")
+        await decrypted_provider_env("hubspot")
+
+    async def _sync_hubspot_sales(
+        self,
+        payload: dict[str, Any],
+        claim: JobClaim,
+    ) -> dict[str, Any]:
+        """Synchronize an approved sales lead while preserving task approval state."""
+
+        await self._assert_hubspot_write_allowed(payload)
+        try:
+            async with self.jobs.sessions() as session:
+                task = await session.get(TaskModel, payload["task_id"])
+                attempt = await session.get(
+                    PublicationAttemptModel, payload["publication_attempt_id"]
+                )
+                if not task or not attempt:
+                    raise ValueError("HubSpot task or synchronization attempt does not exist")
+                if attempt.status == "synced":
+                    return {
+                        "task_id": task.task_id,
+                        "status": "synced",
+                        **(attempt.response_payload or {}),
+                    }
+                attempt.status = "syncing"
+                attempt.error = ""
+                task.context = {
+                    **(task.context or {}),
+                    "hubspot_sync_status": "syncing",
+                    "hubspot_sync_message": "Synchronizing the approved lead with HubSpot.",
+                }
+                task.version += 1
+                task_payload = task.to_dict()
+                await session.commit()
+
+            # This is intentionally repeated immediately before the provider
+            # call so a kill or unlink racing with the state change wins.
+            await self._assert_hubspot_write_allowed(payload)
+            from src.integrations.hubspot import sync_approved_sales_task
+
+            result = await sync_approved_sales_task(task_payload)
+            if result.get("status") != "synced":
+                raise RuntimeError("HubSpot did not confirm the approved lead sync")
+
+            async with self.jobs.sessions() as session:
+                task = await session.get(TaskModel, payload["task_id"])
+                attempt = await session.get(
+                    PublicationAttemptModel, payload["publication_attempt_id"]
+                )
+                assert task is not None and attempt is not None
+                attempt.status = "synced"
+                attempt.response_payload = result
+                attempt.external_id = str(result.get("hubspot_contact_id") or "")
+                attempt.error = ""
+                task.context = {
+                    **(task.context or {}),
+                    "hubspot_sync_status": "synced",
+                    "hubspot_sync_message": "Approved lead synchronized with HubSpot.",
+                    "hubspot_contact_id": str(result.get("hubspot_contact_id") or ""),
+                    "hubspot_note_id": str(result.get("hubspot_note_id") or ""),
+                    "hubspot_synced_at": utcnow().isoformat(),
+                }
+                task.version += 1
+                session.add(OutboxEventModel(
+                    topic="telegram.publish_success",
+                    payload={
+                        "workflow_name": "Sales Council",
+                        "platform": "HubSpot CRM",
+                        "details": f"Approved task {task.task_id} synchronized",
+                    },
+                    idempotency_key=f"telegram:hubspot-synced:{attempt.id}",
+                ))
+                await record_audit(
+                    session,
+                    action="hubspot.sync_succeeded",
+                    resource_type="task",
+                    resource_id=task.task_id,
+                    details={
+                        "attempt_id": attempt.id,
+                        "contact_id": attempt.external_id,
+                        "note_replayed": bool(result.get("note_replayed")),
+                    },
+                )
+                await session.commit()
+            return {"task_id": payload["task_id"], **result}
+        except Exception as exc:
+            terminal = claim.attempts >= claim.max_attempts
+            message = str(exc)[:1000]
+            async with self.jobs.sessions() as session:
+                task = await session.get(TaskModel, payload.get("task_id", ""))
+                attempt = await session.get(
+                    PublicationAttemptModel,
+                    payload.get("publication_attempt_id", ""),
+                )
+                if attempt:
+                    attempt.status = "failed" if terminal else "retrying"
+                    attempt.error = message
+                if task:
+                    task.context = {
+                        **(task.context or {}),
+                        "hubspot_sync_status": "failed" if terminal else "retrying",
+                        "hubspot_sync_message": (
+                            "HubSpot synchronization failed after all retries. The task "
+                            "remains approved; review the integration and synchronize again."
+                            if terminal
+                            else "HubSpot synchronization will retry automatically."
+                        ),
+                    }
+                    task.version += 1
+                    if terminal:
+                        await record_audit(
+                            session,
+                            action="hubspot.sync_failed",
+                            resource_type="task",
+                            resource_id=task.task_id,
+                            details={"attempt_id": attempt.id if attempt else "", "error": message},
+                        )
+                        session.add(OutboxEventModel(
+                            topic="telegram.error",
+                            payload={
+                                "workflow_name": "HubSpot CRM sync",
+                                "error": message,
+                            },
+                            idempotency_key=f"telegram:hubspot-failed:{payload.get('publication_attempt_id', '')}",
+                        ))
+                await session.commit()
+            raise
+
     async def _begin_publication(self, payload: dict[str, Any], workflow_id: str) -> None:
         await self._assert_write_allowed(workflow_id)
         async with self.jobs.sessions() as session:
@@ -619,7 +789,7 @@ class DurableWorker:
             await session.commit()
 
     async def _reconcile_abandoned_publications(self) -> None:
-        """Make a crashed one-shot write visible without risking a duplicate post."""
+        """Make a crashed external write visible and recoverable by its safety policy."""
         now_monotonic = time.monotonic()
         if now_monotonic - self._last_reconcile_check < 30:
             return
@@ -635,6 +805,7 @@ class DurableWorker:
                         "publish.youtube_description",
                         "publish.social",
                         "publish.instagram_comment",
+                        "crm.hubspot_sync",
                     )),
                 )
                 .order_by(WorkflowRunModel.finished_at.desc())
@@ -646,9 +817,12 @@ class DurableWorker:
                 if not attempt_id:
                     continue
                 attempt = await session.get(PublicationAttemptModel, attempt_id)
-                if attempt and attempt.status == "publishing":
-                    candidates.append(payload)
+                if attempt and attempt.status in {"publishing", "syncing"}:
+                    candidates.append({**payload, "job_type": job.job_type})
         for payload in candidates:
+            if payload.pop("job_type", "") == "crm.hubspot_sync":
+                await self._fail_abandoned_hubspot_sync(payload)
+                continue
             await self._fail_publication(
                 payload,
                 RuntimeError(
@@ -656,6 +830,38 @@ class DurableWorker:
                     "one allowed external-write attempt; automatic replay was blocked"
                 ),
             )
+
+    async def _fail_abandoned_hubspot_sync(self, payload: dict[str, Any]) -> None:
+        """Close an expired final CRM attempt without changing approval state."""
+
+        message = (
+            "HubSpot synchronization stopped during its final attempt. The approved "
+            "task was preserved; verify the contact in HubSpot before synchronizing again."
+        )
+        async with self.jobs.sessions() as session:
+            task = await session.get(TaskModel, payload.get("task_id", ""))
+            attempt = await session.get(
+                PublicationAttemptModel,
+                payload.get("publication_attempt_id", ""),
+            )
+            if attempt:
+                attempt.status = "failed"
+                attempt.error = message
+            if task:
+                task.context = {
+                    **(task.context or {}),
+                    "hubspot_sync_status": "failed",
+                    "hubspot_sync_message": message,
+                }
+                task.version += 1
+                await record_audit(
+                    session,
+                    action="hubspot.sync_failed",
+                    resource_type="task",
+                    resource_id=task.task_id,
+                    details={"reason": "worker_stopped_on_final_attempt"},
+                )
+            await session.commit()
 
     async def _publish_youtube_comment(self, payload: dict[str, Any], _: JobClaim) -> dict[str, Any]:
         try:

@@ -102,6 +102,7 @@ Follow [DEPLOYMENT.md](./DEPLOYMENT.md). Deployment is blocked until every expos
 - `PUT/DELETE /api/integrations/{provider}/credentials`
 - `POST /api/integrations/connections/{provider}/verify`
 - `PATCH /api/workflows/{id}/integrations`
+- `PATCH /api/councils/{id}/integrations`
 - `POST /api/knowledge/upload`, `GET /api/knowledge/search`
 - `GET /api/blender/pods`, `POST /api/blender/pods/{id}/actions`
 - `GET/POST /api/blender/jobs`, `GET /api/blender/jobs/{id}`

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import func, select
+from unittest.mock import AsyncMock
 
 from src.api import server
 from src.core.approvals import ApprovalService
@@ -23,6 +24,7 @@ from src.core.models import (
     WorkflowRunModel,
 )
 from src.worker import DurableWorker
+from src.core.jobs import JobClaim
 from src.workflows.config.reddit_config import SUBREDDITS
 
 
@@ -246,6 +248,170 @@ async def test_duplicate_approve_stages_only_one_publication_attempt_and_job(
     assert jobs[0].payload["publication_attempt_id"] == attempts[0].id
     assert jobs[0].job_type == "publish.youtube_comment"
     assert jobs[0].max_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_sales_approval_stages_one_linked_hubspot_sync(
+    session_factory, monkeypatch
+):
+    monkeypatch.setattr(server, "async_session", session_factory)
+    monkeypatch.setattr(
+        server.integration_vault,
+        "provider_linked_to_target",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        server.integration_vault,
+        "decrypted_provider_env",
+        AsyncMock(return_value={"HUBSPOT_ACCESS_TOKEN": "scoped-secret"}),
+    )
+    approvals = ApprovalService(session_factory=session_factory)
+    async with session_factory() as session:
+        session.add_all([
+            TaskModel(
+                task_id="hubspot-task",
+                council="sales",
+                status="awaiting_approval",
+                task_description="Draft personalized outreach",
+                final_output="Approved personalized outreach",
+                context={"contact_email": "lead@example.com"},
+            ),
+            ApprovalModel(
+                id="hubspot-approval",
+                resource_type="task",
+                resource_id="hubspot-task",
+                status="awaiting_approval",
+                version=1,
+            ),
+        ])
+        await session.commit()
+
+    await approvals.act(
+        "hubspot-approval",
+        action="approve",
+        expected_version=1,
+        idempotency_key="acceptance:hubspot:approve",
+        actor_type="user",
+        actor_id="admin",
+    )
+    async with session_factory() as session:
+        task = await session.get(TaskModel, "hubspot-task")
+        approval = await session.get(ApprovalModel, "hubspot-approval")
+    assert task is not None and approval is not None
+    await server._queue_after_approval(task, approval, "approve")
+    await server._queue_after_approval(task, approval, "approve")
+
+    async with session_factory() as session:
+        attempts = (await session.execute(
+            select(PublicationAttemptModel).where(
+                PublicationAttemptModel.approval_id == "hubspot-approval"
+            )
+        )).scalars().all()
+        jobs = (await session.execute(
+            select(WorkflowRunModel).where(
+                WorkflowRunModel.job_type == "crm.hubspot_sync"
+            )
+        )).scalars().all()
+        saved = await session.get(TaskModel, "hubspot-task")
+
+    assert len(attempts) == 1
+    assert attempts[0].platform == "hubspot"
+    assert len(jobs) == 1
+    assert jobs[0].max_attempts == 3
+    assert jobs[0].payload["target_type"] == "council"
+    assert jobs[0].payload["target_id"] == "sales"
+    assert saved is not None
+    assert saved.status == "approved"
+    assert saved.context["hubspot_sync_status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_hubspot_worker_sync_preserves_approved_task(
+    session_factory, monkeypatch
+):
+    import src.worker as worker_module
+    from src.integrations import hubspot
+
+    monkeypatch.setattr(
+        worker_module, "provider_linked_to_target", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "decrypted_provider_env",
+        AsyncMock(return_value={"HUBSPOT_ACCESS_TOKEN": "scoped-secret"}),
+    )
+    monkeypatch.setattr(
+        hubspot,
+        "sync_approved_sales_task",
+        AsyncMock(return_value={
+            "status": "synced",
+            "hubspot_contact_id": "contact-1",
+            "hubspot_note_id": "note-1",
+            "note_replayed": False,
+        }),
+    )
+    async with session_factory() as session:
+        session.add_all([
+            TaskModel(
+                task_id="hubspot-worker-task",
+                council="sales",
+                status="approved",
+                task_description="Approved outreach",
+                final_output="Hello there",
+                context={"contact_email": "lead@example.com"},
+            ),
+            ApprovalModel(
+                id="hubspot-worker-approval",
+                resource_type="task",
+                resource_id="hubspot-worker-task",
+                status="approved",
+                action="approve",
+                version=2,
+            ),
+            PublicationAttemptModel(
+                id="hubspot-worker-attempt",
+                approval_id="hubspot-worker-approval",
+                platform="hubspot",
+                status="queued",
+                idempotency_key="hubspot:worker:1",
+            ),
+        ])
+        await session.commit()
+
+    worker = DurableWorker(
+        job_service=JobService(session_factory=session_factory),
+        outbox_service=OutboxService(session_factory=session_factory),
+    )
+    payload = {
+        "task_id": "hubspot-worker-task",
+        "publication_attempt_id": "hubspot-worker-attempt",
+        "target_type": "council",
+        "target_id": "sales",
+    }
+    claim = JobClaim(
+        id="job-1",
+        workflow_id="sales_council",
+        job_type="crm.hubspot_sync",
+        payload=payload,
+        priority=5,
+        attempts=1,
+        max_attempts=3,
+        lease_owner="worker",
+        leased_until=server.utcnow(),
+    )
+
+    result = await worker._sync_hubspot_sales(payload, claim)
+
+    assert result["status"] == "synced"
+    async with session_factory() as session:
+        task = await session.get(TaskModel, "hubspot-worker-task")
+        attempt = await session.get(PublicationAttemptModel, "hubspot-worker-attempt")
+    assert task is not None and attempt is not None
+    assert task.status == "approved"
+    assert task.context["hubspot_sync_status"] == "synced"
+    assert task.context["hubspot_contact_id"] == "contact-1"
+    assert attempt.status == "synced"
+    assert attempt.external_id == "contact-1"
 
 
 @pytest.mark.asyncio

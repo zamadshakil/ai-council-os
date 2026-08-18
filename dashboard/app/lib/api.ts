@@ -222,6 +222,7 @@ export async function fetchIntegrationsHealth(): Promise<IntegrationHealth[]> {
     workflows?: Record<string, { credential_status: IntegrationHealth['status']; configured: boolean; enabled: boolean; paused: boolean; message?: string }>;
     publishing?: Record<string, boolean | { configured?: boolean; credential_status?: IntegrationHealth['status']; status?: IntegrationHealth['status']; message?: string }>;
     model_gateway?: { configured: boolean; status?: IntegrationHealth['status'] };
+    crm?: Record<string, { configured?: boolean; status?: IntegrationHealth['status']; message?: string }>;
   } | IntegrationHealth[]>('/api/integrations/health');
   if (Array.isArray(data)) return data;
   if (data.integrations) return data.integrations;
@@ -249,6 +250,15 @@ export async function fetchIntegrationsHealth(): Promise<IntegrationHealth[]> {
   }
   if (data.model_gateway) {
     items.push({ id: 'model_gateway', name: 'OpenRouter model gateway', status: data.model_gateway.status ?? (data.model_gateway.configured ? 'configured' : 'missing'), detail: data.model_gateway.configured ? 'Stored securely; provider verification controls workflow readiness.' : 'Required configuration is missing.' });
+  }
+  for (const [id, health] of Object.entries(data.crm ?? {})) {
+    const configured = health.configured ?? false;
+    items.push({
+      id: `crm_${id}`,
+      name: `${id} CRM`,
+      status: health.status ?? (configured ? 'configured' : 'missing'),
+      detail: health.message || (configured ? 'Stored securely; approval destinations require explicit linking.' : 'Required configuration is missing.'),
+    });
   }
   return items;
 }
@@ -291,6 +301,17 @@ export async function updateWorkflowIntegrations(
   providers: string[],
 ): Promise<MutationEnvelope<WorkflowDefinition>> {
   return apiFetch<MutationEnvelope<WorkflowDefinition>>(`/api/workflows/${encodeURIComponent(workflowId)}/integrations`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ providers }),
+  });
+}
+
+export async function updateCouncilIntegrations(
+  councilId: string,
+  providers: string[],
+): Promise<MutationEnvelope<{ id: string; integration_providers: string[] }>> {
+  return apiFetch<MutationEnvelope<{ id: string; integration_providers: string[] }>>(`/api/councils/${encodeURIComponent(councilId)}/integrations`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ providers }),

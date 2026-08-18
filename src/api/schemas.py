@@ -100,7 +100,7 @@ class IntegrationCredentialsRequest(StrictModel):
 
 
 class WorkflowIntegrationLinksRequest(StrictModel):
-    providers: list[str] = Field(min_length=1, max_length=10)
+    providers: list[str] = Field(default_factory=list, max_length=10)
 
     @field_validator("providers")
     @classmethod

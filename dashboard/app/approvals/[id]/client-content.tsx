@@ -45,7 +45,8 @@ export function TaskDetailContent({ id }: { id: string }) {
   }, [id]);
 
   useEffect(() => {
-    if (!task || !ACTIVE_STATUSES.has(task.status)) return;
+    const hubspotStatus = typeof task?.context.hubspot_sync_status === 'string' ? task.context.hubspot_sync_status : '';
+    if (!task || (!ACTIVE_STATUSES.has(task.status) && !['queued', 'syncing', 'retrying'].includes(hubspotStatus))) return;
     const timer = window.setInterval(() => void load(), 4_000);
     return () => window.clearInterval(timer);
   }, [load, task]);
@@ -79,6 +80,8 @@ export function TaskDetailContent({ id }: { id: string }) {
   if (!task) return <div className="rounded-2xl border border-rose-300/20 bg-rose-400/8 p-8 text-center text-sm text-rose-200">{error || 'Task not found.'}</div>;
 
   const reconciliationRequired = task.context.publication_state === 'reconciliation_required';
+  const hubspotStatus = typeof task.context.hubspot_sync_status === 'string' ? task.context.hubspot_sync_status : '';
+  const hubspotMessage = typeof task.context.hubspot_sync_message === 'string' ? task.context.hubspot_sync_message : '';
   const canDecide = !reconciliationRequired && task.approval_status === 'awaiting_approval' && (task.status === 'awaiting_approval' || task.status === 'needs_manual_review');
   const canRetry = !reconciliationRequired && task.approval_status !== 'approved' && (task.status === 'failed' || task.status === 'rejected' || task.status === 'cancelled');
   const canCancel = task.status === 'queued' || task.status === 'running';
@@ -127,6 +130,13 @@ export function TaskDetailContent({ id }: { id: string }) {
         </section>
 
         <aside className="space-y-4">
+          {hubspotStatus && <div className="surface-card rounded-2xl p-5">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-sm font-bold text-slate-100">HubSpot CRM</h2>
+              <span className={`rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-wide ${hubspotStatus === 'synced' ? 'border-emerald-300/20 bg-emerald-300/8 text-emerald-300' : hubspotStatus === 'failed' || hubspotStatus === 'blocked_unverified' ? 'border-rose-300/20 bg-rose-300/8 text-rose-200' : hubspotStatus.startsWith('skipped') ? 'border-amber-300/20 bg-amber-300/8 text-amber-200' : 'border-cyan-300/20 bg-cyan-300/8 text-cyan-200'}`}>{hubspotStatus.replaceAll('_', ' ')}</span>
+            </div>
+            <p className="mt-3 text-xs leading-5 text-slate-400">{hubspotMessage || 'CRM synchronization status is persisted with this approved task.'}</p>
+          </div>}
           <div className="surface-card rounded-2xl p-5">
             <label htmlFor="decision-notes" className="text-sm font-bold text-slate-200">Decision notes</label>
             <textarea id="decision-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={5_000} className="mt-3 min-h-28 w-full resize-y input-shell rounded-xl p-3 text-sm text-slate-100 outline-none focus:border-cyan-300/40" placeholder="Optional audit note" />

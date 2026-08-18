@@ -105,3 +105,41 @@ async def test_workflow_links_require_configured_allowed_providers(
         await integration_vault.set_workflow_links(
             "youtube_comments", ["youtube", "openrouter"]
         )
+
+
+@pytest.mark.asyncio
+async def test_hubspot_council_link_is_encrypted_verified_and_reusable(
+    session_factory, monkeypatch
+):
+    monkeypatch.setenv(
+        "INTEGRATION_ENCRYPTION_KEY", Fernet.generate_key().decode("ascii")
+    )
+    monkeypatch.setattr(integration_vault, "async_session", session_factory)
+
+    secret = "test-hubspot-token-not-a-secret"
+    await integration_vault.put_credentials("hubspot", {"access_token": secret})
+    with pytest.raises(ValueError, match="Verify providers"):
+        await integration_vault.set_council_links("sales", ["hubspot"])
+
+    await integration_vault.mark_verification("hubspot", True)
+    assert await integration_vault.set_council_links("sales", ["hubspot"]) == [
+        "hubspot"
+    ]
+    assert await integration_vault.provider_linked_to_target(
+        "hubspot", council_id="sales"
+    ) is True
+
+    catalog = await integration_vault.list_connections()
+    connection = next(item for item in catalog if item["id"] == "hubspot")
+    assert connection["linked_councils"] == ["sales"]
+    assert secret not in repr(connection)
+    assert await integration_vault.decrypted_provider_env("hubspot") == {
+        "HUBSPOT_ACCESS_TOKEN": secret
+    }
+
+    assert await integration_vault.set_council_links("sales", []) == []
+    assert await integration_vault.provider_linked_to_target(
+        "hubspot", council_id="sales"
+    ) is False
+    with pytest.raises(ValueError, match="Unsupported council"):
+        await integration_vault.set_council_links("content", ["hubspot"])

@@ -26,6 +26,10 @@ export default function CouncilsPage() {
   const [priority, setPriority] = useState<Priority>('normal');
   const [documents, setDocuments] = useState<KnowledgeDoc[]>([]);
   const [selectedDocuments, setSelectedDocuments] = useState<string[]>([]);
+  const [contactEmail, setContactEmail] = useState('');
+  const [contactFirstName, setContactFirstName] = useState('');
+  const [contactLastName, setContactLastName] = useState('');
+  const [contactCompany, setContactCompany] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
@@ -41,7 +45,12 @@ export default function CouncilsPage() {
       const task = extractTask(await runCouncil({
         council: selected,
         task_description: taskDescription,
-        context: {},
+        context: selected === 'sales' ? {
+          contact_email: contactEmail.trim(),
+          contact_first_name: contactFirstName.trim(),
+          contact_last_name: contactLastName.trim(),
+          company: contactCompany.trim(),
+        } : {},
         priority,
         selected_document_hashes: selected === 'grant' ? selectedDocuments : [],
       }));
@@ -136,6 +145,29 @@ export default function CouncilsPage() {
                 </div>
               )}
             </div>
+          )}
+
+          {selected === 'sales' && (
+            <fieldset className="mt-5 border-t border-white/8 pt-5">
+              <legend className="flex items-center gap-2 text-sm font-bold text-slate-200">
+                <Target className="h-4 w-4 text-cyan-300" /> Optional CRM contact
+              </legend>
+              <p className="mt-1 text-xs leading-5 text-slate-500">If HubSpot is linked in Settings &amp; Integrations, an approved draft uses these explicit fields to update the contact and attach the outreach note. Without a valid email, approval still succeeds and CRM sync is safely skipped.</p>
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <label className="text-xs font-bold uppercase tracking-wide text-slate-400">Email
+                  <input type="email" autoComplete="email" maxLength={320} value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} placeholder="prospect@example.com" className="mt-2 h-11 w-full input-shell rounded-xl px-3 text-sm font-normal normal-case tracking-normal text-slate-100 placeholder:text-slate-600" />
+                </label>
+                <label className="text-xs font-bold uppercase tracking-wide text-slate-400">Company
+                  <input type="text" autoComplete="organization" maxLength={200} value={contactCompany} onChange={(event) => setContactCompany(event.target.value)} placeholder="Company name" className="mt-2 h-11 w-full input-shell rounded-xl px-3 text-sm font-normal normal-case tracking-normal text-slate-100 placeholder:text-slate-600" />
+                </label>
+                <label className="text-xs font-bold uppercase tracking-wide text-slate-400">First name
+                  <input type="text" autoComplete="given-name" maxLength={100} value={contactFirstName} onChange={(event) => setContactFirstName(event.target.value)} placeholder="First name" className="mt-2 h-11 w-full input-shell rounded-xl px-3 text-sm font-normal normal-case tracking-normal text-slate-100 placeholder:text-slate-600" />
+                </label>
+                <label className="text-xs font-bold uppercase tracking-wide text-slate-400">Last name
+                  <input type="text" autoComplete="family-name" maxLength={100} value={contactLastName} onChange={(event) => setContactLastName(event.target.value)} placeholder="Last name" className="mt-2 h-11 w-full input-shell rounded-xl px-3 text-sm font-normal normal-case tracking-normal text-slate-100 placeholder:text-slate-600" />
+                </label>
+              </div>
+            </fieldset>
           )}
 
           {error && <p role="alert" className="mt-4 rounded-lg border border-rose-300/20 bg-rose-400/8 p-3 text-sm text-rose-200">{error}</p>}

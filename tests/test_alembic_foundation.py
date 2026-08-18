@@ -37,6 +37,7 @@ def test_initial_migration_builds_complete_schema(tmp_path):
         "alembic_version", "users", "sessions", "tasks", "council_runs",
         "workflow_definitions", "workflow_runs", "external_items", "approvals",
         "audit_events", "outbox_events", "knowledge_documents",
+        "council_integrations",
     }
     assert expected <= set(inspector.get_table_names())
     assert "version" in {column["name"] for column in inspector.get_columns("tasks")}

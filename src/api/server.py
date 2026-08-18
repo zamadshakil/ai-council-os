@@ -702,6 +702,7 @@ async def _queue_after_approval(task: TaskModel, approval: ApprovalModel, action
         return
     if action != "approve":
         return
+    await _queue_hubspot_after_sales_approval(task, approval)
     context, workflow = task.context or {}, (task.context or {}).get("workflow", "")
     if not workflow or workflow == "reddit_prospector" or (workflow == "content_engine" and context.get("platform") == "reddit"):
         if workflow:
@@ -744,6 +745,131 @@ async def _queue_after_approval(task: TaskModel, approval: ApprovalModel, action
             max_attempts=1,
         ))
         await session.commit()
+
+
+async def _queue_hubspot_after_sales_approval(
+    task: TaskModel,
+    approval: ApprovalModel,
+) -> None:
+    """Stage an idempotent HubSpot sync only for an explicitly linked target."""
+
+    if task.council != "sales":
+        return
+    context = dict(task.context or {})
+    workflow = str(context.get("workflow") or "")
+    linked = await integration_vault.provider_linked_to_target(
+        "hubspot",
+        workflow_id=workflow if workflow == "reddit_prospector" else "",
+        council_id="" if workflow == "reddit_prospector" else "sales",
+    )
+    if not linked:
+        return
+
+    from src.integrations.hubspot import extract_contact
+
+    contact = extract_contact(task.to_dict())
+    if not contact["email"]:
+        async with async_session() as session:
+            current = await session.get(TaskModel, task.task_id, with_for_update=True)
+            if current:
+                current.context = {
+                    **(current.context or {}),
+                    "hubspot_sync_status": "skipped_missing_email",
+                    "hubspot_sync_message": (
+                        "Approved successfully. HubSpot sync was skipped because no valid "
+                        "contact email was supplied."
+                    ),
+                }
+                current.version += 1
+                await record_audit(
+                    session,
+                    action="hubspot.sync_skipped",
+                    resource_type="task",
+                    resource_id=current.task_id,
+                    details={"reason": "missing_contact_email"},
+                )
+                await session.commit()
+        return
+
+    try:
+        await integration_vault.decrypted_provider_env("hubspot")
+    except integration_vault.VaultConfigurationError:
+        async with async_session() as session:
+            current = await session.get(TaskModel, task.task_id, with_for_update=True)
+            if current:
+                current.context = {
+                    **(current.context or {}),
+                    "hubspot_sync_status": "blocked_unverified",
+                    "hubspot_sync_message": (
+                        "Approved successfully. Re-verify the linked HubSpot connection "
+                        "before CRM synchronization."
+                    ),
+                }
+                current.version += 1
+                await record_audit(
+                    session,
+                    action="hubspot.sync_blocked",
+                    resource_type="task",
+                    resource_id=current.task_id,
+                    details={"reason": "connection_not_verified"},
+                )
+                await session.commit()
+        return
+
+    key = f"hubspot:{approval.id}:{approval.version}"
+    async with async_session() as session:
+        existing = (await session.execute(
+            select(PublicationAttemptModel).where(
+                PublicationAttemptModel.idempotency_key == key
+            )
+        )).scalar_one_or_none()
+        if existing:
+            return
+        current = await session.get(TaskModel, task.task_id, with_for_update=True)
+        if not current:
+            return
+        attempt = PublicationAttemptModel(
+            approval_id=approval.id,
+            platform="hubspot",
+            status="queued",
+            idempotency_key=key,
+            request_payload={"task_id": task.task_id},
+        )
+        session.add(attempt)
+        await session.flush()
+        session.add(WorkflowRunModel(
+            workflow_id=workflow or "sales_council",
+            job_type="crm.hubspot_sync",
+            payload={
+                "task_id": task.task_id,
+                "approval_id": approval.id,
+                "publication_attempt_id": attempt.id,
+                "target_type": "workflow" if workflow == "reddit_prospector" else "council",
+                "target_id": workflow if workflow == "reddit_prospector" else "sales",
+            },
+            idempotency_key=key,
+            priority=5,
+            max_attempts=3,
+        ))
+        current.context = {
+            **(current.context or {}),
+            "hubspot_sync_status": "queued",
+            "hubspot_sync_message": "Approved lead is queued for HubSpot synchronization.",
+        }
+        current.version += 1
+        await record_audit(
+            session,
+            action="hubspot.sync_queued",
+            resource_type="task",
+            resource_id=current.task_id,
+            details={"attempt_id": attempt.id},
+        )
+        try:
+            await session.commit()
+        except IntegrityError:
+            # A concurrent replay may have inserted the same approval-version
+            # key first. The unique constraint makes that replay a success.
+            await session.rollback()
 
 
 @app.post("/api/approvals/{task_id}/actions")
@@ -1411,6 +1537,10 @@ async def _verify_vault_connection(provider: str) -> tuple[bool, str]:
                 from src.integrations.runpod import verify_connection
 
                 await verify_connection()
+            elif provider == "hubspot":
+                from src.integrations.hubspot import verify_connection
+
+                await verify_connection()
             elif provider == "x":
                 import tweepy
 
@@ -1431,7 +1561,12 @@ async def _verify_vault_connection(provider: str) -> tuple[bool, str]:
         return True, "Connection verified"
     except (integration_vault.VaultConfigurationError, KeyError, ValueError) as exc:
         return False, str(exc)[:300]
-    except Exception:
+    except Exception as exc:
+        if provider == "hubspot":
+            from src.integrations.hubspot import HubSpotIntegrationError
+
+            if isinstance(exc, HubSpotIntegrationError):
+                return False, str(exc)[:300]
         # Provider exception text can contain a secret-bearing URL. Never return it.
         return False, "The provider rejected the credentials or could not be reached"
 
@@ -1645,6 +1780,40 @@ async def update_workflow_integrations(
     return _mutation(resource, definition.version, event.id)
 
 
+@app.patch("/api/councils/{council_id}/integrations")
+async def update_council_integrations(
+    council_id: str,
+    payload: WorkflowIntegrationLinksRequest,
+    request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    """Link a reusable verified destination to council approval output."""
+
+    try:
+        providers = await integration_vault.set_council_links(
+            council_id, payload.providers
+        )
+    except ValueError as exc:
+        raise _api_error(422, "INVALID_COUNCIL_INTEGRATIONS", str(exc)) from exc
+    async with async_session() as session:
+        event = await record_audit(
+            session,
+            action="council.integrations_updated",
+            resource_type="council",
+            resource_id=council_id,
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={"providers": providers},
+        )
+        await session.commit()
+    resource = {
+        "id": council_id,
+        "integration_providers": providers,
+    }
+    return _mutation(resource, 1, event.id)
+
+
 @app.get("/api/integrations/health")
 @app.get("/api/integrations/status", deprecated=True)
 async def integration_health(_: RequestActor = Depends(require_admin)):
@@ -1662,6 +1831,13 @@ async def integration_health(_: RequestActor = Depends(require_admin)):
         "model_gateway": {
             "configured": bool(openrouter.get("configured") or os.getenv("OPENROUTER_API_KEY", "").strip()),
             "status": openrouter.get("status", "configured" if os.getenv("OPENROUTER_API_KEY", "").strip() else "missing"),
+        },
+        "crm": {
+            "hubspot": {
+                "configured": bool(connections.get("hubspot", {}).get("configured")),
+                "status": connections.get("hubspot", {}).get("status", "not_configured"),
+                "message": connections.get("hubspot", {}).get("last_error", ""),
+            }
         },
     }
 
