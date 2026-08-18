@@ -106,12 +106,29 @@ async def verify_connection() -> dict[str, Any]:
     token = _get_token()
     if not token:
         raise HubSpotIntegrationError("HubSpot credentials are not available")
-    payload = await _request(
-        "POST",
-        "/oauth/v2/private-apps/get/access-token-info",
-        json={"tokenKey": token},
-        include_auth=False,
-    )
+    try:
+        payload = await _request(
+            "POST",
+            "/oauth/v2/private-apps/get-access-token-info",
+            json={"tokenKey": token},
+            include_auth=False,
+        )
+    except HubSpotIntegrationError as exc:
+        if exc.status_code != 404:
+            raise
+        # HubSpot returns 404 from the legacy metadata endpoint for some
+        # invalid or unsupported token types. Probe the read-only Contacts API
+        # to distinguish a rejected token from unavailable scope metadata.
+        await _request(
+            "GET",
+            "/crm/v3/objects/contacts",
+            params={"limit": 1, "archived": "false"},
+        )
+        raise HubSpotIntegrationError(
+            "HubSpot accepted the token for contact reads but did not expose its "
+            "scope metadata. Use a Legacy private app token so contact write "
+            "permission can be verified safely."
+        ) from exc
     scopes = {str(scope) for scope in payload.get("scopes", [])}
     missing = sorted(REQUIRED_SCOPES - scopes)
     if missing:

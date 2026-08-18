@@ -28,7 +28,7 @@ async def test_verify_connection_requires_contact_read_and_write(monkeypatch):
     assert result["scopes"] == sorted(hubspot.REQUIRED_SCOPES)
     request.assert_awaited_once_with(
         "POST",
-        "/oauth/v2/private-apps/get/access-token-info",
+        "/oauth/v2/private-apps/get-access-token-info",
         json={"tokenKey": "private-token"},
         include_auth=False,
     )
@@ -45,6 +45,24 @@ async def test_verify_connection_rejects_missing_write_scope(monkeypatch):
 
     with pytest.raises(hubspot.HubSpotIntegrationError, match="contacts.write"):
         await hubspot.verify_connection()
+
+
+@pytest.mark.asyncio
+async def test_verify_connection_translates_metadata_404_into_token_rejection(
+    monkeypatch,
+):
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "invalid-private-token")
+    request = AsyncMock(side_effect=[
+        hubspot.HubSpotIntegrationError("metadata missing", status_code=404),
+        hubspot.HubSpotIntegrationError(
+            "HubSpot rejected the private-app access token", status_code=401
+        ),
+    ])
+    monkeypatch.setattr(hubspot, "_request", request)
+
+    with pytest.raises(hubspot.HubSpotIntegrationError, match="rejected"):
+        await hubspot.verify_connection()
+    assert request.await_count == 2
 
 
 @pytest.mark.asyncio

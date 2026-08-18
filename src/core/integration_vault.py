@@ -103,8 +103,8 @@ PROVIDERS: dict[str, ProviderSpec] = {
                 "Private app access token",
                 "HUBSPOT_ACCESS_TOKEN",
                 help_text=(
-                    "Create a HubSpot private app with crm.objects.contacts.read "
-                    "and crm.objects.contacts.write scopes."
+                    "In HubSpot Development, create a Legacy private app with "
+                    "crm.objects.contacts.read and crm.objects.contacts.write scopes."
                 ),
             ),
         ),
