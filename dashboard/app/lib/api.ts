@@ -10,7 +10,15 @@ import {
   JsonObject,
   KillSwitchStatus,
   KnowledgeDoc,
+  KnowledgeCollection,
+  KnowledgeSearchResponse,
   KnowledgeSearchResult,
+  BrainGraph,
+  BrainConflict,
+  BrainGap,
+  CouncilSkill,
+  SkillRevision,
+  LearningSuggestion,
   MutationEnvelope,
   Stats,
   Task,
@@ -334,11 +342,16 @@ export async function fetchKnowledgeDocuments(): Promise<KnowledgeDoc[]> {
 export async function uploadKnowledgeDocument(file: File): Promise<MutationEnvelope<KnowledgeDoc> | KnowledgeDoc> {
   const body = new FormData();
   body.append('file', file);
-  return apiFetch<MutationEnvelope<KnowledgeDoc> | KnowledgeDoc>('/api/knowledge/upload', { method: 'POST', body });
+  return apiFetch<MutationEnvelope<KnowledgeDoc> | KnowledgeDoc>('/api/knowledge/documents', {
+    method: 'POST', body, headers: { 'Idempotency-Key': crypto.randomUUID() },
+  });
 }
 
-export async function deleteKnowledgeDocument(documentId: string): Promise<void> {
-  await apiFetch<unknown>(`/api/knowledge/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' });
+export async function deleteKnowledgeDocument(documentId: string, expectedVersion: number): Promise<void> {
+  await apiFetch<unknown>(`/api/knowledge/documents/${encodeURIComponent(documentId)}`, {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expected_version: expectedVersion, idempotency_key: crypto.randomUUID() }),
+  });
 }
 
 export async function searchKnowledge(query: string, documentHashes: string[] = []): Promise<KnowledgeSearchResult[]> {
@@ -346,6 +359,108 @@ export async function searchKnowledge(query: string, documentHashes: string[] = 
   for (const hash of documentHashes) params.append('doc_hash', hash);
   const data = await apiFetch<{ results: KnowledgeSearchResult[] }>(`${API_BASE}/api/knowledge/search?${params.toString()}`);
   return data.results ?? [];
+}
+
+export async function inspectKnowledge(input: {
+  query: string; document_ids?: string[]; collection_ids?: string[];
+  graph_expansion?: boolean; top_k?: number;
+}): Promise<KnowledgeSearchResponse> {
+  return apiFetch<KnowledgeSearchResponse>('/api/knowledge/search', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function fetchKnowledgeCollections(): Promise<KnowledgeCollection[]> {
+  return (await apiFetch<{ collections: KnowledgeCollection[] }>('/api/knowledge/collections')).collections ?? [];
+}
+
+export async function createKnowledgeCollection(input: {
+  name: string; description?: string; document_ids?: string[]; metadata?: JsonObject;
+}): Promise<MutationEnvelope<KnowledgeCollection>> {
+  return apiFetch<MutationEnvelope<KnowledgeCollection>>('/api/knowledge/collections', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...input, idempotency_key: crypto.randomUUID() }),
+  });
+}
+
+export async function updateKnowledgeBinding(
+  targetType: 'councils' | 'workflows', targetId: string, collectionIds: string[], expectedVersion: number,
+): Promise<unknown> {
+  return apiFetch(`/api/${targetType}/${encodeURIComponent(targetId)}/knowledge-bindings`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ collection_ids: collectionIds, expected_version: expectedVersion, idempotency_key: crypto.randomUUID() }),
+  });
+}
+
+export async function fetchKnowledgeBinding(
+  targetType: 'council' | 'workflow', targetId: string,
+): Promise<{ target_type: string; target_id: string; collection_ids: string[]; version: number }> {
+  return apiFetch(`/api/knowledge/bindings/${targetType}/${encodeURIComponent(targetId)}`);
+}
+
+export async function fetchBrainGraph(): Promise<BrainGraph> {
+  return apiFetch<BrainGraph>('/api/brain/graph');
+}
+
+export async function fetchBrainConflicts(): Promise<BrainConflict[]> {
+  return (await apiFetch<{ conflicts: BrainConflict[] }>('/api/brain/conflicts')).conflicts ?? [];
+}
+
+export async function fetchBrainGaps(): Promise<BrainGap[]> {
+  return (await apiFetch<{ gaps: BrainGap[] }>('/api/brain/gaps')).gaps ?? [];
+}
+
+export async function reviewBrainResource(input: {
+  resource_type: 'entity' | 'fact' | 'relationship' | 'conflict' | 'gap';
+  resource_id: string; action: 'verify' | 'reject' | 'resolve' | 'reopen' | 'supersede';
+  expected_version: number; notes?: string; replacement_value?: string;
+}): Promise<unknown> {
+  return apiFetch('/api/brain/review-actions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...input, idempotency_key: crypto.randomUUID() }),
+  });
+}
+
+export async function fetchSkills(): Promise<CouncilSkill[]> {
+  return (await apiFetch<{ skills: CouncilSkill[] }>('/api/skills')).skills ?? [];
+}
+
+export async function fetchSkillRevisions(skillId: string): Promise<SkillRevision[]> {
+  return (await apiFetch<{ revisions: SkillRevision[] }>(`/api/skills/${encodeURIComponent(skillId)}/revisions`)).revisions ?? [];
+}
+
+export async function activateSkillRevision(
+  skillId: string, revisionId: string, expectedVersion: number,
+): Promise<MutationEnvelope<{ id: string; active_revision_id: string; revision_number: number; version: number }>> {
+  return apiFetch(`/api/skills/${encodeURIComponent(skillId)}/revisions/${encodeURIComponent(revisionId)}/activate`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expected_version: expectedVersion, idempotency_key: crypto.randomUUID() }),
+  });
+}
+
+export async function importMarkdownDocuments(
+  documents: Array<{ path: string; content: string }>, collectionName = 'Obsidian import',
+): Promise<unknown> {
+  return apiFetch('/api/knowledge/import/markdown', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ documents, collection_name: collectionName, idempotency_key: crypto.randomUUID() }),
+  });
+}
+
+export function getKnowledgeMarkdownExportUrl(): string {
+  return `${API_BASE}/api/knowledge/export/markdown.zip`;
+}
+
+export async function fetchLearningSuggestions(): Promise<LearningSuggestion[]> {
+  return (await apiFetch<{ suggestions: LearningSuggestion[] }>('/api/learning-suggestions')).suggestions ?? [];
+}
+
+export async function actOnLearningSuggestion(id: string, action: 'approve' | 'reject', expected_version: number): Promise<unknown> {
+  return apiFetch(`/api/learning-suggestions/${encodeURIComponent(id)}/actions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, expected_version, idempotency_key: crypto.randomUUID(), notes: '' }),
+  });
 }
 
 export async function fetchBlenderPods(): Promise<BlenderPod[]> {

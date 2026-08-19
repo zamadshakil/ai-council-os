@@ -195,6 +195,25 @@ async def test_workflow_rejects_grant_only_document_selection(api_client):
     assert trigger.status_code == 422
     assert trigger.json()["error"]["code"] == "GRANT_ONLY_SETTING"
 
+    collection_patch = await api_client.patch(
+        "/api/workflows/reddit_prospector",
+        json={"selected_collection_ids": ["collection-1234"]},
+        headers={"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token},
+    )
+    assert collection_patch.status_code == 422
+    assert collection_patch.json()["error"]["code"] == "GRANT_ONLY_SETTING"
+
+    collection_trigger = await api_client.post(
+        "/api/workflows/reddit_prospector/trigger",
+        json={
+            "payload": {"selected_collection_ids": ["collection-1234"]},
+            "idempotency_key": "workflow-collections-not-valid-here",
+        },
+        headers={"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token},
+    )
+    assert collection_trigger.status_code == 422
+    assert collection_trigger.json()["error"]["code"] == "GRANT_ONLY_SETTING"
+
 
 @pytest.mark.asyncio
 async def test_workflow_schedule_uses_simple_presets_and_hides_legacy_cron(api_client):

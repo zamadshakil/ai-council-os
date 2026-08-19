@@ -63,7 +63,7 @@ export function ClientLayoutWrapper({ children }: { children: React.ReactNode })
       <Sidebar />
       <div
         className={`shell-content transition-all duration-300 ease-in-out flex flex-col min-h-screen ${
-          isCollapsed ? 'pl-[108px]' : 'pl-[272px]'
+          isCollapsed ? 'pl-[108px]' : 'pl-[108px] md:pl-[272px]'
         }`}
       >
         <TopNav onOpenCommand={() => setCommandOpen(true)} />

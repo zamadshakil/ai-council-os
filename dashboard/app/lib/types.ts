@@ -79,6 +79,7 @@ export interface CouncilRunInput {
   context: JsonObject;
   priority: Priority;
   selected_document_hashes: string[];
+  selected_collection_ids?: string[];
 }
 
 export type ApprovalAction = 'approve' | 'reject' | 'retry' | 'cancel' | 'publish';
@@ -203,12 +204,17 @@ export interface IntegrationConnection {
 }
 
 export interface KnowledgeSearchResult {
+  id?: string;
   text: string;
+  matched_text?: string;
   doc_name: string;
   doc_hash: string;
   score: number;
   chunk_index?: number;
   citation?: string;
+  source_start?: number;
+  source_end?: number;
+  score_breakdown?: Record<string, number | null>;
 }
 
 export interface KnowledgeDoc {
@@ -221,7 +227,50 @@ export interface KnowledgeDoc {
   selected_for_grant?: boolean;
   status?: string;
   warning?: string;
+  warnings?: string[];
+  error?: string;
+  index_version?: number;
+  embedding_model?: string;
+  ingestion_job_id?: string;
+  version?: number;
 }
+
+export interface KnowledgeCollection {
+  id: string;
+  name: string;
+  description: string;
+  metadata: JsonObject;
+  document_ids: string[];
+  document_count: number;
+  bindings: Array<{ target_type: 'council' | 'workflow'; target_id: string }>;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeSearchResponse {
+  results: KnowledgeSearchResult[];
+  warnings: string[];
+  query: string;
+  scope: { document_hashes: string[]; collection_ids: string[]; collections?: Array<{ id: string; version: number }> };
+  pipeline: string;
+  embedding_model: string;
+  index_version: number;
+  candidate_counts: Record<string, number>;
+  cached: boolean;
+}
+
+export interface BrainNode { id: string; label: string; type: string; status: string; confidence: number; version: number; active?: boolean }
+export interface BrainEdge { id: string; source: string; target: string; label: string; status: string; version: number; active?: boolean }
+export interface BrainFact { id: string; subject_id: string; predicate: string; value: string; status: string; confidence: number; citation: string; version: number }
+export interface BrainGraph { nodes: BrainNode[]; edges: BrainEdge[]; facts: BrainFact[] }
+
+export interface BrainConflict { id: string; fact_a_id: string; fact_b_id: string; reason: string; severity: string; status: string; resolution: string; version: number; created_at: string }
+export interface BrainGap { id: string; question: string; context: JsonObject; status: string; version: number; created_at: string }
+
+export interface CouncilSkill { id: string; name: string; description: string; scope_type: string; scope_id: string; tags: string[]; active_revision_id: string | null; version: number; created_at: string; updated_at: string }
+export interface SkillRevision { id: string; revision_number: number; instructions: string; token_count: number; evidence: JsonObject; created_by: string; created_at: string }
+export interface LearningSuggestion { id: string; source_task_id: string; skill_id: string | null; scope_type: string; scope_id: string; title: string; rationale: string; proposed_instructions: string; diff: string; evidence: JsonObject; status: string; version: number; created_at: string }
 
 export interface AppNotification {
   id: string;

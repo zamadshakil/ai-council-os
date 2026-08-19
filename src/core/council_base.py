@@ -65,6 +65,8 @@ class CouncilRunResult(BaseModel):
     total_cost_usd: float
     cost_metrics_complete: bool
     warnings: list[str] = Field(default_factory=list)
+    knowledge_snapshot: list[dict[str, Any]] = Field(default_factory=list)
+    skill_snapshot: list[dict[str, Any]] = Field(default_factory=list)
     error: str = ""
 
     def to_task_updates(self) -> dict[str, Any]:
@@ -116,49 +118,128 @@ class BaseCouncil(ABC):
         return content.strip()
 
     async def _retrieve_context(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Retrieve only explicitly selected Grant documents and surface failures."""
+        """Resolve approved skills and strict collection/document knowledge scope."""
         warnings = list(state.get("warnings", []))
         rag_context = ""
-        selected_docs = (state.get("context") or {}).get("selected_docs")
+        context = state.get("context") or {}
+        selected_docs = context.get("selected_docs") or []
+        selected_collections = context.get("selected_collection_ids") or []
+        workflow_id = str(context.get("workflow") or "")
+        from sqlalchemy import select
+        from src.core import database as db
+        from src.core.models import KnowledgeBindingModel
+        bound: list[str] = []
+        try:
+            async with db.async_session() as session:
+                bound = list((await session.execute(
+                    select(KnowledgeBindingModel.collection_id).where(
+                        KnowledgeBindingModel.target_type == "council",
+                        KnowledgeBindingModel.target_id == self.council_name,
+                    )
+                )).scalars().all())
+                if workflow_id:
+                    bound += list((await session.execute(
+                        select(KnowledgeBindingModel.collection_id).where(
+                            KnowledgeBindingModel.target_type == "workflow",
+                            KnowledgeBindingModel.target_id == workflow_id,
+                        )
+                    )).scalars().all())
+        except Exception as exc:
+            # A pre-migration local database must not prevent an otherwise
+            # independent council run. Production readiness still requires
+            # the native-brain tables, while this warning remains persisted.
+            warnings.append(f"Knowledge bindings unavailable: {type(exc).__name__}: {exc}")
+        selected_collections = list(dict.fromkeys([*selected_collections, *bound]))
 
         if self.council_name == "grant" and selected_docs:
             if not isinstance(selected_docs, list) or not all(
                 isinstance(item, str) and item.strip() for item in selected_docs
             ):
                 raise ValueError("context.selected_docs must be a list of document hashes.")
+        knowledge_snapshot: list[dict[str, Any]] = []
+        if selected_docs or selected_collections:
             try:
-                from src.core.rag_engine import get_rag_context
-
-                rag_context = await get_rag_context(
+                from src.core.rag_engine import search_knowledge
+                retrieval = await search_knowledge(
                     state.get("task_description", ""),
                     top_k=3,
-                    doc_hashes=selected_docs,
+                    document_hashes=selected_docs,
+                    collection_ids=selected_collections,
                 )
-                if not rag_context:
-                    warnings.append("No relevant text was found in the selected knowledge documents.")
+                rag_context = "\n\n---\n\n".join(
+                    f"[{item['citation']}]\n{item['text']}" for item in retrieval["results"]
+                )
+                warnings.extend(retrieval.get("warnings") or [])
+                knowledge_snapshot = [
+                    {
+                        "resource_type": "collection", "resource_id": item["id"],
+                        "resource_version": item["version"],
+                    }
+                    for item in retrieval.get("scope", {}).get("collections", [])
+                ]
+                for item in retrieval["results"]:
+                    knowledge_snapshot.append({
+                        "resource_type": "document",
+                        "resource_id": item.get("document_id"),
+                        "resource_version": item.get("document_version", 1),
+                        "document_hash": item["doc_hash"],
+                        "chunk_id": item["id"],
+                        "index_version": retrieval["index_version"],
+                        "collection_ids": selected_collections,
+                        "citation": item["citation"],
+                    })
+                    knowledge_snapshot.extend({
+                        "resource_type": "fact", "resource_id": fact["id"],
+                        "resource_version": fact["version"],
+                        "via_chunk_id": item["id"],
+                    } for fact in item.get("fact_versions", []))
+                if not retrieval["results"]:
+                    warnings.append("No relevant text was found inside the allowed knowledge scope.")
             except Exception as exc:
-                warnings.append(f"Selected knowledge retrieval failed: {type(exc).__name__}: {exc}")
+                warnings.append(f"Knowledge retrieval failed: {type(exc).__name__}: {exc}")
 
-        return {**state, "rag_context": rag_context, "warnings": warnings}
+        try:
+            from src.core.brain import select_skills
+            skills = await select_skills(
+                council=self.council_name, workflow=workflow_id,
+                query=state.get("task_description", ""), token_budget=1200,
+            )
+        except Exception as exc:
+            skills = []
+            warnings.append(f"Skill retrieval failed: {type(exc).__name__}: {exc}")
+
+        return {
+            **state, "rag_context": rag_context, "warnings": warnings,
+            "knowledge_snapshot": knowledge_snapshot, "selected_skills": skills,
+        }
 
     @staticmethod
     def _inject_context(
         messages: list[dict[str, str]], state: dict[str, Any]
     ) -> list[dict[str, str]]:
         rag_context = state.get("rag_context", "")
-        if not rag_context:
-            return messages
-        return [
-            *messages,
-            {
+        skills = state.get("selected_skills") or []
+        output = list(messages)
+        if skills:
+            skill_message = {
+                "role": "system",
+                "content": "ADMINISTRATOR-APPROVED PROCEDURAL SKILLS:\n" + "\n\n".join(
+                    f"- {item['name']} (revision {item['revision_number']}):\n{item['instructions']}"
+                    for item in skills
+                ),
+            }
+            # Policy remains first; skills precede task evidence and user data.
+            output.insert(1 if output and output[0].get("role") == "system" else 0, skill_message)
+        if rag_context:
+            output.append({
                 "role": "system",
                 "content": (
-                    "Use only the following administrator-selected knowledge excerpts when relevant. "
+                    "Use only the following administrator-allowed knowledge excerpts when relevant. "
                     "Do not claim that an excerpt says something it does not say.\n\n"
                     f"SELECTED KNOWLEDGE:\n{rag_context}"
                 ),
-            },
-        ]
+            })
+        return output
 
     @staticmethod
     def _append_metric_totals(state: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
@@ -381,5 +462,12 @@ class BaseCouncil(ABC):
             total_cost_usd=float(final.get("total_cost_usd", 0.0)),
             cost_metrics_complete=bool(final.get("cost_metrics_complete", False)),
             warnings=final.get("warnings", []),
+            knowledge_snapshot=final.get("knowledge_snapshot", []),
+            skill_snapshot=[{
+                key: item[key] for key in (
+                    "skill_id", "name", "scope_type", "scope_id",
+                    "revision_id", "revision_number", "tokens",
+                )
+            } for item in final.get("selected_skills", [])],
             error=final.get("error", ""),
         )

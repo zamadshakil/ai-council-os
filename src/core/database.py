@@ -11,7 +11,7 @@ import os
 from typing import Any, List, Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import delete, inspect, select, text as sql_text
+from sqlalchemy import delete, event, inspect, select, text as sql_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -34,7 +34,40 @@ def normalize_database_url(raw_url: str | None) -> str:
 
 DATABASE_URL = normalize_database_url(os.getenv("DATABASE_URL"))
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+
+
+def _enable_sqlite_foreign_keys(dbapi_connection: Any, _connection_record: Any) -> None:
+    """Make SQLite development behavior match PostgreSQL referential actions."""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
+if DATABASE_URL.startswith("sqlite"):
+    event.listen(engine.sync_engine, "connect", _enable_sqlite_foreign_keys)
+
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+SQLITE_REQUIRED_COLUMNS = {
+    "tasks": {"version"},
+    "knowledge_documents": {
+        "raw_content", "normalized_text", "metadata_json",
+        "extraction_warnings", "indexing_version", "embedding_model", "version",
+    },
+    "knowledge_chunks": {
+        "document_id", "source_start", "source_end", "parent_key",
+        "index_version", "embedding_model",
+    },
+}
+
+
+def missing_sqlite_columns(local_columns: dict[str, set[str]]) -> dict[str, list[str]]:
+    """Return every required column missing from a local development schema."""
+    return {
+        table: sorted(columns - local_columns.get(table, set()))
+        for table, columns in SQLITE_REQUIRED_COLUMNS.items()
+        if columns - local_columns.get(table, set())
+    }
 
 
 async def init_db() -> None:
@@ -46,18 +79,33 @@ async def init_db() -> None:
     if DATABASE_URL.startswith("sqlite"):
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)  # noqa: F405
-            task_columns = await connection.run_sync(
-                lambda sync_connection: {
-                    column["name"] for column in inspect(sync_connection).get_columns("tasks")
+            def inspect_local_schema(sync_connection: Any) -> dict[str, set[str]]:
+                inspector = inspect(sync_connection)
+                table_names = set(inspector.get_table_names())
+                return {
+                    table: {
+                        column["name"] for column in inspector.get_columns(table)
+                    } if table in table_names else set()
+                    for table in SQLITE_REQUIRED_COLUMNS
                 }
+
+            local_columns = await connection.run_sync(inspect_local_schema)
+        missing_columns = missing_sqlite_columns(local_columns)
+        if missing_columns:
+            details = "; ".join(
+                f"{table}: {', '.join(columns)}"
+                for table, columns in sorted(missing_columns.items())
             )
-        if "version" not in task_columns:
             raise RuntimeError(
-                "The local database uses the legacy schema; run `alembic upgrade head` "
-                "once before starting the application."
+                "The local SQLite database uses a legacy schema; run `alembic upgrade head` "
+                f"once before starting the application (missing columns: {details})."
             )
     else:
-        required = {"alembic_version", "users", "sessions", "workflow_runs", "audit_events"}
+        required = {
+            "alembic_version", "users", "sessions", "workflow_runs", "audit_events",
+            "knowledge_documents", "knowledge_chunks", "knowledge_collections",
+            "knowledge_binding_states", "brain_entities", "brain_facts", "skills", "mcp_tokens",
+        }
 
         def table_names(sync_connection: Any) -> set[str]:
             return set(inspect(sync_connection).get_table_names())

@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.core import database as db
 from src.core.audit import record_audit
@@ -39,8 +39,10 @@ from src.core.models import (
     CouncilRunModel,
     CouncilStepModel,
     KillSwitchModel,
+    KnowledgeDocumentModel,
     OutboxEventModel,
     PublicationAttemptModel,
+    RunKnowledgeUseModel,
     TaskModel,
     WorkflowDefinitionModel,
     WorkflowRunModel,
@@ -49,7 +51,9 @@ from src.core.models import (
 from src.core.repositories import DurableTaskRepository
 
 logger = logging.getLogger("council.worker")
-JobHandler = Callable[[dict[str, Any], JobClaim], dict[str, Any] | Awaitable[dict[str, Any]]]
+JobHandler = Callable[
+    [dict[str, Any], JobClaim], dict[str, Any] | Awaitable[dict[str, Any]]
+]
 
 WORKFLOW_HANDLERS = {
     "workflow.youtube_comments": "youtube_comments",
@@ -70,7 +74,9 @@ class DurableWorker:
         poll_interval: float = 2.0,
         task_repository: DurableTaskRepository | None = None,
     ) -> None:
-        self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        self.worker_id = (
+            worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        )
         self.jobs = job_service or JobService()
         self.outbox = outbox_service or OutboxService()
         self.poll_interval = max(0.1, poll_interval)
@@ -83,13 +89,16 @@ class DurableWorker:
 
     def register(self, job_type: str, handler: JobHandler) -> None:
         if not job_type or job_type in self.handlers:
-            raise ValueError(f"Job handler is empty or already registered: {job_type!r}")
+            raise ValueError(
+                f"Job handler is empty or already registered: {job_type!r}"
+            )
         self.handlers[job_type] = handler
 
     def register_production_handlers(self) -> None:
         from src.workflows.registry import run_workflow_job
 
         for job_type, registry_name in WORKFLOW_HANDLERS.items():
+
             async def workflow_handler(
                 payload: dict[str, Any], claim: JobClaim, *, _name: str = registry_name
             ) -> dict[str, Any]:
@@ -98,6 +107,9 @@ class DurableWorker:
             self.register(job_type, workflow_handler)
 
         self.register("council.run", self._run_council)
+        self.register("knowledge.ingest", self._ingest_knowledge)
+        self.register("brain.maintenance", self._maintain_brain)
+        self.register("brain.learn", self._learn_from_approval)
         self.register("publish.youtube_comment", self._publish_youtube_comment)
         self.register("publish.youtube_description", self._publish_youtube_description)
         self.register("publish.social", self._publish_social)
@@ -129,7 +141,11 @@ class DurableWorker:
             return
         handler = self.handlers.get(claim.job_type)
         if not handler:
-            await self.jobs.fail(claim.id, self.worker_id, f"No handler registered for {claim.job_type!r}")
+            await self.jobs.fail(
+                claim.id,
+                self.worker_id,
+                f"No handler registered for {claim.job_type!r}",
+            )
             return
 
         heartbeat = asyncio.create_task(self._heartbeat_loop(claim))
@@ -160,7 +176,12 @@ class DurableWorker:
             # rejects a missing key before any worker is launched.
             return {}
         try:
-            if claim.job_type == "council.run":
+            if claim.job_type in {
+                "council.run",
+                "knowledge.ingest",
+                "brain.maintenance",
+                "brain.learn",
+            }:
                 return await decrypted_provider_env("openrouter")
             if claim.job_type == "blender.template_repair":
                 return await decrypted_provider_env("runpod")
@@ -186,21 +207,28 @@ class DurableWorker:
             await self.jobs.heartbeat(claim.id, self.worker_id)
 
     @staticmethod
-    async def _credentials_current(session, definition: WorkflowDefinitionModel) -> bool:
+    async def _credentials_current(
+        session, definition: WorkflowDefinitionModel
+    ) -> bool:
         if definition.credential_status != "verified":
             return False
         if definition.id not in WORKFLOW_REQUIRED_ENV:
             return True
-        if (
-            not os.getenv("INTEGRATION_ENCRYPTION_KEY", "").strip()
-            and os.getenv("APP_ENV", "development").lower() not in {"production", "prod", "staging"}
-        ):
+        if not os.getenv("INTEGRATION_ENCRYPTION_KEY", "").strip() and os.getenv(
+            "APP_ENV", "development"
+        ).lower() not in {"production", "prod", "staging"}:
             return True
-        linked = (await session.execute(
-            select(WorkflowIntegrationModel.provider).where(
-                WorkflowIntegrationModel.workflow_id == definition.id
+        linked = (
+            (
+                await session.execute(
+                    select(WorkflowIntegrationModel.provider).where(
+                        WorkflowIntegrationModel.workflow_id == definition.id
+                    )
+                )
             )
-        )).scalars().first()
+            .scalars()
+            .first()
+        )
         if linked:
             return await workflow_connections_verified(definition.id)
         stored = str((definition.settings or {}).get("credential_fingerprint", ""))
@@ -281,9 +309,18 @@ class DurableWorker:
     async def _execution_allowed(self, claim: JobClaim) -> tuple[bool, str]:
         async with self.jobs.sessions() as session:
             switch = await session.get(KillSwitchModel, 1)
-            if switch and switch.is_active and not claim.job_type.startswith("webhook."):
+            if (
+                switch
+                and switch.is_active
+                and not claim.job_type.startswith("webhook.")
+            ):
                 return False, "global kill switch is active"
-            if claim.job_type == "council.run" or claim.job_type.startswith("webhook."):
+            if claim.job_type in {
+                "council.run",
+                "knowledge.ingest",
+                "brain.maintenance",
+                "brain.learn",
+            } or claim.job_type.startswith("webhook."):
                 return True, ""
             if claim.job_type == "blender.template_repair":
                 try:
@@ -331,6 +368,15 @@ class DurableWorker:
         self._last_schedule_check = now_monotonic
         now_epoch = int(time.time())
         now_utc = utcnow()
+        maintenance_bucket = now_utc.date().isoformat()
+        await self.jobs.enqueue(
+            workflow_id="brain",
+            job_type="brain.maintenance",
+            payload={"maintenance_date": maintenance_bucket},
+            idempotency_key=f"brain.maintenance:{maintenance_bucket}",
+            priority=-5,
+            max_attempts=3,
+        )
         async with self.jobs.sessions() as session:
             result = await session.execute(
                 select(WorkflowDefinitionModel).where(
@@ -343,7 +389,9 @@ class DurableWorker:
         for definition in definitions:
             async with self.jobs.sessions() as session:
                 attached = await session.get(WorkflowDefinitionModel, definition.id)
-                if not attached or not await self._credentials_current(session, attached):
+                if not attached or not await self._credentials_current(
+                    session, attached
+                ):
                     continue
             schedule = definition.schedule or {}
             schedule_type = schedule.get("type")
@@ -354,7 +402,9 @@ class DurableWorker:
                 from croniter import croniter
 
                 expression = str(schedule.get("expression", ""))
-                if not croniter.is_valid(expression) or not croniter.match(expression, now_utc):
+                if not croniter.is_valid(expression) or not croniter.match(
+                    expression, now_utc
+                ):
                     continue
                 # One durable job per UTC cron minute, even with repeated polls.
                 bucket = int(now_utc.timestamp()) // 60
@@ -370,7 +420,12 @@ class DurableWorker:
                     **{
                         key: value
                         for key, value in (definition.settings or {}).items()
-                        if key != "selected_document_hashes"
+                        if key
+                        not in {
+                            "selected_document_hashes",
+                            "selected_collection_ids",
+                            "collection_ids",
+                        }
                     },
                     "scheduled": True,
                     "scheduled_bucket": bucket,
@@ -378,7 +433,93 @@ class DurableWorker:
                 idempotency_key=f"schedule:{definition.id}:{bucket}",
             )
 
-    async def _run_council(self, payload: dict[str, Any], claim: JobClaim) -> dict[str, Any]:
+    async def _ingest_knowledge(
+        self, payload: dict[str, Any], _: JobClaim
+    ) -> dict[str, Any]:
+        from src.core.rag_engine import ingest_pending_document
+
+        return await ingest_pending_document(str(payload["document_id"]))
+
+    async def _maintain_brain(
+        self, payload: dict[str, Any], _: JobClaim
+    ) -> dict[str, Any]:
+        from src.core.brain import run_maintenance
+        from src.core.rag_engine import INDEX_VERSION
+
+        maintenance_date = str(payload.get("maintenance_date") or "") or None
+        result = await run_maintenance(maintenance_date)
+        async with self.jobs.sessions() as session:
+            candidates = (
+                (
+                    await session.execute(
+                        select(KnowledgeDocumentModel)
+                        .where(
+                            KnowledgeDocumentModel.raw_content != b"",
+                        )
+                        .limit(500)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        recovery_documents = [
+            document
+            for document in candidates
+            if document.indexing_version < INDEX_VERSION
+            or (document.metadata_json or {}).get("graph_status") != "ready"
+        ][:100]
+        queued = 0
+        recovery_bucket = maintenance_date or utcnow().date().isoformat()
+        for document in recovery_documents:
+            stale_index = document.indexing_version < INDEX_VERSION
+            idempotency_key = (
+                f"knowledge.background-reindex:{document.id}:v{INDEX_VERSION}"
+                if stale_index
+                else f"knowledge.graph-recovery:{document.id}:{recovery_bucket}"
+            )
+            job = await self.jobs.enqueue(
+                workflow_id="knowledge",
+                job_type="knowledge.ingest",
+                payload={"document_id": document.id},
+                idempotency_key=idempotency_key,
+                max_attempts=4,
+            )
+            async with self.jobs.sessions() as session:
+                persisted = await session.get(KnowledgeDocumentModel, document.id)
+                if persisted and persisted.ingestion_job_id != job.id:
+                    persisted.ingestion_job_id = job.id
+                    persisted.version += 1
+                    await session.commit()
+            queued += 1
+        return {
+            **result,
+            "knowledge_recovery_jobs_queued": queued,
+            "reindex_jobs_queued": sum(
+                document.indexing_version < INDEX_VERSION
+                for document in recovery_documents
+            ),
+            "graph_recovery_jobs_queued": sum(
+                document.indexing_version >= INDEX_VERSION
+                for document in recovery_documents
+            ),
+        }
+
+    async def _learn_from_approval(
+        self, payload: dict[str, Any], _: JobClaim
+    ) -> dict[str, Any]:
+        from src.core.brain import (
+            create_learning_suggestion,
+            extract_approved_task_graph,
+        )
+
+        task_id = str(payload["task_id"])
+        graph = await extract_approved_task_graph(task_id)
+        suggestion = await create_learning_suggestion(task_id)
+        return {"graph": graph, "learning": suggestion}
+
+    async def _run_council(
+        self, payload: dict[str, Any], claim: JobClaim
+    ) -> dict[str, Any]:
         from src.councils import run_council
 
         task_id = str(payload["task_id"])
@@ -393,8 +534,17 @@ class DurableWorker:
                 run.version += 1
                 await session.commit()
                 return {"task_id": task_id, "run_id": run_id, "status": "cancelled"}
-            if task.status in {"awaiting_approval", "needs_manual_review", "approved", "rejected"} and run.final_output:
-                return {"task_id": task_id, "run_id": run_id, "status": task.status, "recovered": True}
+            if (
+                task.status
+                in {"awaiting_approval", "needs_manual_review", "approved", "rejected"}
+                and run.final_output
+            ):
+                return {
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "status": task.status,
+                    "recovered": True,
+                }
             task.status = run.status = "running"
             task.version += 1
             run.version += 1
@@ -402,22 +552,36 @@ class DurableWorker:
 
         try:
             result = await run_council(
-                str(payload["council"]), str(payload["task_description"]),
+                str(payload["council"]),
+                str(payload["task_description"]),
                 context=payload.get("context") or {},
-                priority=str(payload.get("priority") or "normal"), task_id=task_id,
+                priority=str(payload.get("priority") or "normal"),
+                task_id=task_id,
             )
         except Exception as exc:
             async with self.jobs.sessions() as session:
                 task = await session.get(TaskModel, task_id)
                 run = await session.get(CouncilRunModel, run_id)
-                approval = (await session.execute(select(ApprovalModel).where(
-                    ApprovalModel.resource_type == "task",
-                    ApprovalModel.resource_id == task_id,
-                ))).scalar_one_or_none()
+                approval = (
+                    await session.execute(
+                        select(ApprovalModel).where(
+                            ApprovalModel.resource_type == "task",
+                            ApprovalModel.resource_id == task_id,
+                        )
+                    )
+                ).scalar_one_or_none()
                 if task and task.status != "cancelled":
-                    task.status, task.error, task.version = "failed", str(exc)[:8000], task.version + 1
+                    task.status, task.error, task.version = (
+                        "failed",
+                        str(exc)[:8000],
+                        task.version + 1,
+                    )
                 if run and run.status != "cancelled":
-                    run.status, run.error, run.version = "failed", str(exc)[:8000], run.version + 1
+                    run.status, run.error, run.version = (
+                        "failed",
+                        str(exc)[:8000],
+                        run.version + 1,
+                    )
                 if approval and approval.status != "cancelled":
                     approval.status = "failed"
                     approval.action = ""
@@ -437,10 +601,13 @@ class DurableWorker:
             context = {
                 **(task.context or {}),
                 "structured_output": result.structured_output,
+                "generated_output": result.final_output,
                 "warnings": result.warnings,
                 "cost_metrics_complete": result.cost_metrics_complete,
                 "input_tokens": result.total_input_tokens,
                 "output_tokens": result.total_output_tokens,
+                "knowledge_snapshot": result.knowledge_snapshot,
+                "skill_snapshot": result.skill_snapshot,
             }
             task.status = result.status.value
             task.final_output = result.final_output
@@ -454,7 +621,10 @@ class DurableWorker:
             task.updated_at = utcnow()
 
             run.status = result.status.value
-            run.final_output = {"content": result.final_output, "structured_output": result.structured_output}
+            run.final_output = {
+                "content": result.final_output,
+                "structured_output": result.structured_output,
+            }
             run.confidence_score = result.confidence_score
             run.total_input_tokens = result.total_input_tokens
             run.total_output_tokens = result.total_output_tokens
@@ -464,33 +634,94 @@ class DurableWorker:
             run.version += 1
             run.updated_at = utcnow()
 
-            existing_steps = (await session.execute(
-                select(CouncilStepModel).where(CouncilStepModel.run_id == run_id)
-            )).scalars().all()
+            existing_steps = (
+                (
+                    await session.execute(
+                        select(CouncilStepModel).where(
+                            CouncilStepModel.run_id == run_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
             if not existing_steps:
                 for sequence, message in enumerate(result.debate_history, start=1):
                     structured = message.get("structured_output") or {}
-                    session.add(CouncilStepModel(
-                        run_id=run_id,
-                        sequence=sequence,
-                        role=str(message.get("role", "")),
-                        model_id=str(message.get("model_used", "")),
-                        prompt=json.dumps(message.get("prompt_messages") or [], ensure_ascii=False),
-                        output={"content": message.get("content", ""), "structured_output": structured},
-                        score_breakdown=structured.get("category_scores") or {},
-                        input_tokens=int(message.get("input_tokens") or 0),
-                        output_tokens=int(message.get("output_tokens") or 0),
-                        cost_usd=float(message.get("cost_usd") or 0.0),
-                    ))
+                    session.add(
+                        CouncilStepModel(
+                            run_id=run_id,
+                            sequence=sequence,
+                            role=str(message.get("role", "")),
+                            model_id=str(message.get("model_used", "")),
+                            prompt=json.dumps(
+                                message.get("prompt_messages") or [], ensure_ascii=False
+                            ),
+                            output={
+                                "content": message.get("content", ""),
+                                "structured_output": structured,
+                            },
+                            score_breakdown=structured.get("category_scores") or {},
+                            input_tokens=int(message.get("input_tokens") or 0),
+                            output_tokens=int(message.get("output_tokens") or 0),
+                            cost_usd=float(message.get("cost_usd") or 0.0),
+                        )
+                    )
+            existing_uses = int(
+                await session.scalar(
+                    select(func.count(RunKnowledgeUseModel.id)).where(
+                        RunKnowledgeUseModel.run_id == run_id
+                    )
+                )
+                or 0
+            )
+            if not existing_uses:
+                seen_resources: set[tuple[str, str, int]] = set()
+                for item in result.knowledge_snapshot:
+                    resource_key = (
+                        str(item.get("resource_type") or "document"),
+                        str(item.get("resource_id") or ""),
+                        int(
+                            item.get("resource_version")
+                            or item.get("index_version")
+                            or 1
+                        ),
+                    )
+                    if resource_key[1] and resource_key not in seen_resources:
+                        seen_resources.add(resource_key)
+                        session.add(
+                            RunKnowledgeUseModel(
+                                run_id=run_id,
+                                resource_type=resource_key[0],
+                                resource_id=resource_key[1],
+                                resource_version=resource_key[2],
+                                metadata_json=item,
+                            )
+                        )
+                for item in result.skill_snapshot:
+                    session.add(
+                        RunKnowledgeUseModel(
+                            run_id=run_id,
+                            resource_type="skill",
+                            resource_id=str(item["skill_id"]),
+                            resource_version=int(item.get("revision_number") or 1),
+                            metadata_json=item,
+                        )
+                    )
 
-            approval_result = await session.execute(select(ApprovalModel).where(
-                ApprovalModel.resource_type == "task", ApprovalModel.resource_id == task_id,
-            ))
+            approval_result = await session.execute(
+                select(ApprovalModel).where(
+                    ApprovalModel.resource_type == "task",
+                    ApprovalModel.resource_id == task_id,
+                )
+            )
             approval = approval_result.scalar_one_or_none()
             if approval is None:
                 approval = ApprovalModel(
-                    resource_type="task", resource_id=task_id,
-                    status="awaiting_approval", version=1,
+                    resource_type="task",
+                    resource_id=task_id,
+                    status="awaiting_approval",
+                    version=1,
                 )
                 session.add(approval)
                 await session.flush()
@@ -513,30 +744,56 @@ class DurableWorker:
                 approval.version += 1
                 approval.updated_at = utcnow()
             approval_version = approval.version
-            outbox_result = await session.execute(select(OutboxEventModel).where(
-                OutboxEventModel.idempotency_key
-                == f"telegram:approval:{task_id}:v{approval_version}"
-            ))
+            outbox_result = await session.execute(
+                select(OutboxEventModel).where(
+                    OutboxEventModel.idempotency_key
+                    == f"telegram:approval:{task_id}:v{approval_version}"
+                )
+            )
             if outbox_result.scalar_one_or_none() is None:
-                session.add(OutboxEventModel(
-                    topic="telegram.approval",
-                    payload={"task_id": task_id,
-                             "workflow_name": f"{result.council.title()} Council",
-                             "draft_text": result.final_output,
-                             "context_summary": task.task_description,
-                             "confidence": result.confidence_score,
-                             "council": result.council},
-                    idempotency_key=f"telegram:approval:{task_id}:v{approval_version}",
-                ))
+                session.add(
+                    OutboxEventModel(
+                        topic="telegram.approval",
+                        payload={
+                            "task_id": task_id,
+                            "workflow_name": f"{result.council.title()} Council",
+                            "draft_text": result.final_output,
+                            "context_summary": task.task_description,
+                            "confidence": result.confidence_score,
+                            "council": result.council,
+                            "retrieval_warnings": result.warnings,
+                            "knowledge_sources": [
+                                item.get("citation") or item.get("document_hash")
+                                for item in result.knowledge_snapshot
+                            ],
+                            "skill_revisions": [
+                                f"{item.get('name', 'Skill')} r{item.get('revision_number', 1)}"
+                                for item in result.skill_snapshot
+                            ],
+                        },
+                        idempotency_key=f"telegram:approval:{task_id}:v{approval_version}",
+                    )
+                )
             await record_audit(
-                session, action="council_run.completed", resource_type="task", resource_id=task_id,
-                details={"run_id": run_id, "status": result.status.value,
-                         "draft_count": result.draft_count,
-                         "cost_metrics_complete": result.cost_metrics_complete},
+                session,
+                action="council_run.completed",
+                resource_type="task",
+                resource_id=task_id,
+                details={
+                    "run_id": run_id,
+                    "status": result.status.value,
+                    "draft_count": result.draft_count,
+                    "cost_metrics_complete": result.cost_metrics_complete,
+                },
             )
             await session.commit()
-        return {"task_id": task_id, "run_id": run_id, "status": result.status.value,
-                "confidence_score": result.confidence_score, "draft_count": result.draft_count}
+        return {
+            "task_id": task_id,
+            "run_id": run_id,
+            "status": result.status.value,
+            "confidence_score": result.confidence_score,
+            "draft_count": result.draft_count,
+        }
 
     async def _assert_write_allowed(self, workflow_id: str) -> None:
         async with self.jobs.sessions() as session:
@@ -582,7 +839,9 @@ class DurableWorker:
                     PublicationAttemptModel, payload["publication_attempt_id"]
                 )
                 if not task or not attempt:
-                    raise ValueError("HubSpot task or synchronization attempt does not exist")
+                    raise ValueError(
+                        "HubSpot task or synchronization attempt does not exist"
+                    )
                 if attempt.status == "synced":
                     return {
                         "task_id": task.task_id,
@@ -628,15 +887,17 @@ class DurableWorker:
                     "hubspot_synced_at": utcnow().isoformat(),
                 }
                 task.version += 1
-                session.add(OutboxEventModel(
-                    topic="telegram.publish_success",
-                    payload={
-                        "workflow_name": "Sales Council",
-                        "platform": "HubSpot CRM",
-                        "details": f"Approved task {task.task_id} synchronized",
-                    },
-                    idempotency_key=f"telegram:hubspot-synced:{attempt.id}",
-                ))
+                session.add(
+                    OutboxEventModel(
+                        topic="telegram.publish_success",
+                        payload={
+                            "workflow_name": "Sales Council",
+                            "platform": "HubSpot CRM",
+                            "details": f"Approved task {task.task_id} synchronized",
+                        },
+                        idempotency_key=f"telegram:hubspot-synced:{attempt.id}",
+                    )
+                )
                 await record_audit(
                     session,
                     action="hubspot.sync_succeeded",
@@ -680,24 +941,33 @@ class DurableWorker:
                             action="hubspot.sync_failed",
                             resource_type="task",
                             resource_id=task.task_id,
-                            details={"attempt_id": attempt.id if attempt else "", "error": message},
-                        )
-                        session.add(OutboxEventModel(
-                            topic="telegram.error",
-                            payload={
-                                "workflow_name": "HubSpot CRM sync",
+                            details={
+                                "attempt_id": attempt.id if attempt else "",
                                 "error": message,
                             },
-                            idempotency_key=f"telegram:hubspot-failed:{payload.get('publication_attempt_id', '')}",
-                        ))
+                        )
+                        session.add(
+                            OutboxEventModel(
+                                topic="telegram.error",
+                                payload={
+                                    "workflow_name": "HubSpot CRM sync",
+                                    "error": message,
+                                },
+                                idempotency_key=f"telegram:hubspot-failed:{payload.get('publication_attempt_id', '')}",
+                            )
+                        )
                 await session.commit()
             raise
 
-    async def _begin_publication(self, payload: dict[str, Any], workflow_id: str) -> None:
+    async def _begin_publication(
+        self, payload: dict[str, Any], workflow_id: str
+    ) -> None:
         await self._assert_write_allowed(workflow_id)
         async with self.jobs.sessions() as session:
             task = await session.get(TaskModel, payload["task_id"])
-            attempt = await session.get(PublicationAttemptModel, payload["publication_attempt_id"])
+            attempt = await session.get(
+                PublicationAttemptModel, payload["publication_attempt_id"]
+            )
             if not task or not attempt:
                 raise ValueError("Publication task or attempt does not exist")
             if attempt.status == "published":
@@ -712,29 +982,48 @@ class DurableWorker:
     ) -> dict[str, Any]:
         async with self.jobs.sessions() as session:
             task = await session.get(TaskModel, payload["task_id"])
-            attempt = await session.get(PublicationAttemptModel, payload["publication_attempt_id"])
+            attempt = await session.get(
+                PublicationAttemptModel, payload["publication_attempt_id"]
+            )
             assert task is not None and attempt is not None
             task.status = "published"
             task.version += 1
             attempt.status = "published"
             attempt.response_payload = response
             attempt.external_id = external_id
-            session.add(OutboxEventModel(
-                topic="telegram.publish_success",
-                payload={"workflow_name": (task.context or {}).get("workflow", "Publishing"),
-                         "platform": payload.get("platform", ""),
-                         "details": f"Task: {task.task_id}"},
-                idempotency_key=f"telegram:published:{attempt.id}",
-            ))
+            session.add(
+                OutboxEventModel(
+                    topic="telegram.publish_success",
+                    payload={
+                        "workflow_name": (task.context or {}).get(
+                            "workflow", "Publishing"
+                        ),
+                        "platform": payload.get("platform", ""),
+                        "details": f"Task: {task.task_id}",
+                    },
+                    idempotency_key=f"telegram:published:{attempt.id}",
+                )
+            )
             await record_audit(
-                session, action="publication.succeeded", resource_type="task",
+                session,
+                action="publication.succeeded",
+                resource_type="task",
                 resource_id=task.task_id,
-                details={"platform": payload.get("platform", ""), "attempt_id": attempt.id},
+                details={
+                    "platform": payload.get("platform", ""),
+                    "attempt_id": attempt.id,
+                },
             )
             await session.commit()
-        return {"task_id": payload["task_id"], "status": "published", "external_id": external_id}
+        return {
+            "task_id": payload["task_id"],
+            "status": "published",
+            "external_id": external_id,
+        }
 
-    async def _fail_publication(self, payload: dict[str, Any], error: Exception) -> None:
+    async def _fail_publication(
+        self, payload: dict[str, Any], error: Exception
+    ) -> None:
         """Persist a terminal reconciliation state for an ambiguous provider write.
 
         These jobs deliberately have one attempt because the supported provider
@@ -751,11 +1040,13 @@ class DurableWorker:
             message = str(error)[:8000]
             if task:
                 context = dict(task.context or {})
-                context.update({
-                    "publication_state": "reconciliation_required",
-                    "publication_attempt_id": payload["publication_attempt_id"],
-                    "publication_retry_allowed": False,
-                })
+                context.update(
+                    {
+                        "publication_state": "reconciliation_required",
+                        "publication_attempt_id": payload["publication_attempt_id"],
+                        "publication_retry_allowed": False,
+                    }
+                )
                 task.context = context
                 task.status = "needs_manual_review"
                 task.error = message
@@ -765,20 +1056,26 @@ class DurableWorker:
                 attempt.error = message
             if task and attempt:
                 outbox_key = f"telegram:publication-failed:{attempt.id}"
-                existing_outbox = (await session.execute(
-                    select(OutboxEventModel).where(
-                        OutboxEventModel.idempotency_key == outbox_key
+                existing_outbox = (
+                    await session.execute(
+                        select(OutboxEventModel).where(
+                            OutboxEventModel.idempotency_key == outbox_key
+                        )
                     )
-                )).scalar_one_or_none()
+                ).scalar_one_or_none()
                 if existing_outbox is None:
-                    session.add(OutboxEventModel(
-                        topic="telegram.error",
-                        payload={
-                            "workflow_name": (task.context or {}).get("workflow", "Publishing"),
-                            "error": message,
-                        },
-                        idempotency_key=outbox_key,
-                    ))
+                    session.add(
+                        OutboxEventModel(
+                            topic="telegram.error",
+                            payload={
+                                "workflow_name": (task.context or {}).get(
+                                    "workflow", "Publishing"
+                                ),
+                                "error": message,
+                            },
+                            idempotency_key=outbox_key,
+                        )
+                    )
                 await record_audit(
                     session,
                     action="publication.reconciliation_required",
@@ -796,21 +1093,29 @@ class DurableWorker:
         self._last_reconcile_check = now_monotonic
         candidates: list[dict[str, Any]] = []
         async with self.jobs.sessions() as session:
-            jobs = (await session.execute(
-                select(WorkflowRunModel)
-                .where(
-                    WorkflowRunModel.status == "dead_letter",
-                    WorkflowRunModel.job_type.in_((
-                        "publish.youtube_comment",
-                        "publish.youtube_description",
-                        "publish.social",
-                        "publish.instagram_comment",
-                        "crm.hubspot_sync",
-                    )),
+            jobs = (
+                (
+                    await session.execute(
+                        select(WorkflowRunModel)
+                        .where(
+                            WorkflowRunModel.status == "dead_letter",
+                            WorkflowRunModel.job_type.in_(
+                                (
+                                    "publish.youtube_comment",
+                                    "publish.youtube_description",
+                                    "publish.social",
+                                    "publish.instagram_comment",
+                                    "crm.hubspot_sync",
+                                )
+                            ),
+                        )
+                        .order_by(WorkflowRunModel.finished_at.desc())
+                        .limit(100)
+                    )
                 )
-                .order_by(WorkflowRunModel.finished_at.desc())
-                .limit(100)
-            )).scalars().all()
+                .scalars()
+                .all()
+            )
             for job in jobs:
                 payload = job.payload or {}
                 attempt_id = payload.get("publication_attempt_id")
@@ -863,7 +1168,9 @@ class DurableWorker:
                 )
             await session.commit()
 
-    async def _publish_youtube_comment(self, payload: dict[str, Any], _: JobClaim) -> dict[str, Any]:
+    async def _publish_youtube_comment(
+        self, payload: dict[str, Any], _: JobClaim
+    ) -> dict[str, Any]:
         try:
             await self._begin_publication(payload, "youtube_comments")
             from src.integrations.youtube import post_comment_reply
@@ -873,61 +1180,95 @@ class DurableWorker:
             # provider call.  The earlier begin gate protects the state change;
             # this gate protects against a pause/kill racing with that change.
             await self._assert_write_allowed("youtube_comments")
-            result = await asyncio.to_thread(post_comment_reply, context["comment_id"], payload["content"])
+            result = await asyncio.to_thread(
+                post_comment_reply, context["comment_id"], payload["content"]
+            )
             if not result:
                 raise RuntimeError("YouTube did not confirm the comment reply")
-            return await self._finish_publication(payload, result, str(result.get("id", "")))
+            return await self._finish_publication(
+                payload, result, str(result.get("id", ""))
+            )
         except Exception as exc:
             await self._fail_publication(payload, exc)
             raise
 
-    async def _publish_youtube_description(self, payload: dict[str, Any], _: JobClaim) -> dict[str, Any]:
+    async def _publish_youtube_description(
+        self, payload: dict[str, Any], _: JobClaim
+    ) -> dict[str, Any]:
         try:
             await self._begin_publication(payload, "youtube_descriptions")
             from src.integrations.youtube import update_video_description
 
             context = payload.get("context") or {}
             await self._assert_write_allowed("youtube_descriptions")
-            result = await asyncio.to_thread(update_video_description, context["video_id"], payload["content"])
+            result = await asyncio.to_thread(
+                update_video_description, context["video_id"], payload["content"]
+            )
             if not result:
                 raise RuntimeError("YouTube did not confirm the description update")
-            return await self._finish_publication(payload, result, str(result.get("id", "")))
+            return await self._finish_publication(
+                payload, result, str(result.get("id", ""))
+            )
         except Exception as exc:
             await self._fail_publication(payload, exc)
             raise
 
-    async def _publish_social(self, payload: dict[str, Any], _: JobClaim) -> dict[str, Any]:
+    async def _publish_social(
+        self, payload: dict[str, Any], _: JobClaim
+    ) -> dict[str, Any]:
         try:
             await self._begin_publication(payload, "content_engine")
             from src.integrations.publisher import publish_to_platforms
 
-            platform = "twitter" if payload.get("platform") == "x" else payload.get("platform")
+            platform = (
+                "twitter" if payload.get("platform") == "x" else payload.get("platform")
+            )
             await self._assert_write_allowed("content_engine")
-            result = await publish_to_platforms(payload["content"], [str(platform)], (payload.get("context") or {}).get("media_url"))
+            result = await publish_to_platforms(
+                payload["content"],
+                [str(platform)],
+                (payload.get("context") or {}).get("media_url"),
+            )
             if result.get("fail_count") or result.get("success_count") != 1:
                 raise RuntimeError(f"Publishing failed: {result}")
-            platform_result = (result.get("results") or {}).get(platform, {}).get("data") or {}
-            external_id = str(platform_result.get("id") or platform_result.get("post_id") or "")
+            platform_result = (result.get("results") or {}).get(platform, {}).get(
+                "data"
+            ) or {}
+            external_id = str(
+                platform_result.get("id") or platform_result.get("post_id") or ""
+            )
             return await self._finish_publication(payload, result, external_id)
         except Exception as exc:
             await self._fail_publication(payload, exc)
             raise
 
-    async def _publish_instagram_comment(self, payload: dict[str, Any], _: JobClaim) -> dict[str, Any]:
+    async def _publish_instagram_comment(
+        self, payload: dict[str, Any], _: JobClaim
+    ) -> dict[str, Any]:
         try:
             await self._begin_publication(payload, "instagram_comments")
             from src.integrations.instagram_comments import post_public_reply
 
             context = payload.get("context") or {}
             await self._assert_write_allowed("instagram_comments")
-            result = await post_public_reply(str(context["comment_id"]), payload["content"])
-            return await self._finish_publication(payload, result, str(result.get("id", "")))
+            result = await post_public_reply(
+                str(context["comment_id"]), payload["content"]
+            )
+            return await self._finish_publication(
+                payload, result, str(result.get("id", ""))
+            )
         except Exception as exc:
             await self._fail_publication(payload, exc)
             raise
 
-    async def _accept_webhook(self, payload: dict[str, Any], claim: JobClaim) -> dict[str, Any]:
-        return {"accepted": True, "provider": claim.job_type.removeprefix("webhook."), **payload}
+    async def _accept_webhook(
+        self, payload: dict[str, Any], claim: JobClaim
+    ) -> dict[str, Any]:
+        return {
+            "accepted": True,
+            "provider": claim.job_type.removeprefix("webhook."),
+            **payload,
+        }
 
     async def _run_blender_template_job(
         self,
@@ -971,11 +1312,15 @@ class DurableWorker:
                 while asyncio.get_running_loop().time() < deadline:
                     await asyncio.sleep(8)
                     pods = await list_pods()
-                    pod = next((item for item in pods if item.get("id") == pod_id), None)
+                    pod = next(
+                        (item for item in pods if item.get("id") == pod_id), None
+                    )
                     if pod and pod.get("desired_status") == "RUNNING":
                         break
                 else:
-                    raise RuntimeError("The RunPod pod did not become ready within ten minutes")
+                    raise RuntimeError(
+                        "The RunPod pod did not become ready within ten minutes"
+                    )
 
             await progress("checking_blender_agent")
             health = await verify_blender_agent(pod_id)
@@ -992,10 +1337,14 @@ class DurableWorker:
             deadline = asyncio.get_running_loop().time() + 6 * 60 * 60
             while state.get("status") in {"queued", "running"}:
                 if asyncio.get_running_loop().time() >= deadline:
-                    raise RuntimeError("The Blender template job exceeded the six-hour safety limit")
+                    raise RuntimeError(
+                        "The Blender template job exceeded the six-hour safety limit"
+                    )
                 switch = await db.get_kill_switch_db()
                 if switch["is_active"]:
-                    raise RuntimeError("The Blender job was stopped by the global kill switch")
+                    raise RuntimeError(
+                        "The Blender job was stopped by the global kill switch"
+                    )
                 await progress(
                     str(state.get("stage") or "gpu_job_running"),
                     agent_status=str(state.get("status") or "running"),
@@ -1004,10 +1353,19 @@ class DurableWorker:
                 await asyncio.sleep(5)
                 state = await get_blender_job(pod_id, claim.id)
             if state.get("status") != "completed":
-                raise RuntimeError(str(state.get("error") or "The Blender agent did not complete the job"))
-            report = state.get("report") if isinstance(state.get("report"), dict) else {}
+                raise RuntimeError(
+                    str(
+                        state.get("error")
+                        or "The Blender agent did not complete the job"
+                    )
+                )
+            report = (
+                state.get("report") if isinstance(state.get("report"), dict) else {}
+            )
             if not report.get("gpu_engaged"):
-                raise RuntimeError("Blender completed without proof that Cycles used a GPU")
+                raise RuntimeError(
+                    "Blender completed without proof that Cycles used a GPU"
+                )
             return {
                 "stage": "completed",
                 "agent_status": "completed",
@@ -1032,9 +1390,15 @@ class DurableWorker:
                     await stop_pod(pod_id)
                     stopped = True
                 except Exception:
-                    logger.exception("Could not auto-stop RunPod pod %s after Blender job %s", pod_id, claim.id)
+                    logger.exception(
+                        "Could not auto-stop RunPod pod %s after Blender job %s",
+                        pod_id,
+                        claim.id,
+                    )
             if stopped:
-                logger.info("Stopped RunPod pod %s after Blender job %s", pod_id, claim.id)
+                logger.info(
+                    "Stopped RunPod pod %s after Blender job %s", pod_id, claim.id
+                )
 
     async def run_forever(self) -> None:
         logger.info("Worker %s started", self.worker_id)
@@ -1043,7 +1407,9 @@ class DurableWorker:
                 worked = await self.run_once()
                 if not worked:
                     try:
-                        await asyncio.wait_for(self._stopping.wait(), timeout=self.poll_interval)
+                        await asyncio.wait_for(
+                            self._stopping.wait(), timeout=self.poll_interval
+                        )
                     except TimeoutError:
                         pass
         finally:
@@ -1073,6 +1439,8 @@ async def _main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
-                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     asyncio.run(_main())

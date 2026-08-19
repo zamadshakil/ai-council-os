@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text,
+    JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -281,15 +281,24 @@ class KnowledgeDocumentModel(Base, TimestampMixin):
     sha256: Mapped[str] = mapped_column(String(64), unique=True)
     storage_key: Mapped[str] = mapped_column(String(512))
     status: Mapped[str] = mapped_column(String(30), default="pending")
+    raw_content: Mapped[bytes] = mapped_column(LargeBinary, default=b"")
+    normalized_text: Mapped[str] = mapped_column(Text, default="")
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    extraction_warnings: Mapped[list] = mapped_column(JSON, default=list)
+    indexing_version: Mapped[int] = mapped_column(Integer, default=0)
+    embedding_model: Mapped[str] = mapped_column(String(200), default="")
+    ingestion_job_id: Mapped[str] = mapped_column(String(36), default="")
     selected_for_grant: Mapped[bool] = mapped_column(Boolean, default=False)
     warning: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class KnowledgeChunkModel(Base):
     """PostgreSQL-backed production retrieval index.
 
-    Local development may continue to use the lightweight LanceDB/SQLite
-    adapter, but production chunks and embeddings are durable database state.
+    SQLite uses this same schema only for local development and isolated tests;
+    production chunks and embeddings are durable PostgreSQL/pgvector state.
     """
 
     __tablename__ = "knowledge_chunks"
@@ -298,12 +307,298 @@ class KnowledgeChunkModel(Base):
         Index("ix_knowledge_chunks_doc_hash", "doc_hash"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    document_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_documents.id", ondelete="CASCADE"), index=True
+    )
     doc_hash: Mapped[str] = mapped_column(String(64))
     doc_name: Mapped[str] = mapped_column(String(255))
     chunk_index: Mapped[int] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text)
     parent_text: Mapped[str] = mapped_column(Text)
+    source_start: Mapped[int] = mapped_column(Integer, default=0)
+    source_end: Mapped[int] = mapped_column(Integer, default=0)
+    parent_key: Mapped[str] = mapped_column(String(80), default="")
+    index_version: Mapped[int] = mapped_column(Integer, default=1)
+    embedding_model: Mapped[str] = mapped_column(String(200), default="")
     vector: Mapped[list] = mapped_column(Vector(384).with_variant(JSON(), "sqlite"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KnowledgeCollectionModel(Base, TimestampMixin):
+    __tablename__ = "knowledge_collections"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(160), unique=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class KnowledgeCollectionDocumentModel(Base):
+    __tablename__ = "knowledge_collection_documents"
+    __table_args__ = (
+        UniqueConstraint("collection_id", "document_id", name="uq_collection_document"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_collections.id", ondelete="CASCADE"), index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_documents.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KnowledgeBindingModel(Base, TimestampMixin):
+    __tablename__ = "knowledge_bindings"
+    __table_args__ = (
+        UniqueConstraint("target_type", "target_id", "collection_id", name="uq_knowledge_binding"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    target_type: Mapped[str] = mapped_column(String(30), index=True)
+    target_id: Mapped[str] = mapped_column(String(100), index=True)
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_collections.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class KnowledgeBindingStateModel(Base, TimestampMixin):
+    __tablename__ = "knowledge_binding_states"
+    __table_args__ = (
+        UniqueConstraint("target_type", "target_id", name="uq_knowledge_binding_state_target"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    target_type: Mapped[str] = mapped_column(String(30), index=True)
+    target_id: Mapped[str] = mapped_column(String(100), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class BrainEntityModel(Base, TimestampMixin):
+    __tablename__ = "brain_entities"
+    __table_args__ = (UniqueConstraint("entity_type", "canonical_key", name="uq_brain_entity_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(240), index=True)
+    canonical_key: Mapped[str] = mapped_column(String(240), index=True)
+    entity_type: Mapped[str] = mapped_column(String(80), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default="proposed", index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class BrainEntityAliasModel(Base):
+    __tablename__ = "brain_entity_aliases"
+    __table_args__ = (UniqueConstraint("normalized_alias", "entity_id", name="uq_entity_alias"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    entity_id: Mapped[str] = mapped_column(ForeignKey("brain_entities.id", ondelete="CASCADE"), index=True)
+    alias: Mapped[str] = mapped_column(String(240), index=True)
+    normalized_alias: Mapped[str] = mapped_column(String(240), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class BrainFactModel(Base, TimestampMixin):
+    __tablename__ = "brain_facts"
+    __table_args__ = (Index("ix_brain_fact_subject_status", "subject_entity_id", "status"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    subject_entity_id: Mapped[str | None] = mapped_column(
+        ForeignKey("brain_entities.id", ondelete="SET NULL"), index=True
+    )
+    predicate: Mapped[str] = mapped_column(String(180), index=True)
+    value_text: Mapped[str] = mapped_column(Text)
+    normalized_value: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default="proposed", index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    effective_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    supersedes_fact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("brain_facts.id", ondelete="SET NULL"), index=True
+    )
+    source_document_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_documents.id", ondelete="SET NULL"), index=True
+    )
+    source_chunk_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_chunks.id", ondelete="SET NULL"), index=True
+    )
+    council_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("council_runs.id", ondelete="SET NULL"), index=True
+    )
+    approval_id: Mapped[str | None] = mapped_column(
+        ForeignKey("approvals.id", ondelete="SET NULL"), index=True
+    )
+    citation_text: Mapped[str] = mapped_column(Text, default="")
+    review_reason: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class BrainRelationshipModel(Base, TimestampMixin):
+    __tablename__ = "brain_relationships"
+    __table_args__ = (
+        UniqueConstraint("source_entity_id", "relationship_type", "target_entity_id", "source_fact_id", name="uq_brain_relationship"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    source_entity_id: Mapped[str] = mapped_column(ForeignKey("brain_entities.id", ondelete="CASCADE"), index=True)
+    target_entity_id: Mapped[str] = mapped_column(ForeignKey("brain_entities.id", ondelete="CASCADE"), index=True)
+    relationship_type: Mapped[str] = mapped_column(String(120), index=True)
+    source_fact_id: Mapped[str | None] = mapped_column(ForeignKey("brain_facts.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(30), default="proposed", index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class BrainConflictModel(Base, TimestampMixin):
+    __tablename__ = "brain_conflicts"
+    __table_args__ = (UniqueConstraint("fact_a_id", "fact_b_id", name="uq_brain_conflict_pair"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    fact_a_id: Mapped[str] = mapped_column(ForeignKey("brain_facts.id", ondelete="CASCADE"), index=True)
+    fact_b_id: Mapped[str] = mapped_column(ForeignKey("brain_facts.id", ondelete="CASCADE"), index=True)
+    reason: Mapped[str] = mapped_column(Text)
+    severity: Mapped[str] = mapped_column(String(30), default="medium")
+    status: Mapped[str] = mapped_column(String(30), default="open", index=True)
+    resolution: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class BrainGapModel(Base, TimestampMixin):
+    __tablename__ = "brain_gaps"
+    __table_args__ = (UniqueConstraint("gap_key", name="uq_brain_gap_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    gap_key: Mapped[str] = mapped_column(String(64))
+    question: Mapped[str] = mapped_column(Text)
+    context: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(30), default="open", index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class BrainModelCallModel(Base):
+    __tablename__ = "brain_model_calls"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    purpose: Mapped[str] = mapped_column(String(80), index=True)
+    resource_type: Mapped[str] = mapped_column(String(50))
+    resource_id: Mapped[str] = mapped_column(String(100), index=True)
+    prompt: Mapped[str] = mapped_column(Text)
+    model_id: Mapped[str] = mapped_column(String(200))
+    structured_output: Mapped[dict] = mapped_column(JSON, default=dict)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class BrainMaintenanceRunModel(Base, TimestampMixin):
+    __tablename__ = "brain_maintenance_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    maintenance_date: Mapped[str] = mapped_column(String(10), unique=True)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class RetrievalEvaluationModel(Base, TimestampMixin):
+    __tablename__ = "retrieval_evaluations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    dataset_version: Mapped[str] = mapped_column(String(80))
+    pipeline_version: Mapped[str] = mapped_column(String(80))
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(30), default="completed")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class RetrievalCacheModel(Base):
+    __tablename__ = "retrieval_cache"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    query_hash: Mapped[str] = mapped_column(String(64), index=True)
+    scope_hash: Mapped[str] = mapped_column(String(64), index=True)
+    model_version: Mapped[str] = mapped_column(String(200))
+    index_version: Mapped[int] = mapped_column(Integer)
+    query_vector: Mapped[list] = mapped_column(
+        Vector(384).with_variant(JSON(), "sqlite"), default=list
+    )
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SkillModel(Base, TimestampMixin):
+    __tablename__ = "skills"
+    __table_args__ = (UniqueConstraint("scope_type", "scope_id", "name", name="uq_skill_scope_name"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text, default="")
+    scope_type: Mapped[str] = mapped_column(String(30), index=True)
+    scope_id: Mapped[str] = mapped_column(String(100), default="", index=True)
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    active_revision_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class SkillRevisionModel(Base):
+    __tablename__ = "skill_revisions"
+    __table_args__ = (UniqueConstraint("skill_id", "revision_number", name="uq_skill_revision_number"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), index=True)
+    revision_number: Mapped[int] = mapped_column(Integer)
+    instructions: Mapped[str] = mapped_column(Text)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    vector: Mapped[list] = mapped_column(Vector(384).with_variant(JSON(), "sqlite"), default=list)
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String(100), default="administrator")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class LearningSuggestionModel(Base, TimestampMixin):
+    __tablename__ = "learning_suggestions"
+    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_learning_suggestion_idempotency"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    source_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"), index=True)
+    skill_id: Mapped[str | None] = mapped_column(ForeignKey("skills.id", ondelete="SET NULL"), index=True)
+    scope_type: Mapped[str] = mapped_column(String(30))
+    scope_id: Mapped[str] = mapped_column(String(100), default="")
+    title: Mapped[str] = mapped_column(String(200))
+    rationale: Mapped[str] = mapped_column(Text)
+    proposed_instructions: Mapped[str] = mapped_column(Text)
+    diff_text: Mapped[str] = mapped_column(Text, default="")
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class RunKnowledgeUseModel(Base):
+    __tablename__ = "run_knowledge_uses"
+    __table_args__ = (UniqueConstraint("run_id", "resource_type", "resource_id", "resource_version", name="uq_run_knowledge_use"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("council_runs.id", ondelete="CASCADE"), index=True)
+    resource_type: Mapped[str] = mapped_column(String(30))
+    resource_id: Mapped[str] = mapped_column(String(100))
+    resource_version: Mapped[int] = mapped_column(Integer, default=1)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MCPTokenModel(Base, TimestampMixin):
+    __tablename__ = "mcp_tokens"
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_mcp_token_hash"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120))
+    token_hash: Mapped[str] = mapped_column(String(64), index=True)
+    prefix: Mapped[str] = mapped_column(String(12))
+    scopes: Mapped[list] = mapped_column(JSON, default=list)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class MCPCallModel(Base):
+    __tablename__ = "mcp_calls"
+    __table_args__ = (Index("ix_mcp_call_rate", "token_id", "created_at"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    token_id: Mapped[str] = mapped_column(ForeignKey("mcp_tokens.id", ondelete="CASCADE"), index=True)
+    method: Mapped[str] = mapped_column(String(100))
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

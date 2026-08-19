@@ -1,0 +1,28 @@
+{
+  "version": "native-brain-v1",
+  "description": "Fixed smoke dataset. Replace the source hashes with the controlled evaluation corpus before production promotion.",
+  "baseline_metrics": {
+    "precision_at_k": 0.0,
+    "citation_correctness": 0.0,
+    "latency_p50_ms": 0.0,
+    "provider_cost_usd": 0.0
+  },
+  "cases": [
+    {
+      "id": "product-evidence",
+      "query": "What product claims are supported by the approved product evidence?",
+      "expected_document_hashes": ["REPLACE_WITH_CONTROLLED_CORPUS_SHA256"],
+      "document_hashes": ["REPLACE_WITH_CONTROLLED_CORPUS_SHA256"],
+      "graph_expansion": true,
+      "top_k": 5
+    },
+    {
+      "id": "grant-deliverables",
+      "query": "Which deliverables and measurable outcomes are stated in the source proposal?",
+      "expected_document_hashes": ["REPLACE_WITH_CONTROLLED_GRANT_SHA256"],
+      "document_hashes": ["REPLACE_WITH_CONTROLLED_GRANT_SHA256"],
+      "graph_expansion": true,
+      "top_k": 5
+    }
+  ]
+}

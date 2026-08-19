@@ -4,8 +4,8 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, Check, Clock3, Play, RefreshCw, Save } from 'lucide-react';
-import { fetchWorkflowDetails, triggerWorkflow, updateWorkflow } from '../../lib/api';
-import { JsonObject, SchedulePreset, WorkflowDefinition, WorkflowDetails } from '../../lib/types';
+import { fetchKnowledgeBinding, fetchKnowledgeCollections, fetchWorkflowDetails, triggerWorkflow, updateKnowledgeBinding, updateWorkflow } from '../../lib/api';
+import { JsonObject, KnowledgeCollection, SchedulePreset, WorkflowDefinition, WorkflowDetails } from '../../lib/types';
 
 interface ScheduleChoice {
   id: SchedulePreset;
@@ -79,6 +79,9 @@ export default function WorkflowDetailPage() {
   const params = useParams<{ id: string }>();
   const workflowId = params.id;
   const [workflow, setWorkflow] = useState<WorkflowDetails | null>(null);
+  const [collections, setCollections] = useState<KnowledgeCollection[]>([]);
+  const [collectionIds, setCollectionIds] = useState<string[]>([]);
+  const [bindingVersion, setBindingVersion] = useState(1);
   const [schedulePreset, setSchedulePreset] = useState<SchedulePreset>('manual');
   const [customPrompt, setCustomPrompt] = useState('');
   const [videoTitle, setVideoTitle] = useState('');
@@ -93,8 +96,12 @@ export default function WorkflowDetailPage() {
 
   const load = useCallback(async () => {
     try {
-      const details = await fetchWorkflowDetails(workflowId);
+      const [details, knowledgeCollections, binding] = await Promise.all([
+        fetchWorkflowDetails(workflowId), fetchKnowledgeCollections(), fetchKnowledgeBinding('workflow', workflowId),
+      ]);
       setWorkflow(details);
+      setCollections(knowledgeCollections);
+      setCollectionIds(binding.collection_ids); setBindingVersion(binding.version);
       setSchedulePreset(selectedSchedule(details.id, details.schedule));
       const prompt = details.settings.custom_prompt;
       setCustomPrompt(typeof prompt === 'string' ? prompt : '');
@@ -108,10 +115,12 @@ export default function WorkflowDetailPage() {
 
   useEffect(() => {
     let active = true;
-    void fetchWorkflowDetails(workflowId)
-      .then((details) => {
+    void Promise.all([fetchWorkflowDetails(workflowId), fetchKnowledgeCollections(), fetchKnowledgeBinding('workflow', workflowId)])
+      .then(([details, knowledgeCollections, binding]) => {
         if (!active) return;
         setWorkflow(details);
+        setCollections(knowledgeCollections);
+        setCollectionIds(binding.collection_ids); setBindingVersion(binding.version);
         setSchedulePreset(selectedSchedule(details.id, details.schedule));
         const prompt = details.settings.custom_prompt;
         setCustomPrompt(typeof prompt === 'string' ? prompt : '');
@@ -135,6 +144,8 @@ export default function WorkflowDetailPage() {
         custom_prompt: customPrompt,
         ...(scheduleEditable ? { schedule_preset: schedulePreset } : {}),
       }));
+      await updateKnowledgeBinding('workflows', workflow.id, collectionIds, bindingVersion);
+      setBindingVersion((current) => current + 1);
       setWorkflow((current) => current ? { ...current, ...result } : null);
       setSchedulePreset(selectedSchedule(result.id, result.schedule));
       const choice = SCHEDULE_OPTIONS[workflow.id]?.find((option) => option.id === schedulePreset);
@@ -224,6 +235,11 @@ export default function WorkflowDetailPage() {
             <span className="mt-1 block text-xs font-normal text-slate-500">Optional guidance this automation should follow each time it runs.</span>
             <textarea value={customPrompt} onChange={(event) => setCustomPrompt(event.target.value)} maxLength={20_000} className="mt-2 min-h-24 w-full input-shell rounded-xl p-3 text-sm font-normal text-slate-100 outline-none focus:border-cyan-300/40" />
           </label>
+          <fieldset>
+            <legend className="text-sm font-semibold text-slate-300">Knowledge collections</legend>
+            <p className="mt-1 text-xs leading-5 text-slate-500">Only checked collections can ground this automation. Source IDs cannot be injected from a manual trigger.</p>
+            {collections.length === 0 ? <p className="mt-3 rounded-xl border border-white/8 bg-white/[.025] p-4 text-xs text-slate-500">Create a collection in Knowledge before binding evidence here.</p> : <div className="mt-3 grid gap-2 sm:grid-cols-2">{collections.map((collection) => { const selected = collectionIds.includes(collection.id); return <button type="button" key={collection.id} aria-pressed={selected} onClick={() => setCollectionIds((current) => selected ? current.filter((id) => id !== collection.id) : [...current, collection.id])} className={`choice-card flex items-center gap-3 rounded-xl border p-3 text-left ${selected ? 'border-cyan-300/35 bg-cyan-300/10' : 'border-white/10 bg-white/[.025]'}`}><span className={`grid h-6 w-6 shrink-0 place-items-center rounded-lg border ${selected ? 'border-cyan-300 bg-cyan-300 text-[#04111b]' : 'border-white/15 text-transparent'}`}><Check className="h-3.5 w-3.5" /></span><span><span className="block text-sm font-bold text-slate-200">{collection.name}</span><span className="text-xs text-slate-500">{collection.document_count} sources</span></span></button>; })}</div>}
+          </fieldset>
         </div>
         <button disabled={busy} onClick={() => void save()} className="mt-5 flex h-10 items-center gap-2 rounded-xl bg-cyan-300 px-4 text-sm font-black text-[#04111b] disabled:opacity-50"><Save className="h-4 w-4" /> Save changes</button>
       </section>

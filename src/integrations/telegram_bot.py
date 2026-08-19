@@ -284,6 +284,9 @@ async def send_draft_for_approval(
     confidence: float = 0.0,
     destination_chat_id: int | None = None,
     council: str = "",
+    retrieval_warnings: list[str] | None = None,
+    knowledge_sources: list[str] | None = None,
+    skill_revisions: list[str] | None = None,
 ):
     """Send a persisted task draft with DB-backed approval actions."""
     if not _token():
@@ -296,6 +299,13 @@ async def send_draft_for_approval(
     )
     if context_summary:
         msg += f"Task: {html.escape(context_summary[:500])}\n"
+    if knowledge_sources:
+        msg += f"Evidence: <b>{len(knowledge_sources)}</b> scoped source(s)\n"
+    if skill_revisions:
+        msg += "Skills: " + html.escape(", ".join(skill_revisions[:4])) + "\n"
+    if retrieval_warnings:
+        warning_text = "; ".join(str(item) for item in retrieval_warnings[:3])
+        msg += f"⚠️ Retrieval: {html.escape(warning_text[:700])}\n"
     msg += (
         f"\n<blockquote>{html.escape(display_draft)}</blockquote>\n"
         f"Task ID: <code>{html.escape(task_id)}</code>"

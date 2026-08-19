@@ -45,6 +45,8 @@ APPROVED_MODELS = frozenset(
     for profile in COUNCIL_MODEL_PROFILES.values()
     for model_id in (profile.generator, profile.critic)
 )
+BRAIN_MODEL = "google/gemini-3.7-flash"
+OPERATIONAL_MODELS = APPROVED_MODELS | {BRAIN_MODEL}
 
 # Compatibility names are deliberately mapped only to approved models. New
 # production code should call ``get_council_model`` instead of selecting tiers.
@@ -80,7 +82,7 @@ def get_council_model(council: str, role: str) -> str:
 
 def assert_approved_model(model_id: str) -> str:
     """Validate and return a model ID without applying any substitution."""
-    if model_id not in APPROVED_MODELS:
+    if model_id not in OPERATIONAL_MODELS:
         raise ModelPolicyError(f"Model {model_id!r} is not in the production allowlist.")
     return model_id
 
@@ -267,10 +269,10 @@ async def validate_approved_models(*, cache_seconds: int = 300) -> dict[str, Any
         return _model_validation_cache[1]
     response = await get_client().models.list()
     available = {item.id for item in response.data}
-    missing = sorted(APPROVED_MODELS - available)
+    missing = sorted(OPERATIONAL_MODELS - available)
     result = {
         "ready": not missing,
-        "approved_models": sorted(APPROVED_MODELS),
+        "approved_models": sorted(OPERATIONAL_MODELS),
         "missing_models": missing,
     }
     _model_validation_cache = (now, result)

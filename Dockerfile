@@ -2,7 +2,8 @@ FROM python:3.11-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HF_HOME=/app/.cache/huggingface
 
 WORKDIR /app
 
@@ -13,13 +14,20 @@ RUN apt-get update \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Bake the local embedding and reranking models into the immutable image so a
+# production worker never depends on a first-request model download.
+RUN python -c "from sentence_transformers import CrossEncoder, SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5'); CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
+
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY src ./src
 
 RUN groupadd --system council \
     && useradd --system --gid council --home-dir /app council \
-    && mkdir -p /app/data /app/credentials /app/backups \
+    && mkdir -p /app/data /app/credentials /app/backups /app/.cache/huggingface \
     && chown -R council:council /app
 
 USER council
