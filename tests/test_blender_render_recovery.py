@@ -184,11 +184,24 @@ async def test_list_pods_uses_current_rest_shape(monkeypatch):
         }]
 
     monkeypatch.setattr(runpod, "_rest", fake_rest)
+    async def fake_runtimes():
+        return {
+            "pod-safe-123": {
+                "uptimeInSeconds": 42,
+                "gpus": [{"id": "gpu-1", "gpuUtilPercent": 73, "memoryUtilPercent": 21}],
+                "container": {"cpuPercent": 12, "memoryPercent": 8},
+            }
+        }
+
+    monkeypatch.setattr(runpod, "_pod_runtimes", fake_runtimes)
     pods = await runpod.list_pods()
     assert calls == [("GET", "/pods")]
     assert pods[0]["gpu_count"] == 1
     assert pods[0]["cost_per_hour"] == 0.53
     assert pods[0]["proxy_url"] == "https://pod-safe-123-6901.proxy.runpod.net"
+    assert pods[0]["gpu_utilization"][0]["gpu_percent"] == 73
+    assert pods[0]["cpu_percent"] == 12
+    assert pods[0]["telemetry_status"] == "live"
 
 
 @pytest.mark.asyncio

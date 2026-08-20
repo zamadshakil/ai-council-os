@@ -229,11 +229,35 @@ def _runtime_health() -> dict[str, Any]:
             if len(parts) >= 4:
                 gpus.append({"index": int(parts[0]), "name": parts[1], "driver_version": parts[2], "vram_total_mb": float(parts[3])})
     renderer = ""
+    virtualgl_renderer = ""
+    virtualgl_display = ""
     display = os.getenv("DISPLAY", "").strip()
     if display and shutil.which("glxinfo"):
         code, output = _command_output(["glxinfo", "-B"])
         if code == 0:
             renderer = next((line.split(":", 1)[1].strip() for line in output.splitlines() if "OpenGL renderer string" in line), "")
+        virtualgl = shutil.which("vglrun")
+        if not virtualgl and Path("/opt/VirtualGL/bin/vglrun").is_file():
+            virtualgl = "/opt/VirtualGL/bin/vglrun"
+        if virtualgl:
+            for candidate in ("egl0", "egl"):
+                vgl_code, vgl_output = _command_output(
+                    [virtualgl, "-d", candidate, "glxinfo", "-B"], timeout=30
+                )
+                if vgl_code != 0:
+                    continue
+                detected = next(
+                    (
+                        line.split(":", 1)[1].strip()
+                        for line in vgl_output.splitlines()
+                        if "OpenGL renderer string" in line
+                    ),
+                    "",
+                )
+                if detected and "llvmpipe" not in detected.lower() and "software" not in detected.lower():
+                    virtualgl_renderer = detected
+                    virtualgl_display = candidate
+                    break
     try:
         import psutil
 
@@ -261,6 +285,9 @@ def _runtime_health() -> dict[str, Any]:
         "display": display,
         "opengl_renderer": renderer,
         "opengl_hardware_accelerated": bool(renderer and "llvmpipe" not in renderer.lower() and "software" not in renderer.lower()),
+        "virtualgl_available": bool(virtualgl_renderer),
+        "virtualgl_renderer": virtualgl_renderer,
+        "virtualgl_display": virtualgl_display,
         **host,
     }
 

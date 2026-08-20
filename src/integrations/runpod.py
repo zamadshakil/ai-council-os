@@ -12,6 +12,7 @@ from src.core.integration_context import integration_value
 
 
 RUNPOD_REST_URL = "https://rest.runpod.io/v1"
+RUNPOD_GRAPHQL_URL = "https://api.runpod.io/graphql"
 _POD_ID = re.compile(r"^[A-Za-z0-9_-]{3,100}$")
 _IMMUTABLE_BLENDER_IMAGE = re.compile(
     r"ghcr\.io/[a-z0-9._-]+/[a-z0-9._/-]+:[a-f0-9]{40}"
@@ -79,6 +80,51 @@ async def _rest(
     return data
 
 
+async def _pod_runtimes() -> dict[str, dict[str, Any]]:
+    """Fetch live Pod telemetry from RunPod's documented GraphQL surface.
+
+    The REST Pod schema intentionally does not include runtime utilization.
+    Keep the API key out of errors/logs even though RunPod's legacy GraphQL
+    authentication requires it as a query parameter.
+    """
+    query = """
+    query CouncilPodRuntime {
+      myself {
+        pods {
+          id
+          runtime {
+            uptimeInSeconds
+            gpus { id gpuUtilPercent memoryUtilPercent }
+            container { cpuPercent memoryPercent }
+          }
+        }
+      }
+    }
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                RUNPOD_GRAPHQL_URL,
+                params={"api_key": _api_key()},
+                json={"query": query},
+            )
+    except httpx.HTTPError as exc:
+        raise RunPodError("RunPod telemetry could not be reached") from exc
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RunPodError("RunPod telemetry returned an unreadable response") from exc
+    if response.is_error or not isinstance(payload, dict) or payload.get("errors"):
+        raise RunPodError("RunPod telemetry rejected the request")
+    myself = (payload.get("data") or {}).get("myself") or {}
+    pods = myself.get("pods") or []
+    return {
+        str(item.get("id")): dict(item.get("runtime") or {})
+        for item in pods
+        if isinstance(item, dict) and item.get("id")
+    }
+
+
 def _pod_id(value: str) -> str:
     value = value.strip()
     if not _POD_ID.fullmatch(value):
@@ -123,6 +169,7 @@ def _shape_pod(pod: dict[str, Any]) -> dict[str, Any]:
                 )
             except ValueError:
                 pass
+    container = runtime.get("container") if isinstance(runtime.get("container"), dict) else {}
     return {
         "id": str(pod.get("id", "")),
         "name": str(pod.get("name", "") or pod.get("id", "")),
@@ -140,6 +187,9 @@ def _shape_pod(pod: dict[str, Any]) -> dict[str, Any]:
             for gpu in (runtime.get("gpus") or [])
             if isinstance(gpu, dict)
         ],
+        "cpu_percent": float(container.get("cpuPercent") or 0),
+        "memory_percent": float(container.get("memoryPercent") or 0),
+        "telemetry_status": "live" if runtime else "unavailable",
         "proxy_url": proxy_url,
     }
 
@@ -148,7 +198,16 @@ async def list_pods() -> list[dict[str, Any]]:
     data = await _rest("GET", "/pods")
     if not isinstance(data, list):
         raise RunPodError("RunPod did not return the pod list")
-    return [_shape_pod(pod) for pod in data]
+    try:
+        runtimes = await _pod_runtimes()
+    except RunPodError:
+        # Lifecycle controls remain available during a metrics-only outage,
+        # but every shaped Pod explicitly reports telemetry as unavailable.
+        runtimes = {}
+    return [
+        _shape_pod({**pod, "runtime": runtimes.get(str(pod.get("id")), {})})
+        for pod in data
+    ]
 
 
 def _shape_template(template: dict[str, Any]) -> dict[str, Any]:

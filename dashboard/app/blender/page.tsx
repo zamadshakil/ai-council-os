@@ -319,6 +319,12 @@ export default function BlenderManagerPage() {
             <button onClick={() => void podAction(pod, 'reveal_access')} disabled={busy.startsWith(pod.id)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/12 px-3 text-xs font-bold text-slate-200 disabled:opacity-45">Show Kasm login</button>
           </div>
           <p className="mt-3 text-xs text-slate-400">${pod.cost_per_hour.toFixed(3)}/hr · {duration(pod.uptime_seconds)}</p>
+          {pod.telemetry_status === 'live' ? <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-slate-300 sm:grid-cols-4">
+            <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">GPU <strong className="text-cyan-200">{(pod.gpu_utilization[0]?.gpu_percent ?? 0).toFixed(0)}%</strong></span>
+            <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">VRAM <strong className="text-fuchsia-200">{(pod.gpu_utilization[0]?.memory_percent ?? 0).toFixed(0)}%</strong></span>
+            <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">CPU <strong className="text-emerald-200">{pod.cpu_percent.toFixed(0)}%</strong></span>
+            <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">RAM <strong className="text-amber-200">{pod.memory_percent.toFixed(0)}%</strong></span>
+          </div> : <p className="mt-3 text-[11px] font-bold text-amber-200">Live provider telemetry unavailable</p>}
         </article>)}</div>
         {runtimeAccess && <div className="mt-4 rounded-2xl border border-amber-300/25 bg-amber-300/8 p-4" role="status"><p className="text-xs font-black uppercase tracking-wider text-amber-100">Private Kasm login</p><dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs"><dt className="text-slate-400">Username</dt><dd className="select-all font-mono text-white">{runtimeAccess.username}</dd><dt className="text-slate-400">Password</dt><dd className="select-all break-all font-mono text-white">{runtimeAccess.password}</dd></dl><a href={runtimeAccess.url} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-2 text-xs font-bold text-cyan-200"><ExternalLink className="h-4 w-4" />Open secured Kasm</a></div>}
         {!pods.length && !loading && <div className="mt-5 rounded-2xl border border-dashed border-white/15 p-6 text-center"><Box className="mx-auto h-7 w-7 text-slate-500" /><p className="mt-2 text-sm text-slate-400">No verified RunPod machine found.</p></div>}

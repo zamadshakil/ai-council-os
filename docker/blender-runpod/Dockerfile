@@ -7,6 +7,7 @@ USER root
 
 ARG BLENDER_VERSION=5.0.1
 ARG BLENDER_SHA256=8019580ee1b7262e505f4196a00237ccf743c88d205b38d34201510676e60b09
+ARG BLENDER_SAMPLE_SHA256=d566eec833f933762daa206b57bbc3e05ef38bbdf0aacd373ae68818f0b404e7
 
 ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
@@ -34,6 +35,16 @@ RUN curl --fail --location --retry 5 --retry-delay 3 \
     && tar -xJf /tmp/blender.tar.xz -C /opt/blender --strip-components=1 \
     && rm /tmp/blender.tar.xz \
     && /opt/blender/blender --background --version
+
+# Small, checksum-pinned Blender Foundation demo used only for an explicitly
+# requested GPU smoke test. It avoids depending on an artist upload while
+# keeping arbitrary remote downloads out of the runtime agent.
+RUN mkdir -p /opt/council/samples \
+    && curl --fail --location --retry 5 --retry-delay 3 \
+        "https://download.blender.org/demo/Blender-282.blend" \
+        --output /opt/council/samples/Blender-282.blend \
+    && echo "${BLENDER_SAMPLE_SHA256}  /opt/council/samples/Blender-282.blend" \
+        | sha256sum --check --strict
 
 RUN /opt/blender/5.0/python/bin/python3.11 -m pip install --no-cache-dir --upgrade \
         "setuptools==83.0.0" "urllib3==2.7.0"

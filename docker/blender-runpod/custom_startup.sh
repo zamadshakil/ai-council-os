@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-mkdir -p /workspace/logs /workspace/render_jobs /workspace/.council-blender
+mkdir -p /workspace/logs /workspace/render_jobs /workspace/.council-blender/samples
+sample_target=/workspace/.council-blender/samples/Blender-282.blend
+if [[ ! -s "$sample_target" ]]; then
+    cp /opt/council/samples/Blender-282.blend "$sample_target"
+fi
 agent_token="${BLENDER_AGENT_TOKEN:-}"
 if [[ ${#agent_token} -lt 32 ]]; then
     echo "BLENDER_AGENT_TOKEN is missing or too short; production agent disabled." >> /workspace/logs/startup.log

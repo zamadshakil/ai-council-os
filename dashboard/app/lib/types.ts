@@ -291,6 +291,9 @@ export interface BlenderPod {
   cost_per_hour: number;
   uptime_seconds: number;
   gpu_utilization: Array<{ id: string; gpu_percent: number; memory_percent: number }>;
+  cpu_percent: number;
+  memory_percent: number;
+  telemetry_status: 'live' | 'unavailable';
   proxy_url: string;
 }
 
