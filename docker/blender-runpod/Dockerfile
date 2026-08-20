@@ -8,6 +8,9 @@ USER root
 ARG BLENDER_VERSION=5.0.1
 ARG BLENDER_SHA256=8019580ee1b7262e505f4196a00237ccf743c88d205b38d34201510676e60b09
 ARG BLENDER_SAMPLE_SHA256=d566eec833f933762daa206b57bbc3e05ef38bbdf0aacd373ae68818f0b404e7
+ARG GOOGLE_CHROME_VERSION=151.0.7922.173-1
+ARG GOOGLE_CHROME_SHA256=878e5ab495b8a694980fca61bc09b37e651ccedce2291c73434d16e48a2646fd
+ARG BLENDER_GPU_SAMPLE_SHA256=74f5dc6d718fc565e0ff50e355be7f8b1a58983cc9ae79775608d8905c269ee4
 
 ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
@@ -24,8 +27,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl ffmpeg jq libasound2t64 libegl1 libgl1 libglvnd0 \
         libice6 libsm6 libvulkan1 libx11-6 libxcursor1 libxext6 libxfixes3 \
         libxi6 libxinerama1 libxkbcommon0 libxkbcommon-x11-0 libxrandr2 libxrender1 libxxf86vm1 \
-        mesa-utils procps python3-venv rclone util-linux xz-utils \
+        mesa-utils procps python3-venv rclone unzip util-linux xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# The Kasm core desktop ships an XFCE "Web Browser" launcher but no browser.
+# Install a checksum-pinned Chrome build, then wrap it with the same container-
+# safe flags used by Kasm's maintained Chrome workspace.
+RUN curl --fail --location --retry 5 --retry-delay 3 \
+        "https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${GOOGLE_CHROME_VERSION}_amd64.deb" \
+        --output /tmp/google-chrome.deb \
+    && echo "${GOOGLE_CHROME_SHA256}  /tmp/google-chrome.deb" | sha256sum --check --strict \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends /tmp/google-chrome.deb \
+    && rm -f /tmp/google-chrome.deb /etc/apt/sources.list.d/google-chrome.list \
+    && rm -rf /var/lib/apt/lists/* \
+    && mv /usr/bin/google-chrome /usr/bin/google-chrome-orig \
+    && sed -i 's/-stable//g' /usr/share/applications/google-chrome.desktop
 
 RUN curl --fail --location --retry 5 --retry-delay 3 \
         "https://download.blender.org/release/Blender5.0/blender-${BLENDER_VERSION}-linux-x64.tar.xz" \
@@ -46,6 +63,17 @@ RUN mkdir -p /opt/council/samples \
     && echo "${BLENDER_SAMPLE_SHA256}  /opt/council/samples/Blender-282.blend" \
         | sha256sum --check --strict
 
+# A small official Cycles benchmark with packed resources. Unlike the UI demo
+# above, this scene can pass the missing-asset gate and prove real GPU compute.
+RUN curl --fail --location --retry 5 --retry-delay 3 \
+        "https://download.blender.org/demo/test/BMW27_2.blend.zip" \
+        --output /tmp/BMW27_2.blend.zip \
+    && echo "${BLENDER_GPU_SAMPLE_SHA256}  /tmp/BMW27_2.blend.zip" \
+        | sha256sum --check --strict \
+    && unzip -q /tmp/BMW27_2.blend.zip -d /tmp/bmw27 \
+    && mv /tmp/bmw27/bmw27/bmw27_gpu.blend /opt/council/samples/BMW27_GPU.blend \
+    && rm -rf /tmp/BMW27_2.blend.zip /tmp/bmw27
+
 RUN /opt/blender/5.0/python/bin/python3.11 -m pip install --no-cache-dir --upgrade \
         "setuptools==83.0.0" "urllib3==2.7.0"
 
@@ -63,12 +91,22 @@ RUN mkdir -p /opt/council /workspace/render_jobs /workspace/logs /workspace/.con
 
 COPY src/scripts/blender_listener.py src/scripts/blender_job.py src/scripts/blender_mixdown.py src/scripts/blender_gui_bootstrap.py /opt/council/
 COPY docker/blender-runpod/blender-launcher.sh /usr/local/bin/blender
+COPY docker/blender-runpod/chrome-launcher.sh /usr/bin/google-chrome
 COPY docker/blender-runpod/custom_startup.sh /dockerstartup/custom_startup.sh
 COPY docker/blender-runpod/Blender.desktop /home/kasm-default-profile/Desktop/Blender.desktop
 
-RUN chmod 0755 /usr/local/bin/blender /dockerstartup/custom_startup.sh \
+RUN chmod 0755 /usr/local/bin/blender /usr/bin/google-chrome /dockerstartup/custom_startup.sh \
         /home/kasm-default-profile/Desktop/Blender.desktop \
     && chmod 0644 /opt/council/*.py \
+    && cp /usr/share/applications/google-chrome.desktop \
+        /home/kasm-default-profile/Desktop/google-chrome.desktop \
+    && chmod 0755 /home/kasm-default-profile/Desktop/google-chrome.desktop \
+    && mkdir -p /home/kasm-default-profile/.config \
+    && HOME=/home/kasm-default-profile xdg-mime default google-chrome.desktop text/html \
+    && HOME=/home/kasm-default-profile xdg-mime default google-chrome.desktop x-scheme-handler/http \
+    && HOME=/home/kasm-default-profile xdg-mime default google-chrome.desktop x-scheme-handler/https \
+    && update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/google-chrome 250 \
+    && update-alternatives --set x-www-browser /usr/bin/google-chrome \
     && ln -s /workspace /home/kasm-default-profile/Desktop/Workspace \
     && chown -R 1000:0 /home/kasm-default-profile /workspace /opt/council \
     && chmod -R g=u /home/kasm-default-profile /workspace \

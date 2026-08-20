@@ -6,6 +6,10 @@ sample_target=/workspace/.council-blender/samples/Blender-282.blend
 if [[ ! -s "$sample_target" ]]; then
     cp /opt/council/samples/Blender-282.blend "$sample_target"
 fi
+gpu_sample_target=/workspace/.council-blender/samples/BMW27_GPU.blend
+if [[ ! -s "$gpu_sample_target" ]]; then
+    cp /opt/council/samples/BMW27_GPU.blend "$gpu_sample_target"
+fi
 agent_token="${BLENDER_AGENT_TOKEN:-}"
 if [[ ${#agent_token} -lt 32 ]]; then
     echo "BLENDER_AGENT_TOKEN is missing or too short; production agent disabled." >> /workspace/logs/startup.log

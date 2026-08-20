@@ -101,6 +101,14 @@ jobs:
             sleep 2
           done
           test "${agent_ready}" -eq 1
+
+          docker exec "${container_id}" google-chrome --version \
+            | grep --fixed-strings 'Google Chrome'
+          docker exec --env HOME=/home/kasm-user "${container_id}" \
+            xdg-mime query default text/html \
+            | grep --fixed-strings 'google-chrome.desktop'
+          docker exec "${container_id}" test -s \
+            /opt/council/samples/BMW27_GPU.blend
       - name: Scan immutable image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
