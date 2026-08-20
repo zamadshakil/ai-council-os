@@ -407,14 +407,38 @@ async def workflow_connections_verified(workflow_id: str) -> bool:
 
 async def decrypted_provider_env(provider: str, *, require_verified: bool = True) -> dict[str, str]:
     async with async_session() as session:
-        row = await session.get(IntegrationConnectionModel, provider)
-    if row is None:
-        raise VaultConfigurationError(f"{provider} is not configured")
-    if require_verified and row.status != "verified":
-        raise VaultConfigurationError(f"{provider} credentials are not verified")
-    values = _decrypt(row.encrypted_credentials)
-    if _fingerprint(provider, values) != row.credential_fingerprint:
-        raise VaultConfigurationError(f"{provider} credential integrity check failed")
+        row = await session.get(
+            IntegrationConnectionModel,
+            provider,
+            with_for_update=provider == "runpod",
+        )
+        if row is None:
+            raise VaultConfigurationError(f"{provider} is not configured")
+        if require_verified and row.status != "verified":
+            raise VaultConfigurationError(f"{provider} credentials are not verified")
+        values = _decrypt(row.encrypted_credentials)
+        if _fingerprint(provider, values) != row.credential_fingerprint:
+            raise VaultConfigurationError(f"{provider} credential integrity check failed")
+
+        # Connections saved before the Blender/Kasm runtime was introduced
+        # contain only the provider API key. Backfill internal-only credentials
+        # under the same database lock so concurrent provisioning requests can
+        # never generate different agent or Kasm secrets.
+        if provider == "runpod":
+            repaired = dict(values)
+            if len(repaired.get("agent_token", "")) < 32:
+                repaired["agent_token"] = secrets.token_urlsafe(48)
+            if len(repaired.get("kasm_password", "")) < 16:
+                repaired["kasm_password"] = secrets.token_urlsafe(18)
+            repaired.setdefault("agent_port", "8001")
+            repaired.setdefault("workspace_root", "/workspace")
+            if repaired != values:
+                values = repaired
+                row.encrypted_credentials = _encrypt(values)
+                row.credential_fields = sorted(values)
+                row.credential_fingerprint = _fingerprint(provider, values)
+                row.version += 1
+                await session.commit()
     mapping = {field.key: field.env_name for field in PROVIDERS[provider].fields}
     return {mapping[key]: value for key, value in values.items() if key in mapping}
 

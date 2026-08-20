@@ -126,6 +126,9 @@ export default function BlenderManagerPage() {
   const [autoStop, setAutoStop] = useState(true);
   const [runtimeAccess, setRuntimeAccess] = useState<BlenderPodAccess | null>(null);
   const [billingConfirmed, setBillingConfirmed] = useState(false);
+  const [provisionFeedback, setProvisionFeedback] = useState<{
+    kind: 'error' | 'success'; message: string;
+  } | null>(null);
 
   const selected = jobs.find((job) => job.id === selectedId) ?? jobs[0];
   const selectedPod = pods.find((pod) => pod.id === (selected?.pod_id ?? podId));
@@ -228,14 +231,20 @@ export default function BlenderManagerPage() {
   async function provisionA6000() {
     if (!billingConfirmed) return;
     if (!window.confirm('Create and start one Secure Cloud NVIDIA RTX A6000 Pod? RunPod GPU and persistent-storage billing begins immediately.')) return;
-    setBusy('provision'); setError(''); setNotice('');
+    setBusy('provision'); setError(''); setNotice(''); setProvisionFeedback(null);
     try {
       const response = await provisionBlenderPod();
       setPods((current) => [response.resource, ...current.filter((item) => item.id !== response.resource.id)]);
       setPodId(response.resource.id);
       setBillingConfirmed(false);
-      setNotice('One RTX A6000 Kasm workstation was created. Wait for RUNNING, then verify Kasm and GPU evidence before loading the production scene.');
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'The A6000 workstation could not be created.'); }
+      const message = 'One RTX A6000 Kasm workstation was created. Wait for RUNNING, then verify Kasm and GPU evidence before loading the production scene.';
+      setNotice(message);
+      setProvisionFeedback({ kind: 'success', message });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'The A6000 workstation could not be created.';
+      setError(message);
+      setProvisionFeedback({ kind: 'error', message });
+    }
     finally { setBusy(''); }
   }
 
@@ -296,6 +305,10 @@ export default function BlenderManagerPage() {
           <div className="flex items-start gap-3"><Cpu className="mt-0.5 h-5 w-5 text-cyan-300" /><div><p className="text-sm font-black text-white">Create the safe baseline</p><p className="mt-1 text-xs leading-5 text-slate-300">Exactly 1× RTX A6000 · Secure Cloud · on-demand · 64 GB minimum host RAM · 250 GB persistent /workspace.</p></div></div>
           <label className="mt-4 flex items-start gap-3 text-xs text-slate-200"><input type="checkbox" checked={billingConfirmed} onChange={(event) => setBillingConfirmed(event.target.checked)} className="mt-0.5 h-4 w-4 accent-cyan-300" /><span>I understand RunPod GPU and storage billing begins when this Pod is created.</span></label>
           <button type="button" onClick={() => void provisionA6000()} disabled={!billingConfirmed || !!busy} className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-cyan-300 px-3 text-xs font-black text-[#04111b] disabled:cursor-not-allowed disabled:opacity-40">{busy === 'provision' ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Play className="h-4 w-4" />}{busy === 'provision' ? 'Creating A6000 workstation…' : 'Create 1-GPU Kasm workstation'}</button>
+          {provisionFeedback && <div
+            role={provisionFeedback.kind === 'error' ? 'alert' : 'status'}
+            className={`mt-3 rounded-xl border p-3 text-xs leading-5 ${provisionFeedback.kind === 'error' ? 'border-rose-300/30 bg-rose-300/10 text-rose-100' : 'border-emerald-300/30 bg-emerald-300/10 text-emerald-100'}`}
+          ><strong>{provisionFeedback.kind === 'error' ? 'Creation failed: ' : 'Created: '}</strong>{provisionFeedback.message}</div>}
         </div>
         <div className="mt-5 space-y-3">{pods.map((pod) => <article key={pod.id} className="rounded-2xl border border-white/10 bg-white/[0.035] p-4">
           <div className="flex items-start justify-between gap-3"><div><h3 className="font-bold text-white">{pod.name}</h3><p className="mt-1 break-all text-xs text-slate-400">{pod.image_name || 'Image not reported'}</p></div><span className={`rounded-full border px-2 py-1 text-[10px] font-black ${pod.desired_status === 'RUNNING' ? statusTone('ready') : statusTone('paused')}`}>{pod.desired_status}</span></div>

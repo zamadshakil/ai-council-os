@@ -78,6 +78,42 @@ async def test_credentials_are_encrypted_write_only_and_rotation_disables_workfl
 
 
 @pytest.mark.asyncio
+async def test_legacy_verified_runpod_connection_backfills_internal_runtime_credentials(
+    session_factory, monkeypatch
+):
+    monkeypatch.setenv(
+        "INTEGRATION_ENCRYPTION_KEY", Fernet.generate_key().decode("ascii")
+    )
+    monkeypatch.setattr(integration_vault, "async_session", session_factory)
+    legacy = {"api_key": "legacy-runpod-api-key"}
+    async with session_factory() as session:
+        session.add(IntegrationConnectionModel(
+            provider="runpod",
+            display_name="RunPod",
+            encrypted_credentials=integration_vault._encrypt(legacy),
+            credential_fields=["api_key"],
+            credential_fingerprint=integration_vault._fingerprint("runpod", legacy),
+            status="verified",
+        ))
+        await session.commit()
+
+    values = await integration_vault.decrypted_provider_env("runpod")
+
+    assert values["RUNPOD_API_KEY"] == "legacy-runpod-api-key"
+    assert len(values["BLENDER_AGENT_TOKEN"]) >= 32
+    assert len(values["VNC_PW"]) >= 16
+    assert values["BLENDER_AGENT_PORT"] == "8001"
+    assert values["BLENDER_WORKSPACE_ROOT"] == "/workspace"
+    async with session_factory() as session:
+        stored = await session.get(IntegrationConnectionModel, "runpod")
+        assert stored is not None
+        assert stored.status == "verified"
+        assert sorted(stored.credential_fields) == [
+            "agent_port", "agent_token", "api_key", "kasm_password", "workspace_root"
+        ]
+
+
+@pytest.mark.asyncio
 async def test_workflow_links_require_configured_allowed_providers(
     session_factory, monkeypatch
 ):
