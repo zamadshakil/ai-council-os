@@ -5,6 +5,7 @@ on:
   push:
     branches: [master]
     paths:
+      - ".github/workflows/blender-image.yml"
       - "docker/blender-runpod/**"
       - "src/scripts/blender_listener.py"
       - "src/scripts/blender_job.py"
