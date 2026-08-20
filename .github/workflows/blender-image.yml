@@ -52,6 +52,55 @@ jobs:
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
       - name: Verify published registry manifest
         run: docker buildx imagetools inspect "${{ steps.image.outputs.ref }}"
+      - name: Smoke-test Kasm desktop and safe agent
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          VNC_PASSWORD: kasm-ci-password
+          AGENT_TOKEN: council-os-ci-agent-token-0123456789abcdef
+        run: |
+          set -euo pipefail
+          container_id="$(docker run --detach --rm --shm-size=512m \
+            --env "VNC_PW=${VNC_PASSWORD}" \
+            --env "BLENDER_AGENT_TOKEN=${AGENT_TOKEN}" \
+            --publish 127.0.0.1::6901 \
+            --publish 127.0.0.1::8001 \
+            "${IMAGE_REF}")"
+          cleanup() {
+            docker logs "${container_id}" || true
+            docker rm --force "${container_id}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          kasm_port="$(docker port "${container_id}" 6901/tcp | awk -F: 'NR==1 {print $NF}')"
+          agent_port="$(docker port "${container_id}" 8001/tcp | awk -F: 'NR==1 {print $NF}')"
+          test -n "${kasm_port}"
+          test -n "${agent_port}"
+
+          kasm_ready=0
+          for _ in $(seq 1 90); do
+            if curl --insecure --silent --show-error --fail \
+              --user "kasm_user:${VNC_PASSWORD}" \
+              "https://127.0.0.1:${kasm_port}/" >/dev/null; then
+              kasm_ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "${kasm_ready}" -eq 1
+
+          agent_ready=0
+          for _ in $(seq 1 30); do
+            if curl --silent --show-error --fail \
+              --header "Authorization: Bearer ${AGENT_TOKEN}" \
+              "http://127.0.0.1:${agent_port}/healthz" \
+              | jq --exit-status '.status == "ok" or .status == "not_ready"' >/dev/null; then
+              agent_ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "${agent_ready}" -eq 1
       - name: Scan immutable image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
