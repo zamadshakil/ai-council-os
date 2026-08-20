@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Blender 5.0.1 GPU
+Comment=GPU-verified Blender with Council OS render monitoring
+Exec=/usr/local/bin/blender
+Icon=/opt/blender/blender.svg
+Terminal=false
+Categories=Graphics;3DGraphics;
+

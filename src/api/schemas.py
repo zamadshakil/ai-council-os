@@ -137,7 +137,17 @@ class KillSwitchRequest(StrictModel):
 
 
 class BlenderPodActionRequest(StrictModel):
-    action: Literal["resume", "stop"]
+    action: Literal["resume", "stop", "prepare_runtime", "reveal_access"]
+    inventory_confirmed: bool = False
+
+
+class BlenderPodProvisionRequest(StrictModel):
+    confirm_billing: Literal["CREATE_ONE_A6000_POD"]
+    idempotency_key: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 class BlenderTemplateJobRequest(StrictModel):
@@ -167,6 +177,57 @@ class BlenderTemplateJobRequest(StrictModel):
         if any(part == ".." for part in normalized.split("/")):
             raise ValueError("Source path cannot contain parent-directory traversal")
         return normalized
+
+
+class BlenderRenderJobRequest(StrictModel):
+    pod_id: str = Field(min_length=3, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    source_path: str = Field(min_length=7, max_length=1000)
+    render_mode: Literal["kasm_gui", "headless"] = "headless"
+    output_profile: Literal["delivery", "compositing"] = "delivery"
+    frame_start: int | None = Field(default=None, ge=0, le=1_000_000)
+    frame_end: int | None = Field(default=None, ge=0, le=1_000_000)
+    frame_step: int = Field(default=1, ge=1, le=1000)
+    samples: int = Field(default=0, ge=0, le=4096)
+    resolution_percent: int = Field(default=100, ge=1, le=100)
+    require_drive: bool = True
+    drive_path: str = Field(default="Council OS Renders", min_length=1, max_length=500)
+    auto_stop: bool = False
+    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+
+    @field_validator("source_path")
+    @classmethod
+    def validate_render_source_path(cls, value: str) -> str:
+        normalized = value.replace("\\", "/")
+        if not normalized.lower().endswith(".blend"):
+            raise ValueError("Source path must point to a .blend file")
+        if any(part == ".." for part in normalized.split("/")):
+            raise ValueError("Source path cannot contain parent-directory traversal")
+        return normalized
+
+    @field_validator("drive_path")
+    @classmethod
+    def validate_drive_path(cls, value: str) -> str:
+        normalized = value.strip(" /")
+        if ".." in normalized.split("/"):
+            raise ValueError("Drive path cannot contain parent-directory traversal")
+        return normalized
+
+    @field_validator("frame_end")
+    @classmethod
+    def validate_frame_range(cls, value: int | None, info):
+        start = info.data.get("frame_start")
+        if value is not None and start is not None and value < start:
+            raise ValueError("Frame end cannot be before frame start")
+        return value
+
+
+class BlenderRenderActionRequest(StrictModel):
+    action: Literal[
+        "run_preflight", "approve_benchmark", "pause", "resume", "cancel",
+        "retry_failed_frames", "retry_delivery", "stop_pod",
+    ]
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
 
 
 class StableError(BaseModel):

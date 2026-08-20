@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import inspect
 import hmac
 import json
@@ -16,7 +17,7 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from src.core import database as db
 from src.core.audit import record_audit
@@ -42,6 +43,8 @@ from src.core.models import (
     KnowledgeDocumentModel,
     OutboxEventModel,
     PublicationAttemptModel,
+    RenderFrameModel,
+    RenderJobModel,
     RunKnowledgeUseModel,
     TaskModel,
     WorkflowDefinitionModel,
@@ -116,6 +119,7 @@ class DurableWorker:
         self.register("publish.instagram_comment", self._publish_instagram_comment)
         self.register("crm.hubspot_sync", self._sync_hubspot_sales)
         self.register("blender.template_repair", self._run_blender_template_job)
+        self.register("blender.render_stage", self._run_blender_render_stage)
         for provider in ("telegram", "youtube", "meta"):
             self.register(f"webhook.{provider}", self._accept_webhook)
 
@@ -183,7 +187,7 @@ class DurableWorker:
                 "brain.learn",
             }:
                 return await decrypted_provider_env("openrouter")
-            if claim.job_type == "blender.template_repair":
+            if claim.job_type in {"blender.template_repair", "blender.render_stage"}:
                 return await decrypted_provider_env("runpod")
             if claim.job_type == "crm.hubspot_sync":
                 return await decrypted_provider_env("hubspot")
@@ -322,7 +326,7 @@ class DurableWorker:
                 "brain.learn",
             } or claim.job_type.startswith("webhook."):
                 return True, ""
-            if claim.job_type == "blender.template_repair":
+            if claim.job_type in {"blender.template_repair", "blender.render_stage"}:
                 try:
                     await decrypted_provider_env("runpod")
                 except VaultConfigurationError:
@@ -1270,6 +1274,414 @@ class DurableWorker:
             **payload,
         }
 
+    async def _run_blender_render_stage(
+        self,
+        payload: dict[str, Any],
+        claim: JobClaim,
+    ) -> dict[str, Any]:
+        """Execute and persist one stage of a production Blender render."""
+        from src.core import rendering
+        from src.integrations.runpod import (
+            cancel_blender_job,
+            get_blender_job,
+            list_pods,
+            resume_pod,
+            stop_pod,
+            submit_render_stage,
+            verify_blender_agent,
+        )
+
+        render_job_id = str(payload.get("render_job_id") or "")
+        stage = str(payload.get("stage") or "")
+        operation = stage.removeprefix("render.")
+        if operation not in {
+            "preflight", "benchmark", "observe_gui", "frame_batch",
+            "validate", "encode", "deliver",
+        }:
+            raise RuntimeError("Render stage is not allowlisted")
+        async with db.async_session() as session:
+            render_job = await session.get(RenderJobModel, render_job_id)
+        if render_job is None:
+            raise RuntimeError("The production render job no longer exists")
+        if render_job.status in {"cancelled", "paused", "completed"}:
+            return {
+                "stage": render_job.status,
+                "render_job_id": render_job_id,
+                "agent_status": "skipped",
+            }
+        requested_frames = [int(item) for item in payload.get("frames", [])]
+        if operation == "frame_batch" and requested_frames:
+            async with db.async_session() as session:
+                completed_numbers = set((await session.execute(
+                    select(RenderFrameModel.frame_number).where(
+                        RenderFrameModel.render_job_id == render_job_id,
+                        RenderFrameModel.frame_number.in_(requested_frames),
+                        RenderFrameModel.status == "completed",
+                    )
+                )).scalars().all())
+            requested_frames = [number for number in requested_frames if number not in completed_numbers]
+            if not requested_frames:
+                return {
+                    "stage": stage,
+                    "render_job_id": render_job_id,
+                    "agent_status": "already_completed",
+                }
+        pod_id = render_job.pod_id
+        should_stop = False
+
+        async def update_job(
+            *,
+            status: str | None = None,
+            next_stage: str | None = None,
+            error: str | None = None,
+            finished: bool = False,
+        ) -> RenderJobModel:
+            async with db.async_session() as session:
+                row = await session.get(RenderJobModel, render_job_id, with_for_update=True)
+                if row is None:
+                    raise RuntimeError("The production render job no longer exists")
+                if status is not None:
+                    row.status = status
+                if next_stage is not None:
+                    row.stage = next_stage
+                if error is not None:
+                    row.error = error[:8000]
+                if finished:
+                    row.finished_at = utcnow()
+                row.version += 1
+                await session.commit()
+                await session.refresh(row)
+                return row
+
+        async def queue_stage(next_stage: str, *, frames: list[int] | None = None) -> None:
+            suffix = ""
+            if frames:
+                suffix = ":" + hashlib.sha256(
+                    ",".join(map(str, frames)).encode()
+                ).hexdigest()[:16]
+            await self.jobs.enqueue(
+                workflow_id="blender_manager",
+                job_type="blender.render_stage",
+                payload={
+                    "render_job_id": render_job_id,
+                    "stage": next_stage,
+                    "frames": list(frames or []),
+                },
+                idempotency_key=f"render:{render_job_id}:{next_stage}{suffix}",
+                priority=20,
+                max_attempts=3 if next_stage != "render.deliver" else 8,
+            )
+
+        async def progress(stage_value: str, **values: Any) -> None:
+            await self.jobs.progress(
+                claim.id,
+                self.worker_id,
+                {"stage": stage_value, "render_job_id": render_job_id, **values},
+            )
+
+        try:
+            await update_job(status="running", next_stage=stage, error="")
+            await progress("checking_pod")
+            pods = await list_pods()
+            pod = next((item for item in pods if item.get("id") == pod_id), None)
+            if pod is None:
+                raise RuntimeError("The selected RunPod pod no longer exists")
+            if pod.get("desired_status") != "RUNNING":
+                await progress("starting_pod")
+                await resume_pod(pod_id)
+                deadline = asyncio.get_running_loop().time() + 600
+                while asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(8)
+                    pods = await list_pods()
+                    pod = next((item for item in pods if item.get("id") == pod_id), None)
+                    if pod and pod.get("desired_status") == "RUNNING":
+                        break
+                else:
+                    raise RuntimeError("The RunPod pod did not become ready within ten minutes")
+
+            await progress("checking_blender_agent")
+            health = await verify_blender_agent(pod_id)
+            visible_gpus = list(health.get("gpus") or [])
+            if len(visible_gpus) != 1:
+                raise RuntimeError(
+                    "Safe baseline requires exactly one visible GPU; multi-GPU rendering is disabled until soak validation passes"
+                )
+            if render_job.render_mode == "kasm_gui" and not health.get("opengl_hardware_accelerated"):
+                raise RuntimeError(
+                    "Kasm is not using the NVIDIA OpenGL renderer; software-rendered llvmpipe is blocked"
+                )
+            settings = render_job.settings or {}
+            frames = requested_frames
+            if operation == "benchmark" and not frames:
+                if render_job.frame_start is None or render_job.frame_end is None:
+                    raise RuntimeError("Preflight did not discover the scene frame range")
+                frames = rendering.representative_frames(
+                    render_job.frame_start, render_job.frame_end, 7
+                )
+            switch = await db.get_kill_switch_db()
+            if switch["is_active"]:
+                raise RuntimeError(
+                    "The Blender stage was stopped before the pod write by the global kill switch"
+                )
+            await progress("submitting_render_stage", operation=operation, agent_health=health)
+            state = await submit_render_stage(
+                pod_id,
+                job_id=claim.id,
+                render_job_id=render_job_id,
+                operation=operation,
+                source_path=render_job.source_path,
+                output_profile=render_job.output_profile,
+                frames=frames,
+                frame_start=render_job.frame_start,
+                frame_end=render_job.frame_end,
+                frame_step=render_job.frame_step,
+                samples=int(settings.get("samples") or 0),
+                resolution_percent=int(settings.get("resolution_percent") or 100),
+                expected_width=int(
+                    int((render_job.preflight or {}).get("scene", {}).get("resolution_x") or 0)
+                    * int(settings.get("resolution_percent") or 100) / 100
+                ) or None,
+                expected_height=int(
+                    int((render_job.preflight or {}).get("scene", {}).get("resolution_y") or 0)
+                    * int(settings.get("resolution_percent") or 100) / 100
+                ) or None,
+                persistent_data=bool(settings.get("persistent_data", False)),
+                backend=str(settings.get("backend") or "AUTO"),
+                fps=float((render_job.preflight or {}).get("scene", {}).get("fps") or 24.0),
+                drive_path=str(settings.get("drive_path") or "Council OS Renders"),
+                require_drive=bool(settings.get("require_drive", True)),
+                include_audio=bool(
+                    (render_job.preflight or {}).get("scene", {}).get("audio", {}).get("present")
+                ),
+            )
+            deadline = asyncio.get_running_loop().time() + (
+                24 * 60 * 60 if operation == "observe_gui" else 8 * 60 * 60
+            )
+            while state.get("status") in {"queued", "running"}:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise RuntimeError("The Blender stage exceeded its safety timeout")
+                switch = await db.get_kill_switch_db()
+                if switch["is_active"]:
+                    raise RuntimeError("The Blender stage was stopped by the global kill switch")
+                async with db.async_session() as session:
+                    current_render = await session.get(RenderJobModel, render_job_id)
+                if current_render and current_render.status in {"paused", "cancelled"}:
+                    await cancel_blender_job(pod_id, claim.id)
+                    return {
+                        "stage": current_render.status,
+                        "render_job_id": render_job_id,
+                        "agent_status": current_render.status,
+                    }
+                await progress(
+                    str(state.get("stage") or operation),
+                    agent_status=str(state.get("status") or "running"),
+                    completed_frames=int(state.get("completed_frames") or 0),
+                    expected_frames=int(state.get("expected_frames") or 0),
+                    telemetry=list(state.get("telemetry") or [])[-24:],
+                    log_tail=list(state.get("log_tail") or [])[-40:],
+                )
+                await asyncio.sleep(5)
+                state = await get_blender_job(pod_id, claim.id)
+            if state.get("status") != "completed":
+                raise RuntimeError(str(state.get("error") or "The Blender agent did not complete the stage"))
+            report = state.get("report") if isinstance(state.get("report"), dict) else {}
+            persisted = await rendering.persist_agent_snapshot(
+                render_job_id, stage=stage, agent_state=state
+            )
+
+            if operation in {"benchmark", "frame_batch", "observe_gui"}:
+                evidence = report.get("gpu_evidence") if isinstance(report.get("gpu_evidence"), dict) else {}
+                if not (
+                    evidence.get("cycles_backend_selected")
+                    and evidence.get("gpu_process_observed")
+                    and evidence.get("gpu_compute_observed")
+                ):
+                    raise RuntimeError(
+                        "Blender produced output without complete PID/NVML proof of GPU compute"
+                    )
+
+            if operation == "preflight":
+                scene = report.get("scene") if isinstance(report.get("scene"), dict) else {}
+                if scene:
+                    discovered_start = int(scene.get("frame_start", 1))
+                    discovered_end = int(scene.get("frame_end", discovered_start))
+                    requested_start = settings.get("requested_frame_start")
+                    requested_end = settings.get("requested_frame_end")
+                    start = int(requested_start) if requested_start is not None else discovered_start
+                    end = int(requested_end) if requested_end is not None else discovered_end
+                    if start < discovered_start or end > discovered_end or end < start:
+                        raise RuntimeError(
+                            "Requested frame range is outside the scene animation range"
+                        )
+                    await rendering.ensure_frames(
+                        render_job_id,
+                        start,
+                        end,
+                        render_job.frame_step,
+                    )
+                if report.get("status") == "blocked":
+                    await update_job(status="blocked", next_stage="render.preflight", error="Preflight found blockers")
+                    should_stop = persisted.auto_stop
+                else:
+                    await queue_stage("render.benchmark")
+                    await update_job(status="benchmarking", next_stage="render.benchmark")
+            elif operation == "benchmark":
+                average_size = int(report.get("average_frame_bytes") or 0)
+                average_seconds = float(report.get("average_frame_seconds") or 0)
+                projected = int(average_size * max(1, persisted.expected_frame_count) * 1.25)
+                storage = (persisted.preflight or {}).get("storage", {})
+                projected_seconds = average_seconds * max(1, persisted.expected_frame_count)
+                hourly_rate = float(pod.get("cost_per_hour") or 0)
+                projected_cost = projected_seconds / 3600 * hourly_rate
+                drive = (persisted.preflight or {}).get("drive", {})
+                drive_quota = drive.get("quota", {}) if isinstance(drive, dict) else {}
+                drive_free = int(drive_quota.get("free") or 0) if isinstance(drive_quota, dict) else 0
+                evidence = report.get("gpu_evidence", {}) if isinstance(report.get("gpu_evidence"), dict) else {}
+                host_peak = float(evidence.get("peak_host_ram_mb") or 0)
+                host_total = float(evidence.get("host_ram_total_mb") or 0)
+                required_host_gb = max(64, int((host_peak * 1.5 / 1024) + 0.999)) if host_peak else 64
+                benchmark = {
+                    **(persisted.benchmark or {}),
+                    "projected_output_bytes_with_margin": projected,
+                    "projected_runtime_seconds": projected_seconds,
+                    "projected_cost": projected_cost,
+                    "projected_cost_range": {
+                        "low": projected_cost,
+                        "high": projected_cost * 1.25,
+                    },
+                    "pod_hourly_rate": hourly_rate,
+                    "required_host_ram_gb": required_host_gb,
+                }
+                async with db.async_session() as session:
+                    row = await session.get(RenderJobModel, render_job_id, with_for_update=True)
+                    if row:
+                        row.benchmark = benchmark
+                        row.settings = {
+                            **(row.settings or {}),
+                            "backend": str(report.get("cycles_backend_selected") or "AUTO"),
+                            "persistent_data": bool(
+                                (report.get("persistent_data_comparison") or {}).get("selected")
+                            ),
+                        }
+                        if not (report.get("soak") or {}).get("passed"):
+                            row.status = "blocked"
+                            row.error = "The required continuous 50-frame GPU/memory soak did not pass"
+                        elif projected and projected > int(storage.get("free_bytes") or 0):
+                            row.status = "blocked"
+                            row.error = "Projected frames exceed the safe local workspace capacity"
+                        elif bool((row.settings or {}).get("require_drive", True)) and (
+                            not drive_free or projected > drive_free
+                        ):
+                            row.status = "blocked"
+                            row.error = "Google Drive lacks the projected delivery capacity plus safety margin"
+                        elif host_total and host_peak / host_total >= 0.8:
+                            row.status = "blocked"
+                            row.error = f"Measured host RAM is unsafe; redeploy with at least {required_host_gb} GB"
+                        else:
+                            row.status = "awaiting_benchmark_approval"
+                            row.error = ""
+                        row.stage = "render.benchmark"
+                        row.version += 1
+                        await session.commit()
+                should_stop = persisted.auto_stop
+            elif operation in {"observe_gui", "frame_batch"}:
+                counted = await rendering.refresh_frame_counts(render_job_id)
+                if counted.completed_frame_count >= counted.expected_frame_count:
+                    await queue_stage("render.validate")
+                    await update_job(status="validating", next_stage="render.validate")
+                elif operation == "frame_batch":
+                    async with db.async_session() as session:
+                        pending = list((await session.execute(
+                            select(RenderFrameModel.frame_number).where(
+                                RenderFrameModel.render_job_id == render_job_id,
+                                RenderFrameModel.status == "pending",
+                            ).order_by(RenderFrameModel.frame_number)
+                        )).scalars().all())
+                    if pending:
+                        batch_size = max(
+                            1,
+                            min(
+                                int((counted.benchmark or {}).get("recommended_batch_size") or 1),
+                                50,
+                            ),
+                        )
+                        next_batch = rendering.frame_batches(pending, batch_size)[0]
+                        digest = hashlib.sha256(
+                            ",".join(map(str, next_batch)).encode()
+                        ).hexdigest()[:16]
+                        async with db.async_session() as session:
+                            await session.execute(
+                                update(RenderFrameModel)
+                                .where(
+                                    RenderFrameModel.render_job_id == render_job_id,
+                                    RenderFrameModel.frame_number.in_(next_batch),
+                                )
+                                .values(batch_key=digest)
+                            )
+                            await session.commit()
+                        await queue_stage("render.frame_batch", frames=next_batch)
+                        await update_job(status="rendering", next_stage="render.frame_batch")
+                    else:
+                        # Failed frames are deliberately not looped forever. The
+                        # validation stage exposes them for an explicit retry.
+                        await queue_stage("render.validate")
+                        await update_job(status="validating", next_stage="render.validate")
+                else:
+                    await update_job(status="rendering", next_stage=stage)
+            elif operation == "validate":
+                counted = await rendering.refresh_frame_counts(render_job_id)
+                if report.get("status") == "blocked" or counted.failed_frame_count:
+                    await update_job(status="needs_frame_retry", next_stage="render.validate", error="One or more frames are missing or invalid")
+                    should_stop = counted.auto_stop
+                else:
+                    await queue_stage("render.encode")
+                    await update_job(status="encoding", next_stage="render.encode")
+            elif operation == "encode":
+                if bool(settings.get("require_drive", True)):
+                    await queue_stage("render.deliver")
+                    await update_job(status="delivering", next_stage="render.deliver")
+                else:
+                    await update_job(status="completed", next_stage="completed", finished=True)
+                    should_stop = persisted.auto_stop
+            elif operation == "deliver":
+                await update_job(status="completed", next_stage="completed", finished=True)
+                should_stop = persisted.auto_stop
+
+            return {
+                "stage": stage,
+                "render_job_id": render_job_id,
+                "agent_status": "completed",
+                "report": report,
+                "log_tail": list(state.get("log_tail") or [])[-80:],
+            }
+        except Exception as exc:
+            if operation == "deliver" and "delivery_blocked_storage_full" in str(exc):
+                blocked = await update_job(
+                    status="delivery_blocked_storage_full",
+                    next_stage="render.deliver",
+                    error="Google Drive storage is full; validated local outputs remain on /workspace",
+                )
+                should_stop = blocked.auto_stop
+                return {
+                    "stage": stage,
+                    "render_job_id": render_job_id,
+                    "agent_status": "delivery_blocked_storage_full",
+                }
+            await update_job(status="retrying" if claim.attempts < claim.max_attempts else "failed", next_stage=stage, error=str(exc), finished=claim.attempts >= claim.max_attempts)
+            if claim.attempts >= claim.max_attempts:
+                should_stop = render_job.auto_stop
+            try:
+                await cancel_blender_job(pod_id, claim.id)
+            except Exception:
+                logger.warning("Could not cancel Blender stage %s", claim.id)
+            raise
+        finally:
+            if should_stop:
+                try:
+                    await stop_pod(pod_id)
+                except Exception:
+                    logger.exception("Could not auto-stop RunPod pod %s", pod_id)
+
     async def _run_blender_template_job(
         self,
         payload: dict[str, Any],
@@ -1362,9 +1774,14 @@ class DurableWorker:
             report = (
                 state.get("report") if isinstance(state.get("report"), dict) else {}
             )
-            if not report.get("gpu_engaged"):
+            evidence = report.get("gpu_evidence") if isinstance(report.get("gpu_evidence"), dict) else {}
+            if not (
+                evidence.get("cycles_backend_selected")
+                and evidence.get("gpu_process_observed")
+                and evidence.get("gpu_compute_observed")
+            ):
                 raise RuntimeError(
-                    "Blender completed without proof that Cycles used a GPU"
+                    "Blender completed without PID/NVML proof that Cycles used a GPU"
                 )
             return {
                 "stage": "completed",

@@ -1,0 +1,16 @@
+{
+  "name": "Council OS Blender 5.0.1 Kasm",
+  "imageName": "ghcr.io/zamadshakil/ai-council-blender:REPLACE_WITH_GIT_SHA",
+  "containerDiskInGb": 50,
+  "volumeInGb": 250,
+  "volumeMountPath": "/workspace",
+  "ports": ["6901/http", "8001/http"],
+  "env": {
+    "NVIDIA_VISIBLE_DEVICES": "all",
+    "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,graphics,display,video",
+    "BLENDER_AGENT_PORT": "8001",
+    "BLENDER_WORKSPACE_ROOT": "/workspace",
+    "BLENDER_GDRIVE_REMOTE": "gdrive:",
+    "RCLONE_CONFIG": "/workspace/.config/rclone/rclone.conf"
+  }
+}

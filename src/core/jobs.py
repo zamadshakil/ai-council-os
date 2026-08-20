@@ -258,6 +258,10 @@ class JobService:
         async with self.sessions() as session:
             job = await self._locked_job(session, job_id, worker_id)
             job.result = result
+            # Progress is also proof the worker is alive. Extending the lease
+            # here makes paid, long-running jobs fail closed if PostgreSQL is
+            # unavailable instead of being reclaimed behind the active worker.
+            job.leased_until = utcnow() + self.lease_duration
             job.version += 1
             await session.commit()
 

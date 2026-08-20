@@ -172,6 +172,102 @@ class WorkflowRunModel(Base, TimestampMixin):
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class RenderJobModel(Base, TimestampMixin):
+    """Authoritative state for a Blender production render.
+
+    WorkflowRunModel owns execution leases; this model owns the user-visible
+    render lifecycle and survives retries, pod restarts, and delivery failures.
+    """
+
+    __tablename__ = "render_jobs"
+    __table_args__ = (
+        Index("ix_render_jobs_status_updated", "status", "updated_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    pod_id: Mapped[str] = mapped_column(String(100), index=True)
+    source_path: Mapped[str] = mapped_column(String(1000))
+    source_checksum: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(50), default="queued", index=True)
+    stage: Mapped[str] = mapped_column(String(50), default="render.preflight", index=True)
+    render_mode: Mapped[str] = mapped_column(String(30), default="headless")
+    output_profile: Mapped[str] = mapped_column(String(30), default="delivery")
+    output_directory: Mapped[str] = mapped_column(String(1000), default="")
+    frame_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    frame_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    frame_step: Mapped[int] = mapped_column(Integer, default=1)
+    expected_frame_count: Mapped[int] = mapped_column(Integer, default=0)
+    completed_frame_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_frame_count: Mapped[int] = mapped_column(Integer, default=0)
+    settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    preflight: Mapped[dict] = mapped_column(JSON, default=dict)
+    benchmark: Mapped[dict] = mapped_column(JSON, default=dict)
+    delivery: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str] = mapped_column(Text, default="")
+    auto_stop: Mapped[bool] = mapped_column(Boolean, default=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class RenderFrameModel(Base, TimestampMixin):
+    __tablename__ = "render_frames"
+    __table_args__ = (
+        UniqueConstraint("render_job_id", "frame_number", name="uq_render_job_frame"),
+        Index("ix_render_frames_job_status", "render_job_id", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    render_job_id: Mapped[str] = mapped_column(
+        ForeignKey("render_jobs.id", ondelete="CASCADE"), index=True
+    )
+    frame_number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    batch_key: Mapped[str] = mapped_column(String(100), default="")
+    output_path: Mapped[str] = mapped_column(String(1000), default="")
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    render_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class RenderTelemetryModel(Base):
+    __tablename__ = "render_telemetry"
+    __table_args__ = (Index("ix_render_telemetry_job_sample", "render_job_id", "sampled_at"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    render_job_id: Mapped[str] = mapped_column(
+        ForeignKey("render_jobs.id", ondelete="CASCADE"), index=True
+    )
+    stage: Mapped[str] = mapped_column(String(50), default="")
+    gpu_index: Mapped[int] = mapped_column(Integer, default=0)
+    blender_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    gpu_utilization: Mapped[float] = mapped_column(Float, default=0.0)
+    vram_used_mb: Mapped[float] = mapped_column(Float, default=0.0)
+    vram_total_mb: Mapped[float] = mapped_column(Float, default=0.0)
+    power_watts: Mapped[float] = mapped_column(Float, default=0.0)
+    host_ram_used_mb: Mapped[float] = mapped_column(Float, default=0.0)
+    host_ram_total_mb: Mapped[float] = mapped_column(Float, default=0.0)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RenderArtifactModel(Base, TimestampMixin):
+    __tablename__ = "render_artifacts"
+    __table_args__ = (
+        UniqueConstraint("render_job_id", "kind", "path", name="uq_render_artifact_path"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    render_job_id: Mapped[str] = mapped_column(
+        ForeignKey("render_jobs.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(50), index=True)
+    path: Mapped[str] = mapped_column(String(1000))
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(40), default="available")
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class ExternalItemModel(Base):
     __tablename__ = "external_items"
     __table_args__ = (UniqueConstraint("source", "external_id", name="uq_external_item"),)

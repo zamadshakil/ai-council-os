@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -33,6 +34,7 @@ class CredentialField:
     required: bool = True
     secret: bool = True
     help_text: str = ""
+    internal: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,9 +88,10 @@ PROVIDERS: dict[str, ProviderSpec] = {
     )),
     "runpod": ProviderSpec("runpod", "RunPod", "Cloud GPU control and authenticated Blender template jobs.", (
         CredentialField("api_key", "API key", "RUNPOD_API_KEY"),
-        CredentialField("agent_token", "Blender agent token", "BLENDER_AGENT_TOKEN", required=False),
-        CredentialField("agent_port", "Blender agent proxy port", "BLENDER_AGENT_PORT", required=False, secret=False, help_text="The authenticated pod service port; default 8001"),
-        CredentialField("workspace_root", "Pod workspace root", "BLENDER_WORKSPACE_ROOT", required=False, secret=False, help_text="Persistent directory containing the .blend template; default /workspace"),
+        CredentialField("agent_token", "Blender agent token", "BLENDER_AGENT_TOKEN", required=False, internal=True),
+        CredentialField("kasm_password", "Kasm password", "VNC_PW", required=False, internal=True),
+        CredentialField("agent_port", "Blender agent proxy port", "BLENDER_AGENT_PORT", required=False, secret=False, internal=True),
+        CredentialField("workspace_root", "Pod workspace root", "BLENDER_WORKSPACE_ROOT", required=False, secret=False, internal=True),
     )),
     "discord": ProviderSpec("discord", "Discord", "Approved Discord webhook publishing.", (
         CredentialField("webhook_url", "Webhook URL", "DISCORD_WEBHOOK_URL"),
@@ -221,7 +224,7 @@ def catalog_shape() -> list[dict[str, Any]]:
                     "secret": field.secret,
                     "help_text": field.help_text,
                 }
-                for field in spec.fields
+                for field in spec.fields if not field.internal
             ],
         }
         for spec in PROVIDERS.values()
@@ -269,6 +272,14 @@ async def put_credentials(
     spec = PROVIDERS[provider]
     async with async_session() as session:
         row = await session.get(IntegrationConnectionModel, provider, with_for_update=True)
+        if provider == "runpod":
+            previous = _decrypt(row.encrypted_credentials) if row is not None else {}
+            normalized.update({
+                "agent_token": previous.get("agent_token") or secrets.token_urlsafe(48),
+                "kasm_password": previous.get("kasm_password") or secrets.token_urlsafe(18),
+                "agent_port": previous.get("agent_port") or "8001",
+                "workspace_root": previous.get("workspace_root") or "/workspace",
+            })
         if row is None:
             row = IntegrationConnectionModel(
                 provider=provider,

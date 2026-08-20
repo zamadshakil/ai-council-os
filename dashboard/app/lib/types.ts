@@ -294,6 +294,12 @@ export interface BlenderPod {
   proxy_url: string;
 }
 
+export interface BlenderPodAccess {
+  username: string;
+  password: string;
+  url: string;
+}
+
 export interface BlenderTemplateJob {
   id: string;
   status: string;
@@ -315,7 +321,6 @@ export interface BlenderTemplateJob {
     source_unchanged?: boolean;
     log_tail?: string[];
     report?: {
-      gpu_engaged?: boolean;
       render_engine?: string;
       benchmark_seconds?: number;
       missing_assets?: string[];
@@ -327,4 +332,74 @@ export interface BlenderTemplateJob {
   created_at: string;
   updated_at: string;
   finished_at: string;
+}
+
+export interface BlenderRenderFrame {
+  id: string;
+  render_job_id: string;
+  frame_number: number;
+  status: string;
+  batch_key: string;
+  output_path: string;
+  checksum: string;
+  size_bytes: number;
+  render_seconds: number | null;
+  attempts: number;
+  error: string;
+  version: number;
+  updated_at: string;
+}
+
+export interface BlenderTelemetrySample {
+  stage: string;
+  gpu_index: number;
+  blender_pid: number | null;
+  gpu_utilization: number;
+  vram_used_mb: number;
+  vram_total_mb: number;
+  power_watts: number;
+  host_ram_used_mb: number;
+  host_ram_total_mb: number;
+  sampled_at: string;
+}
+
+export interface BlenderArtifact {
+  id: string;
+  kind: string;
+  path: string;
+  checksum: string;
+  size_bytes: number;
+  status: string;
+  metadata: JsonObject;
+  version: number;
+  created_at: string;
+}
+
+export interface BlenderRenderJob {
+  id: string;
+  pod_id: string;
+  source_path: string;
+  source_checksum: string;
+  status: string;
+  stage: string;
+  render_mode: 'kasm_gui' | 'headless';
+  output_profile: 'delivery' | 'compositing';
+  output_directory: string;
+  frame_start: number | null;
+  frame_end: number | null;
+  frame_step: number;
+  expected_frame_count: number;
+  completed_frame_count: number;
+  failed_frame_count: number;
+  settings: JsonObject;
+  preflight: JsonObject;
+  benchmark: JsonObject;
+  delivery: JsonObject;
+  error: string;
+  auto_stop: boolean;
+  version: number;
+  approved_at: string;
+  finished_at: string;
+  created_at: string;
+  updated_at: string;
 }

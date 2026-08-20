@@ -6,8 +6,14 @@ import pytest_asyncio
 from cryptography.fernet import Fernet
 
 from src.api import server
-from src.core import database as db, integration_vault
-from src.core.models import ApprovalModel, TaskModel, WorkflowDefinitionModel
+from src.core import database as db, integration_vault, rendering
+from src.core.models import (
+    ApprovalModel,
+    RenderJobModel,
+    TaskModel,
+    WorkflowDefinitionModel,
+    WorkflowRunModel,
+)
 
 
 ADMIN_PASSWORD = "correct-horse-battery-staple"
@@ -282,9 +288,130 @@ async def test_blender_manager_requires_verified_runpod_connection(api_client):
     catalog = await api_client.get("/api/integrations/catalog")
     runpod = next(item for item in catalog.json()["integrations"] if item["id"] == "runpod")
     assert runpod["configured"] is False
-    assert [field["key"] for field in runpod["fields"]] == [
-        "api_key", "agent_token", "agent_port", "workspace_root",
-    ]
+    # Pod-agent/Kasm credentials are generated and encrypted by Council OS.
+    # The administrator only supplies the RunPod account API key.
+    assert [field["key"] for field in runpod["fields"]] == ["api_key"]
+
+
+@pytest.mark.asyncio
+async def test_existing_pod_update_requires_inventory_and_exact_smoke_sha(
+    api_client, monkeypatch
+):
+    csrf_token = await _login(api_client)
+    saved = await api_client.put(
+        "/api/integrations/runpod/credentials",
+        json={"credentials": {"api_key": "rotated-runpod-migration-key"}},
+        headers={"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token},
+    )
+    assert saved.status_code == 200, saved.text
+    await integration_vault.mark_verification("runpod", True)
+
+    async def fake_pods():
+        return [{"id": "pod-safe-123", "desired_status": "EXITED"}]
+
+    async def fake_update(pod_id, *, image_name, agent_token, kasm_password):
+        return {
+            "id": pod_id,
+            "desired_status": "EXITED",
+            "image_name": image_name,
+            "proxy_url": "https://pod-safe-123-6901.proxy.runpod.net",
+        }
+
+    monkeypatch.setattr("src.integrations.runpod.list_pods", fake_pods)
+    monkeypatch.setattr("src.integrations.runpod.update_pod_runtime", fake_update)
+    sha = "a" * 40
+    monkeypatch.setenv(
+        "BLENDER_RUNPOD_IMAGE", f"ghcr.io/astrofood/ai-council-blender:{sha}"
+    )
+    headers = {"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token}
+    missing_inventory = await api_client.post(
+        "/api/blender/pods/pod-safe-123/actions",
+        json={"action": "prepare_runtime", "inventory_confirmed": False},
+        headers=headers,
+    )
+    assert missing_inventory.status_code == 409
+    assert missing_inventory.json()["error"]["code"] == "RUNPOD_INVENTORY_REQUIRED"
+
+    monkeypatch.setenv("BLENDER_RUNPOD_SMOKE_APPROVED_SHA", "b" * 40)
+    unapproved = await api_client.post(
+        "/api/blender/pods/pod-safe-123/actions",
+        json={"action": "prepare_runtime", "inventory_confirmed": True},
+        headers=headers,
+    )
+    assert unapproved.status_code == 503
+    assert unapproved.json()["error"]["code"] == "BLENDER_IMAGE_SMOKE_NOT_APPROVED"
+
+    monkeypatch.setenv("BLENDER_RUNPOD_SMOKE_APPROVED_SHA", sha)
+    prepared = await api_client.post(
+        "/api/blender/pods/pod-safe-123/actions",
+        json={"action": "prepare_runtime", "inventory_confirmed": True},
+        headers=headers,
+    )
+    assert prepared.status_code == 200, prepared.text
+    assert prepared.json()["resource"]["runtime_prepared"] is True
+
+
+@pytest.mark.asyncio
+async def test_new_a6000_pod_requires_explicit_billing_confirmation_and_is_audited(
+    api_client, monkeypatch
+):
+    csrf_token = await _login(api_client)
+    saved = await api_client.put(
+        "/api/integrations/runpod/credentials",
+        json={"credentials": {"api_key": "rotated-runpod-provision-key"}},
+        headers={"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token},
+    )
+    assert saved.status_code == 200, saved.text
+    await integration_vault.mark_verification("runpod", True)
+    image = f"ghcr.io/astrofood/ai-council-blender:{'e' * 40}"
+    monkeypatch.setenv("BLENDER_RUNPOD_IMAGE", image)
+    calls: dict[str, object] = {}
+
+    async def fake_template(*, image_name):
+        calls["template_image"] = image_name
+        return {"id": "template-safe-1", "name": "Council OS Blender", "image_name": image_name}
+
+    async def fake_create(**kwargs):
+        calls["create"] = kwargs
+        return {
+            "id": "pod-safe-a6000",
+            "name": "council-blender-a6000-test",
+            "desired_status": "RUNNING",
+            "image_name": kwargs["image_name"],
+            "gpu_count": 1,
+            "cost_per_hour": 0.53,
+            "uptime_seconds": 0,
+            "gpu_utilization": [],
+            "proxy_url": "https://pod-safe-a6000-6901.proxy.runpod.net",
+        }
+
+    monkeypatch.setattr("src.integrations.runpod.ensure_blender_template", fake_template)
+    monkeypatch.setattr("src.integrations.runpod.create_a6000_pod", fake_create)
+    headers = {"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token}
+    rejected = await api_client.post(
+        "/api/blender/pods",
+        json={"confirm_billing": "yes", "idempotency_key": "a6000-test-123"},
+        headers=headers,
+    )
+    assert rejected.status_code == 422
+    assert "create" not in calls
+
+    created = await api_client.post(
+        "/api/blender/pods",
+        json={
+            "confirm_billing": "CREATE_ONE_A6000_POD",
+            "idempotency_key": "a6000-test-123",
+        },
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["resource"]["gpu_count"] == 1
+    assert body["resource"]["id"] == "pod-safe-a6000"
+    assert body["template"]["id"] == "template-safe-1"
+    assert "rotated-runpod-provision-key" not in created.text
+    assert len(body["audit_event_id"]) > 10
+    assert calls["create"]["image_name"] == image
 
 
 @pytest.mark.asyncio
@@ -292,13 +419,20 @@ async def test_blender_template_job_is_durable_and_never_serializes_agent_token(
     api_client, monkeypatch
 ):
     csrf_token = await _login(api_client)
-    agent_token = "agent-token-that-is-longer-than-thirty-two-characters"
     saved = await api_client.put(
         "/api/integrations/runpod/credentials",
-        json={"credentials": {"api_key": "rotated-runpod-test-key", "agent_token": agent_token}},
+        json={"credentials": {"api_key": "rotated-runpod-test-key"}},
         headers={"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token},
     )
     assert saved.status_code == 200, saved.text
+    generated = await integration_vault.decrypted_provider_env(
+        "runpod", require_verified=False
+    )
+    agent_token = generated["BLENDER_AGENT_TOKEN"]
+    assert len(agent_token) >= 32
+    assert len(generated["VNC_PW"]) >= 16
+    assert generated["BLENDER_AGENT_PORT"] == "8001"
+    assert generated["BLENDER_WORKSPACE_ROOT"] == "/workspace"
     await integration_vault.mark_verification("runpod", True)
 
     async def fake_pods():
@@ -327,6 +461,133 @@ async def test_blender_template_job_is_durable_and_never_serializes_agent_token(
     assert history.status_code == 200
     assert len(history.json()["jobs"]) == 1
     assert agent_token not in history.text
+
+
+@pytest.mark.asyncio
+async def test_production_render_creation_is_atomic_idempotent_and_versioned(
+    api_client, monkeypatch
+):
+    csrf_token = await _login(api_client)
+    saved = await api_client.put(
+        "/api/integrations/runpod/credentials",
+        json={"credentials": {"api_key": "rotated-runpod-production-key"}},
+        headers={"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token},
+    )
+    assert saved.status_code == 200, saved.text
+    await integration_vault.mark_verification("runpod", True)
+
+    async def fake_pods():
+        return [{
+            "id": "pod-safe-123",
+            "name": "One A6000",
+            "desired_status": "EXITED",
+            "gpu_count": 1,
+            "cost_per_hour": 0.53,
+        }]
+
+    monkeypatch.setattr("src.integrations.runpod.list_pods", fake_pods)
+    body = {
+        "pod_id": "pod-safe-123",
+        "source_path": "/workspace/project/scene.blend",
+        "render_mode": "kasm_gui",
+        "output_profile": "delivery",
+        "frame_start": None,
+        "frame_end": None,
+        "frame_step": 1,
+        "samples": 0,
+        "resolution_percent": 100,
+        "require_drive": True,
+        "drive_path": "Council OS Renders",
+        "auto_stop": True,
+        "idempotency_key": "production-render-create-1",
+    }
+    headers = {"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token}
+    created = await api_client.post(
+        "/api/blender/render-jobs", json=body, headers=headers
+    )
+    assert created.status_code == 200, created.text
+    resource = created.json()["resource"]
+    assert resource["status"] == "queued"
+    assert resource["stage"] == "render.preflight"
+    assert resource["auto_stop"] is True
+
+    replay = await api_client.post(
+        "/api/blender/render-jobs", json=body, headers=headers
+    )
+    assert replay.status_code == 200
+    assert replay.json()["resource"]["id"] == resource["id"]
+
+    async with server.async_session() as session:
+        persisted = await session.get(RenderJobModel, resource["id"])
+        queued = (
+            await session.execute(
+                server.select(WorkflowRunModel).where(
+                    WorkflowRunModel.job_type == "blender.render_stage"
+                )
+            )
+        ).scalars().all()
+    assert persisted is not None
+    assert persisted.render_mode == "kasm_gui"
+    assert len(queued) == 1
+    assert queued[0].payload["stage"] == "render.preflight"
+
+    listed = await api_client.get("/api/blender/render-jobs")
+    assert listed.status_code == 200
+    assert listed.json()["render_jobs"][0]["id"] == resource["id"]
+
+    stale = await api_client.post(
+        f"/api/blender/render-jobs/{resource['id']}/actions",
+        json={
+            "action": "run_preflight",
+            "expected_version": 999,
+            "idempotency_key": "production-render-action-stale",
+        },
+        headers=headers,
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "VERSION_CONFLICT"
+
+    async with server.async_session() as session:
+        persisted = await session.get(RenderJobModel, resource["id"], with_for_update=True)
+        assert persisted is not None
+        persisted.render_mode = "headless"
+        persisted.status = "awaiting_benchmark_approval"
+        persisted.stage = "render.benchmark"
+        persisted.frame_start = 1
+        persisted.frame_end = 100
+        persisted.frame_step = 1
+        persisted.benchmark = {"recommended_batch_size": 10}
+        persisted.version += 1
+        await session.commit()
+    await rendering.ensure_frames(resource["id"], 1, 100, 1)
+    async with server.async_session() as session:
+        persisted = await session.get(RenderJobModel, resource["id"])
+        assert persisted is not None
+        approval_version = persisted.version
+
+    approved = await api_client.post(
+        f"/api/blender/render-jobs/{resource['id']}/actions",
+        json={
+            "action": "approve_benchmark",
+            "expected_version": approval_version,
+            "idempotency_key": "production-render-approve-sequential",
+        },
+        headers=headers,
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["resource"]["status"] == "rendering"
+    async with server.async_session() as session:
+        batches = (
+            await session.execute(
+                server.select(WorkflowRunModel).where(
+                    WorkflowRunModel.job_type == "blender.render_stage",
+                    WorkflowRunModel.payload["render_job_id"].as_string() == resource["id"],
+                    WorkflowRunModel.payload["stage"].as_string() == "render.frame_batch",
+                )
+            )
+        ).scalars().all()
+    assert len(batches) == 1
+    assert batches[0].payload["frames"] == list(range(1, 11))
 
 
 def test_meta_webhook_parser_extracts_only_supported_comment_fields():

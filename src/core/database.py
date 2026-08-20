@@ -105,6 +105,7 @@ async def init_db() -> None:
             "alembic_version", "users", "sessions", "workflow_runs", "audit_events",
             "knowledge_documents", "knowledge_chunks", "knowledge_collections",
             "knowledge_binding_states", "brain_entities", "brain_facts", "skills", "mcp_tokens",
+            "render_jobs", "render_frames", "render_telemetry", "render_artifacts",
         }
 
         def table_names(sync_connection: Any) -> set[str]:

@@ -1,0 +1,66 @@
+name: Blender Kasm image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - "docker/blender-runpod/**"
+      - "src/scripts/blender_listener.py"
+      - "src/scripts/blender_job.py"
+      - "src/scripts/blender_mixdown.py"
+      - "src/scripts/blender_gui_bootstrap.py"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ai-council-blender
+          tags: |
+            type=raw,value=${{ github.sha }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/blender-runpod/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+      - name: Resolve immutable image reference
+        id: image
+        shell: bash
+        run: |
+          ref="$(printf '%s\n' '${{ steps.meta.outputs.tags }}' | head -n 1)"
+          test -n "$ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Verify published registry manifest
+        run: docker buildx imagetools inspect "${{ steps.image.outputs.ref }}"
+      - name: Scan immutable image
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.ref }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+      - name: Prove RunPod can pull the manifest anonymously
+        shell: bash
+        run: |
+          docker logout ghcr.io
+          docker buildx imagetools inspect "${{ steps.image.outputs.ref }}"

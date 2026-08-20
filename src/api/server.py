@@ -32,7 +32,7 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -47,6 +47,9 @@ from src.api.middleware import SecurityHeadersMiddleware
 from src.api.schemas import (
     ApprovalActionRequest,
     BlenderPodActionRequest,
+    BlenderPodProvisionRequest,
+    BlenderRenderActionRequest,
+    BlenderRenderJobRequest,
     BlenderTemplateJobRequest,
     ContentEngineRequest,
     CouncilRunRequest,
@@ -116,6 +119,8 @@ from src.core.models import (
     SkillModel,
     SkillRevisionModel,
     PublicationAttemptModel,
+    RenderFrameModel,
+    RenderJobModel,
     TaskModel,
     WorkflowDefinitionModel,
     WorkflowRunModel,
@@ -2306,15 +2311,108 @@ async def get_blender_pods(_: RequestActor = Depends(require_admin)):
     return {"pods": pods, "provider": "runpod", "status": "verified"}
 
 
+@app.post("/api/blender/pods")
+async def provision_blender_pod(
+    payload: BlenderPodProvisionRequest,
+    request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    """Create one explicitly confirmed, on-demand RTX A6000 Kasm workstation."""
+    from src.integrations.runpod import (
+        RunPodError,
+        create_a6000_pod,
+        ensure_blender_template,
+        validate_blender_image,
+    )
+
+    if (await get_kill_switch_db())["is_active"]:
+        raise _api_error(
+            423,
+            "KILL_SWITCH_ACTIVE",
+            "The system is stopped; resume it before creating a billable GPU Pod",
+        )
+    image_name = os.getenv("BLENDER_RUNPOD_IMAGE", "").strip()
+    if not image_name:
+        raise _api_error(
+            503,
+            "BLENDER_IMAGE_NOT_PUBLISHED",
+            "Publish and configure an immutable Blender/Kasm image before creating a Pod",
+        )
+    try:
+        image_name = validate_blender_image(image_name)
+    except ValueError as exc:
+        raise _api_error(503, "BLENDER_IMAGE_INVALID", str(exc)) from exc
+    request_payload = {
+        "confirm_billing": payload.confirm_billing,
+        "image_name": image_name,
+    }
+    scope = f"blender.pod_provision:{actor.actor_id}"
+    replay = await _mutation_replay(scope, payload.idempotency_key, request_payload)
+    if replay is not None:
+        return replay
+    values = await _provider_runtime("runpod")
+    try:
+        with use_integration_configuration(values):
+            template = await ensure_blender_template(image_name=image_name)
+            pod = await create_a6000_pod(
+                template_id=template["id"],
+                image_name=image_name,
+                agent_token=values["BLENDER_AGENT_TOKEN"],
+                kasm_password=values["VNC_PW"],
+                idempotency_key=payload.idempotency_key,
+            )
+    except (KeyError, ValueError) as exc:
+        raise _api_error(422, "RUNPOD_PROVISION_INVALID", str(exc)) from exc
+    except RunPodError as exc:
+        raise _api_error(502, "RUNPOD_PROVISION_FAILED", str(exc)) from exc
+    async with async_session() as session:
+        event = await record_audit(
+            session,
+            action="blender.pod_provisioned",
+            resource_type="runpod_pod",
+            resource_id=pod.get("id", ""),
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={
+                "template_id": template["id"],
+                "image_name": image_name,
+                "gpu_type": "NVIDIA RTX A6000",
+                "gpu_count": 1,
+                "cloud_type": "SECURE",
+                "interruptible": False,
+                "billing_confirmed": True,
+            },
+        )
+        result = _mutation(pod, 1, event.id, template=template)
+        await _store_mutation_replay(
+            scope,
+            payload.idempotency_key,
+            request_payload,
+            result,
+            pod.get("id", ""),
+            session=session,
+        )
+        await session.commit()
+    return result
+
+
 @app.post("/api/blender/pods/{pod_id}/actions")
 async def act_on_blender_pod(
     pod_id: str,
     payload: BlenderPodActionRequest,
     request: Request,
+    response: Response,
     actor: RequestActor = Depends(require_admin),
 ):
-    """Resume or stop a RunPod pod with a persisted administrator audit event."""
-    from src.integrations.runpod import RunPodError, resume_pod, stop_pod
+    """Operate or safely prepare a verified RunPod pod."""
+    from src.integrations.runpod import (
+        RunPodError,
+        list_pods,
+        resume_pod,
+        stop_pod,
+        update_pod_runtime,
+    )
 
     if payload.action == "resume" and (await get_kill_switch_db())["is_active"]:
         raise _api_error(
@@ -2325,11 +2423,60 @@ async def act_on_blender_pod(
     values = await _provider_runtime("runpod")
     try:
         with use_integration_configuration(values):
-            pod = await (
-                resume_pod(pod_id) if payload.action == "resume" else stop_pod(pod_id)
-            )
+            if payload.action in {"prepare_runtime", "reveal_access"}:
+                pods = await list_pods()
+                pod = next((item for item in pods if item.get("id") == pod_id), None)
+                if pod is None:
+                    raise _api_error(
+                        404,
+                        "RUNPOD_POD_NOT_FOUND",
+                        "The selected pod is not in the verified RunPod account",
+                    )
+                if payload.action == "prepare_runtime":
+                    if pod.get("desired_status") == "RUNNING":
+                        raise _api_error(
+                            409,
+                            "RUNPOD_POD_MUST_BE_STOPPED",
+                            "Stop the pod before replacing its container image; /workspace will remain preserved",
+                        )
+                    if not payload.inventory_confirmed:
+                        raise _api_error(
+                            409,
+                            "RUNPOD_INVENTORY_REQUIRED",
+                            "Before replacing the container, inventory /workspace and copy any critical files from container storage into /workspace",
+                        )
+                    image_name = os.getenv("BLENDER_RUNPOD_IMAGE", "").strip()
+                    if not image_name:
+                        raise _api_error(
+                            503,
+                            "BLENDER_IMAGE_NOT_APPROVED",
+                            "No smoke-tested immutable Blender image has been approved for rollout",
+                        )
+                    approved_sha = os.getenv("BLENDER_RUNPOD_SMOKE_APPROVED_SHA", "").strip()
+                    image_sha = image_name.rsplit(":", 1)[-1]
+                    if not (
+                        re.fullmatch(r"[a-f0-9]{40}", approved_sha)
+                        and hmac.compare_digest(image_sha, approved_sha)
+                    ):
+                        raise _api_error(
+                            503,
+                            "BLENDER_IMAGE_SMOKE_NOT_APPROVED",
+                            "The immutable image must pass the controlled one-A6000 smoke test before an existing pod can be updated",
+                        )
+                    pod = await update_pod_runtime(
+                        pod_id,
+                        image_name=image_name,
+                        agent_token=values["BLENDER_AGENT_TOKEN"],
+                        kasm_password=values["VNC_PW"],
+                    )
+                    pod["runtime_prepared"] = True
+            elif payload.action == "resume":
+                pod = await resume_pod(pod_id)
+            else:
+                pod = await stop_pod(pod_id)
     except ValueError as exc:
-        raise _api_error(422, "INVALID_POD_ID", str(exc)) from exc
+        code = "RUNPOD_RUNTIME_INVALID" if payload.action == "prepare_runtime" else "INVALID_POD_ID"
+        raise _api_error(422, code, str(exc)) from exc
     except RunPodError as exc:
         raise _api_error(502, "RUNPOD_ACTION_FAILED", str(exc)) from exc
     async with async_session() as session:
@@ -2341,10 +2488,24 @@ async def act_on_blender_pod(
             actor_type=actor.actor_type,
             actor_id=actor.actor_id,
             request_id=getattr(request.state, "request_id", ""),
-            details={"desired_status": pod.get("desired_status", "")},
+            details={
+                "desired_status": pod.get("desired_status", ""),
+                "image_name": pod.get("image_name", "") if payload.action == "prepare_runtime" else "",
+                "inventory_confirmed": bool(
+                    payload.inventory_confirmed and payload.action == "prepare_runtime"
+                ),
+            },
         )
         await session.commit()
-    return _mutation(pod, 1, event.id)
+    result = _mutation(pod, 1, event.id)
+    if payload.action == "reveal_access":
+        response.headers["Cache-Control"] = "no-store"
+        result["access"] = {
+            "username": "kasm_user",
+            "password": values["VNC_PW"],
+            "url": pod.get("proxy_url", "") or f"https://{pod_id}-6901.proxy.runpod.net",
+        }
+    return result
 
 
 @app.get("/api/blender/jobs")
@@ -2436,6 +2597,384 @@ async def create_blender_job(
         )
         await session.commit()
     return _mutation(_blender_job_resource(job), job.version, event.id)
+
+
+@app.get("/api/blender/render-jobs")
+async def list_blender_render_jobs(_: RequestActor = Depends(require_admin)):
+    from src.core.rendering import list_jobs
+
+    return {"render_jobs": await list_jobs()}
+
+
+@app.get("/api/blender/render-jobs/{render_job_id}")
+async def get_blender_render_job(
+    render_job_id: str,
+    _: RequestActor = Depends(require_admin),
+):
+    from src.core.rendering import job_resource
+
+    async with async_session() as session:
+        job = await session.get(RenderJobModel, render_job_id)
+    if job is None:
+        raise _api_error(404, "RENDER_JOB_NOT_FOUND", "Render job does not exist")
+    return job_resource(job)
+
+
+@app.get("/api/blender/render-jobs/{render_job_id}/frames")
+async def get_blender_render_frames(
+    render_job_id: str,
+    _: RequestActor = Depends(require_admin),
+):
+    from src.core.rendering import list_frames
+
+    async with async_session() as session:
+        exists = await session.get(RenderJobModel, render_job_id)
+    if exists is None:
+        raise _api_error(404, "RENDER_JOB_NOT_FOUND", "Render job does not exist")
+    return {"frames": await list_frames(render_job_id)}
+
+
+@app.get("/api/blender/render-jobs/{render_job_id}/telemetry")
+async def get_blender_render_telemetry(
+    render_job_id: str,
+    limit: int = Query(default=600, ge=1, le=2000),
+    _: RequestActor = Depends(require_admin),
+):
+    from src.core.rendering import list_telemetry
+
+    async with async_session() as session:
+        exists = await session.get(RenderJobModel, render_job_id)
+    if exists is None:
+        raise _api_error(404, "RENDER_JOB_NOT_FOUND", "Render job does not exist")
+    return {"telemetry": await list_telemetry(render_job_id, limit)}
+
+
+@app.get("/api/blender/render-jobs/{render_job_id}/artifacts")
+async def get_blender_render_artifacts(
+    render_job_id: str,
+    _: RequestActor = Depends(require_admin),
+):
+    from src.core.rendering import list_artifacts
+
+    async with async_session() as session:
+        exists = await session.get(RenderJobModel, render_job_id)
+    if exists is None:
+        raise _api_error(404, "RENDER_JOB_NOT_FOUND", "Render job does not exist")
+    return {"artifacts": await list_artifacts(render_job_id)}
+
+
+@app.post("/api/blender/render-jobs")
+async def create_blender_render_job(
+    payload: BlenderRenderJobRequest,
+    request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    """Create a one-GPU production render and atomically queue preflight."""
+    from src.core.rendering import job_resource
+    from src.integrations.runpod import RunPodError, list_pods
+
+    if (await get_kill_switch_db())["is_active"]:
+        raise _api_error(423, "KILL_SWITCH_ACTIVE", "Resume the system before starting GPU work")
+    values = await _provider_runtime("runpod")
+    if len(values.get("BLENDER_AGENT_TOKEN", "")) < 32:
+        raise _api_error(
+            409,
+            "BLENDER_AGENT_NOT_CONFIGURED",
+            "Save the RunPod API key again so Council OS can generate the pod agent credentials",
+        )
+    try:
+        with use_integration_configuration(values):
+            pods = await list_pods()
+    except RunPodError as exc:
+        raise _api_error(502, "RUNPOD_UNAVAILABLE", str(exc)) from exc
+    if not any(pod.get("id") == payload.pod_id for pod in pods):
+        raise _api_error(404, "RUNPOD_POD_NOT_FOUND", "The selected pod is not in the verified account")
+
+    request_payload = payload.model_dump(mode="json")
+    scope = "blender.render.create"
+    async with async_session() as session:
+        replay = await _begin_idempotent_mutation(
+            session,
+            scope=scope,
+            idempotency_key=payload.idempotency_key,
+            request_payload=request_payload,
+        )
+        if replay is not None:
+            return replay
+        render_job = RenderJobModel(
+            pod_id=payload.pod_id,
+            source_path=payload.source_path,
+            status="queued",
+            stage="render.preflight",
+            render_mode=payload.render_mode,
+            output_profile=payload.output_profile,
+            frame_start=payload.frame_start,
+            frame_end=payload.frame_end,
+            frame_step=payload.frame_step,
+            settings={
+                "requested_frame_start": payload.frame_start,
+                "requested_frame_end": payload.frame_end,
+                "requested_frame_step": payload.frame_step,
+                "samples": payload.samples,
+                "resolution_percent": payload.resolution_percent,
+                "persistent_data": False,
+                "require_drive": payload.require_drive,
+                "drive_path": payload.drive_path,
+                "single_gpu_only": True,
+            },
+            auto_stop=payload.auto_stop,
+        )
+        session.add(render_job)
+        await session.flush()
+        stage_job = _new_job(
+            workflow_id="blender_manager",
+            job_type="blender.render_stage",
+            payload={"render_job_id": render_job.id, "stage": "render.preflight", "frames": []},
+            idempotency_key=f"render:{render_job.id}:render.preflight",
+            max_attempts=3,
+            priority=20,
+        )
+        session.add(stage_job)
+        event = await record_audit(
+            session,
+            action="blender.render_created",
+            resource_type="render_job",
+            resource_id=render_job.id,
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={
+                "pod_id": payload.pod_id,
+                "render_mode": payload.render_mode,
+                "output_profile": payload.output_profile,
+                "require_drive": payload.require_drive,
+            },
+        )
+        response_payload = _mutation(job_resource(render_job), render_job.version, event.id)
+        return await _commit_idempotent_mutation(
+            session,
+            scope=scope,
+            idempotency_key=payload.idempotency_key,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            resource_id=render_job.id,
+        )
+
+
+@app.post("/api/blender/render-jobs/{render_job_id}/actions")
+async def act_on_blender_render_job(
+    render_job_id: str,
+    payload: BlenderRenderActionRequest,
+    request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    """Apply an optimistic, idempotent administrator render action."""
+    from src.core.rendering import frame_batches, job_resource
+    from src.integrations.runpod import RunPodError, stop_pod
+
+    if payload.action in {"run_preflight", "approve_benchmark", "resume", "retry_failed_frames", "retry_delivery"}:
+        if (await get_kill_switch_db())["is_active"]:
+            raise _api_error(423, "KILL_SWITCH_ACTIVE", "Resume the system before starting GPU work")
+    request_payload = payload.model_dump(mode="json")
+    scope = f"blender.render.action:{render_job_id}"
+    stop_requested = False
+    async with async_session() as session:
+        replay = await _begin_idempotent_mutation(
+            session,
+            scope=scope,
+            idempotency_key=payload.idempotency_key,
+            request_payload=request_payload,
+        )
+        if replay is not None:
+            return replay
+        job = await session.get(RenderJobModel, render_job_id, with_for_update=True)
+        if job is None:
+            raise _api_error(404, "RENDER_JOB_NOT_FOUND", "Render job does not exist")
+        if job.version != payload.expected_version:
+            raise _api_error(409, "VERSION_CONFLICT", "Render job changed; refresh and try again")
+
+        new_jobs: list[WorkflowRunModel] = []
+        batch_size = max(
+            1,
+            min(int((job.benchmark or {}).get("recommended_batch_size") or 1), 50),
+        )
+        if payload.action == "run_preflight":
+            job.status, job.stage, job.error = "queued", "render.preflight", ""
+            new_jobs.append(_new_job(
+                workflow_id="blender_manager", job_type="blender.render_stage",
+                payload={"render_job_id": job.id, "stage": "render.preflight", "frames": []},
+                idempotency_key=f"render:{job.id}:render.preflight:{payload.idempotency_key}", priority=20,
+            ))
+        elif payload.action == "approve_benchmark":
+            if job.status != "awaiting_benchmark_approval":
+                raise _api_error(409, "RENDER_NOT_AWAITING_APPROVAL", "Benchmark is not awaiting approval")
+            job.approved_at = utcnow()
+            job.error = ""
+            if job.render_mode == "kasm_gui":
+                job.status, job.stage = "awaiting_kasm_render", "render.observe_gui"
+                new_jobs.append(_new_job(
+                    workflow_id="blender_manager", job_type="blender.render_stage",
+                    payload={"render_job_id": job.id, "stage": "render.observe_gui", "frames": []},
+                    idempotency_key=f"render:{job.id}:render.observe_gui:{payload.idempotency_key}",
+                    priority=20, max_attempts=2,
+                ))
+            else:
+                if job.frame_start is None or job.frame_end is None:
+                    raise _api_error(409, "RENDER_RANGE_UNKNOWN", "Scene frame range is unavailable")
+                numbers = list(range(job.frame_start, job.frame_end + 1, job.frame_step))
+                job.status, job.stage = "rendering", "render.frame_batch"
+                batch = frame_batches(numbers, batch_size)[0]
+                digest = hashlib.sha256(",".join(map(str, batch)).encode()).hexdigest()[:16]
+                await session.execute(
+                    update(RenderFrameModel)
+                    .where(
+                        RenderFrameModel.render_job_id == job.id,
+                        RenderFrameModel.frame_number.in_(batch),
+                    )
+                    .values(batch_key=digest, status="pending")
+                )
+                new_jobs.append(_new_job(
+                    workflow_id="blender_manager", job_type="blender.render_stage",
+                    payload={"render_job_id": job.id, "stage": "render.frame_batch", "frames": batch},
+                    idempotency_key=f"render:{job.id}:render.frame_batch:{digest}", priority=20,
+                ))
+        elif payload.action == "pause":
+            if job.status in {"completed", "cancelled"}:
+                raise _api_error(409, "RENDER_NOT_PAUSABLE", "Completed or cancelled render cannot be paused")
+            job.status = "paused"
+        elif payload.action == "resume":
+            if job.status != "paused":
+                raise _api_error(409, "RENDER_NOT_PAUSED", "Render is not paused")
+            stage = job.stage if job.stage.startswith("render.") else "render.preflight"
+            if stage == "render.frame_batch":
+                remaining = (
+                    await session.execute(
+                        select(RenderFrameModel.frame_number).where(
+                            RenderFrameModel.render_job_id == job.id,
+                            RenderFrameModel.status.in_(("pending", "failed", "rendering")),
+                        ).order_by(RenderFrameModel.frame_number)
+                    )
+                ).scalars().all()
+                if not remaining:
+                    stage = "render.validate"
+                    new_jobs.append(_new_job(
+                        workflow_id="blender_manager", job_type="blender.render_stage",
+                        payload={"render_job_id": job.id, "stage": stage, "frames": []},
+                        idempotency_key=f"render:{job.id}:{stage}:{payload.idempotency_key}", priority=20,
+                    ))
+                else:
+                    await session.execute(
+                        update(RenderFrameModel)
+                        .where(
+                            RenderFrameModel.render_job_id == job.id,
+                            RenderFrameModel.frame_number.in_(remaining),
+                        )
+                        .values(status="pending")
+                    )
+                    batch = frame_batches(remaining, batch_size)[0]
+                    digest = hashlib.sha256(",".join(map(str, batch)).encode()).hexdigest()[:16]
+                    await session.execute(
+                        update(RenderFrameModel)
+                        .where(
+                            RenderFrameModel.render_job_id == job.id,
+                            RenderFrameModel.frame_number.in_(batch),
+                        )
+                        .values(batch_key=digest)
+                    )
+                    new_jobs.append(_new_job(
+                        workflow_id="blender_manager", job_type="blender.render_stage",
+                        payload={"render_job_id": job.id, "stage": stage, "frames": batch},
+                        idempotency_key=f"render:{job.id}:resume:{digest}:{payload.idempotency_key}", priority=20,
+                    ))
+            else:
+                new_jobs.append(_new_job(
+                    workflow_id="blender_manager", job_type="blender.render_stage",
+                    payload={"render_job_id": job.id, "stage": stage, "frames": []},
+                    idempotency_key=f"render:{job.id}:{stage}:{payload.idempotency_key}", priority=20,
+                ))
+            job.status = "awaiting_kasm_render" if stage == "render.observe_gui" else "queued"
+        elif payload.action == "cancel":
+            if job.status == "completed":
+                raise _api_error(409, "RENDER_ALREADY_COMPLETED", "Completed render cannot be cancelled")
+            job.status, job.stage, job.error = "cancelled", "cancelled", "Cancelled by administrator"
+            job.finished_at = utcnow()
+        elif payload.action == "retry_failed_frames":
+            frames = (
+                await session.execute(
+                    select(RenderFrameModel.frame_number).where(
+                        RenderFrameModel.render_job_id == job.id,
+                        RenderFrameModel.status.in_(("failed", "pending")),
+                    ).order_by(RenderFrameModel.frame_number)
+                )
+            ).scalars().all()
+            if not frames:
+                raise _api_error(409, "NO_FAILED_FRAMES", "No failed or missing frames need retry")
+            job.status, job.stage, job.error = "rendering", "render.frame_batch", ""
+            await session.execute(
+                update(RenderFrameModel)
+                .where(
+                    RenderFrameModel.render_job_id == job.id,
+                    RenderFrameModel.frame_number.in_(frames),
+                )
+                .values(status="pending")
+            )
+            batch = frame_batches(frames, batch_size)[0]
+            digest = hashlib.sha256(",".join(map(str, batch)).encode()).hexdigest()[:16]
+            await session.execute(
+                update(RenderFrameModel)
+                .where(
+                    RenderFrameModel.render_job_id == job.id,
+                    RenderFrameModel.frame_number.in_(batch),
+                )
+                .values(batch_key=digest)
+            )
+            new_jobs.append(_new_job(
+                workflow_id="blender_manager", job_type="blender.render_stage",
+                payload={"render_job_id": job.id, "stage": "render.frame_batch", "frames": batch},
+                idempotency_key=f"render:{job.id}:retry:{digest}:{payload.idempotency_key}", priority=20,
+            ))
+        elif payload.action == "retry_delivery":
+            job.status, job.stage, job.error = "delivering", "render.deliver", ""
+            new_jobs.append(_new_job(
+                workflow_id="blender_manager", job_type="blender.render_stage",
+                payload={"render_job_id": job.id, "stage": "render.deliver", "frames": []},
+                idempotency_key=f"render:{job.id}:render.deliver:{payload.idempotency_key}",
+                priority=20, max_attempts=8,
+            ))
+        else:
+            stop_requested = True
+
+        if stop_requested:
+            values = await _provider_runtime("runpod")
+            try:
+                with use_integration_configuration(values):
+                    await stop_pod(job.pod_id)
+            except RunPodError as exc:
+                raise _api_error(502, "RUNPOD_ACTION_FAILED", str(exc)) from exc
+
+        session.add_all(new_jobs)
+        job.version += 1
+        event = await record_audit(
+            session,
+            action=f"blender.render_{payload.action}",
+            resource_type="render_job",
+            resource_id=job.id,
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={"status": job.status, "stage": job.stage},
+        )
+        response_payload = _mutation(job_resource(job), job.version, event.id)
+        response_payload = await _commit_idempotent_mutation(
+            session,
+            scope=scope,
+            idempotency_key=payload.idempotency_key,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            resource_id=job.id,
+        )
+
+    return response_payload
 
 
 @app.post("/api/integrations/connections/{provider}/verify")

@@ -2,6 +2,11 @@ import {
   ApprovalActionInput,
   AuthResponse,
   BlenderPod,
+  BlenderPodAccess,
+  BlenderArtifact,
+  BlenderRenderFrame,
+  BlenderRenderJob,
+  BlenderTelemetrySample,
   BlenderTemplateJob,
   CouncilRunInput,
   DebateMessage,
@@ -468,11 +473,26 @@ export async function fetchBlenderPods(): Promise<BlenderPod[]> {
   return data.pods ?? [];
 }
 
-export async function actOnBlenderPod(podId: string, action: 'resume' | 'stop'): Promise<MutationEnvelope<BlenderPod>> {
-  return apiFetch<MutationEnvelope<BlenderPod>>(`/api/blender/pods/${encodeURIComponent(podId)}/actions`, {
+export async function provisionBlenderPod(): Promise<MutationEnvelope<BlenderPod>> {
+  return apiFetch<MutationEnvelope<BlenderPod>>('/api/blender/pods', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action }),
+    body: JSON.stringify({
+      confirm_billing: 'CREATE_ONE_A6000_POD',
+      idempotency_key: `a6000-${crypto.randomUUID()}`,
+    }),
+  });
+}
+
+export async function actOnBlenderPod(
+  podId: string,
+  action: 'resume' | 'stop' | 'prepare_runtime' | 'reveal_access',
+  inventoryConfirmed = false,
+): Promise<MutationEnvelope<BlenderPod> & { access?: BlenderPodAccess }> {
+  return apiFetch<MutationEnvelope<BlenderPod> & { access?: BlenderPodAccess }>(`/api/blender/pods/${encodeURIComponent(podId)}/actions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, inventory_confirmed: inventoryConfirmed }),
   });
 }
 
@@ -495,5 +515,60 @@ export async function createBlenderJob(input: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
+  });
+}
+
+export async function fetchBlenderRenderJobs(): Promise<BlenderRenderJob[]> {
+  const data = await apiFetch<{ render_jobs: BlenderRenderJob[] }>('/api/blender/render-jobs');
+  return data.render_jobs ?? [];
+}
+
+export async function fetchBlenderRenderJob(id: string): Promise<BlenderRenderJob> {
+  return apiFetch<BlenderRenderJob>(`/api/blender/render-jobs/${encodeURIComponent(id)}`);
+}
+
+export async function fetchBlenderRenderFrames(id: string): Promise<BlenderRenderFrame[]> {
+  const data = await apiFetch<{ frames: BlenderRenderFrame[] }>(`/api/blender/render-jobs/${encodeURIComponent(id)}/frames`);
+  return data.frames ?? [];
+}
+
+export async function fetchBlenderRenderTelemetry(id: string): Promise<BlenderTelemetrySample[]> {
+  const data = await apiFetch<{ telemetry: BlenderTelemetrySample[] }>(`/api/blender/render-jobs/${encodeURIComponent(id)}/telemetry`);
+  return data.telemetry ?? [];
+}
+
+export async function fetchBlenderRenderArtifacts(id: string): Promise<BlenderArtifact[]> {
+  const data = await apiFetch<{ artifacts: BlenderArtifact[] }>(`/api/blender/render-jobs/${encodeURIComponent(id)}/artifacts`);
+  return data.artifacts ?? [];
+}
+
+export async function createBlenderRenderJob(input: {
+  pod_id: string;
+  source_path: string;
+  render_mode: 'kasm_gui' | 'headless';
+  output_profile: 'delivery' | 'compositing';
+  frame_start: number | null;
+  frame_end: number | null;
+  frame_step: number;
+  samples: number;
+  resolution_percent: number;
+  require_drive: boolean;
+  drive_path: string;
+  auto_stop: boolean;
+  idempotency_key: string;
+}): Promise<MutationEnvelope<BlenderRenderJob>> {
+  return apiFetch<MutationEnvelope<BlenderRenderJob>>('/api/blender/render-jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  });
+}
+
+export async function actOnBlenderRenderJob(
+  id: string,
+  action: 'run_preflight' | 'approve_benchmark' | 'pause' | 'resume' | 'cancel' | 'retry_failed_frames' | 'retry_delivery' | 'stop_pod',
+  expectedVersion: number,
+): Promise<MutationEnvelope<BlenderRenderJob>> {
+  return apiFetch<MutationEnvelope<BlenderRenderJob>>(`/api/blender/render-jobs/${encodeURIComponent(id)}/actions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, expected_version: expectedVersion, idempotency_key: crypto.randomUUID() }),
   });
 }
