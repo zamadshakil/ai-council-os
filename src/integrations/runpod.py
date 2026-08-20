@@ -16,6 +16,10 @@ _POD_ID = re.compile(r"^[A-Za-z0-9_-]{3,100}$")
 _IMMUTABLE_BLENDER_IMAGE = re.compile(
     r"ghcr\.io/[a-z0-9._-]+/[a-z0-9._/-]+:[a-f0-9]{40}"
 )
+_RUNPOD_KASM_VNC_OPTIONS = (
+    "-PreferBandwidth -DynamicQualityMin=4 -DynamicQualityMax=7 "
+    "-DLP_ClipDelay=0 -sslOnly 0"
+)
 
 
 class RunPodError(RuntimeError):
@@ -204,6 +208,7 @@ async def ensure_blender_template(
                 "BLENDER_WORKSPACE_ROOT": "/workspace",
                 "NVIDIA_VISIBLE_DEVICES": "all",
                 "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,graphics,display,video",
+                "VNCOPTIONS": _RUNPOD_KASM_VNC_OPTIONS,
             },
             "isPublic": False,
             "isServerless": False,
@@ -264,6 +269,7 @@ async def create_a6000_pod(
                 "NVIDIA_VISIBLE_DEVICES": "all",
                 "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,graphics,display,video",
                 "VNC_PW": kasm_password,
+                "VNCOPTIONS": _RUNPOD_KASM_VNC_OPTIONS,
             },
             "globalNetworking": False,
             "gpuCount": 1,
@@ -341,6 +347,7 @@ async def update_pod_runtime(
                 "NVIDIA_VISIBLE_DEVICES": "all",
                 "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,graphics,display,video",
                 "VNC_PW": kasm_password,
+                "VNCOPTIONS": _RUNPOD_KASM_VNC_OPTIONS,
             },
         },
     )

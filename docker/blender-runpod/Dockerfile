@@ -16,6 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     BLENDER_WORKSPACE_ROOT=/workspace \
     BLENDER_GDRIVE_REMOTE=gdrive: \
     RCLONE_CONFIG=/workspace/.config/rclone/rclone.conf \
+    VNCOPTIONS="-PreferBandwidth -DynamicQualityMin=4 -DynamicQualityMax=7 -DLP_ClipDelay=0 -sslOnly 0" \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

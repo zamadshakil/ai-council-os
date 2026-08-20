@@ -79,9 +79,9 @@ jobs:
 
           kasm_ready=0
           for _ in $(seq 1 90); do
-            if curl --insecure --silent --show-error --fail \
+            if curl --silent --show-error --fail \
               --user "kasm_user:${VNC_PASSWORD}" \
-              "https://127.0.0.1:${kasm_port}/" >/dev/null; then
+              "http://127.0.0.1:${kasm_port}/" >/dev/null; then
               kasm_ready=1
               break
             fi

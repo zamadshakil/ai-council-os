@@ -125,6 +125,7 @@ async def test_runtime_update_preserves_workspace_and_uses_immutable_image(monke
     assert payload["env"]["NVIDIA_DRIVER_CAPABILITIES"] == (
         "compute,utility,graphics,display,video"
     )
+    assert "-sslOnly 0" in payload["env"]["VNCOPTIONS"]
     with pytest.raises(ValueError, match="immutable"):
         await runpod.update_pod_runtime(
             "pod-safe-123",
@@ -219,6 +220,7 @@ async def test_blender_template_is_immutable_reusable_and_contains_no_secrets(mo
     assert request["ports"] == ["6901/http", "8001/http"]
     assert "BLENDER_AGENT_TOKEN" not in request["env"]
     assert "VNC_PW" not in request["env"]
+    assert "-sslOnly 0" in request["env"]["VNCOPTIONS"]
     assert template["id"] == "template-safe-1"
 
 
@@ -261,6 +263,7 @@ async def test_a6000_provisioning_is_exactly_one_secure_on_demand_gpu(monkeypatc
     assert request["minRAMPerGPU"] == 64
     assert request["volumeInGb"] == 250
     assert request["volumeMountPath"] == "/workspace"
+    assert "-sslOnly 0" in request["env"]["VNCOPTIONS"]
     assert pod["gpu_count"] == 1
 
 
