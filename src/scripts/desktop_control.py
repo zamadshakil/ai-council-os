@@ -25,6 +25,15 @@ WORKSPACE = Path(os.getenv("BLENDER_WORKSPACE_ROOT", "/workspace")).resolve()
 STATE_PATH = WORKSPACE / ".council-blender" / "desktop_status.json"
 LOG_PATH = WORKSPACE / "logs" / "desktop-watchdog.log"
 REQUIRED_COMPONENTS = ("xfce4-session", "xfwm4", "xfdesktop", "xfce4-panel")
+FATAL_WINDOW_TITLES = (
+    "failed to restart the panel",
+    "untrusted application launcher",
+)
+DESKTOP_LAUNCHERS = (
+    "google-chrome.desktop",
+    "Blender.desktop",
+    "Renders.desktop",
+)
 
 
 def _utcnow() -> str:
@@ -57,11 +66,25 @@ def _processes() -> dict[str, list[int]]:
             name = str(process.info.get("name") or "")
             command = " ".join(process.info.get("cmdline") or [])
             for expected in REQUIRED_COMPONENTS:
+                # `xfce4-panel --restart` is a short-lived D-Bus control
+                # command, not the desktop panel. Counting it as healthy can
+                # turn its error dialog into a false-ready Kasm session.
+                if expected == "xfce4-panel" and "--restart" in command:
+                    continue
                 if name == expected or re.search(rf"(^|/){re.escape(expected)}(?:\s|$)", command):
                     found[expected].append(int(process.info["pid"]))
     except Exception:
         pass
     return found
+
+
+def _fatal_windows() -> list[str]:
+    """Return allowlisted desktop error dialogs that make a session unusable."""
+    code, output = _command(["xwininfo", "-display", DISPLAY, "-root", "-tree"], timeout=8)
+    if code != 0:
+        return []
+    lowered = output.casefold()
+    return [title for title in FATAL_WINDOW_TITLES if title in lowered]
 
 
 def _display_dimensions() -> tuple[int, int] | None:
@@ -126,12 +149,18 @@ def status() -> dict[str, Any]:
     x_code, x_output = _command(["xset", "-display", DISPLAY, "q"], timeout=5)
     processes = _processes()
     missing = [name for name, pids in processes.items() if not pids]
+    fatal_windows = _fatal_windows() if x_code == 0 else []
     framebuffer = _framebuffer() if x_code == 0 else {
         "captured": False,
         "nonblack": False,
         "error": x_output[-500:] or "X display is unavailable",
     }
-    ready = x_code == 0 and not missing and bool(framebuffer.get("nonblack"))
+    ready = (
+        x_code == 0
+        and not missing
+        and not fatal_windows
+        and bool(framebuffer.get("nonblack"))
+    )
     value = {
         "status": "ready" if ready else "not_ready",
         "ready": ready,
@@ -140,6 +169,7 @@ def status() -> dict[str, Any]:
         "x11_ready": x_code == 0,
         "components": processes,
         "missing_components": missing,
+        "fatal_windows": fatal_windows,
         "framebuffer": framebuffer,
     }
     try:
@@ -165,6 +195,59 @@ def _spawn(command: list[str]) -> None:
         )
 
 
+def _terminate_failed_panel_helpers() -> list[int]:
+    """Close only failed `xfce4-panel --restart` helpers and their dialogs."""
+    stopped: list[int] = []
+    try:
+        import psutil
+
+        for process in psutil.process_iter(["pid", "name", "cmdline"]):
+            command = " ".join(process.info.get("cmdline") or [])
+            if process.info.get("name") == "xfce4-panel" and "--restart" in command:
+                process.terminate()
+                stopped.append(int(process.info["pid"]))
+    except Exception:
+        pass
+    return stopped
+
+
+def _desktop_directories() -> list[Path]:
+    candidates = [
+        Path.home() / "Desktop",
+        Path("/home/kasm-user/Desktop"),
+        Path("/home/kasm-default-profile/Desktop"),
+    ]
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def ensure_desktop_launchers() -> dict[str, Any]:
+    """Make only the shipped artist launchers executable and XFCE-trusted."""
+    updated: list[str] = []
+    missing: list[str] = []
+    for launcher_name in DESKTOP_LAUNCHERS:
+        paths = [directory / launcher_name for directory in _desktop_directories()]
+        existing = [path for path in paths if path.is_file()]
+        if not existing:
+            missing.append(launcher_name)
+            continue
+        for path in existing:
+            try:
+                path.chmod(0o755)
+                updated.append(str(path))
+            except OSError:
+                continue
+            # XFCE/GLib can require both the executable bit and trusted
+            # metadata for launchers copied from a default Kasm profile.
+            # Failure is safe here: the executable bit remains enforced and
+            # the readiness gate still rejects any resulting trust dialog.
+            _command(["gio", "set", str(path), "metadata::trusted", "true"], timeout=5)
+    return {"updated": updated, "missing": missing}
+
+
 def recover() -> dict[str, Any]:
     """Repair only the fixed XFCE desktop components on the fixed Kasm display."""
     before = status()
@@ -173,6 +256,12 @@ def recover() -> dict[str, Any]:
 
     missing = set(before["missing_components"])
     actions: list[str] = []
+    launcher_result = ensure_desktop_launchers()
+    if launcher_result["updated"]:
+        actions.append("trust_desktop_launchers")
+    stopped_helpers = _terminate_failed_panel_helpers()
+    if stopped_helpers:
+        actions.append("close_failed_panel_restart_dialog")
     if "xfce4-session" in missing:
         _spawn(["xfce4-session"])
         actions.append("start_xfce_session")
@@ -184,8 +273,11 @@ def recover() -> dict[str, Any]:
         _spawn(["xfdesktop", "--replace"])
         actions.append("restart_desktop")
     if "xfce4-panel" in missing:
-        _spawn(["xfce4-panel", "--restart"])
-        actions.append("restart_panel")
+        # `--restart` talks to an already-registered panel over the XFCE
+        # session bus. It must never be used when the panel is absent: doing
+        # so opens a modal "ServiceUnknown" dialog on the artist desktop.
+        _spawn(["xfce4-panel"])
+        actions.append("start_panel")
 
     time.sleep(5)
     after = status()
@@ -197,6 +289,7 @@ def watchdog() -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     consecutive_failures = 0
     startup_deadline = time.monotonic() + 300
+    ensure_desktop_launchers()
     while True:
         current = status()
         if current["ready"]:

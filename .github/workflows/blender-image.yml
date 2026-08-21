@@ -117,8 +117,15 @@ jobs:
             --header "Authorization: Bearer ${AGENT_TOKEN}" \
             "http://127.0.0.1:${agent_port}/v1/desktop/status" \
             | jq --exit-status \
-              '.ready and .x11_ready and (.missing_components | length == 0) and .framebuffer.captured and .framebuffer.nonblack' \
+              '.ready and .x11_ready and (.missing_components | length == 0) and (.fatal_windows | length == 0) and .framebuffer.captured and .framebuffer.nonblack' \
               >/dev/null
+
+          # A visible wallpaper is not sufficient if recovery left an XFCE
+          # ServiceUnknown modal on top of the artist session.
+          test -z "$(docker exec "${container_id}" \
+            bash -lc 'DISPLAY=:1 xwininfo -root -tree 2>/dev/null | grep -i "failed to restart the panel" || true')"
+          test -z "$(docker exec "${container_id}" \
+            bash -lc 'DISPLAY=:1 xwininfo -root -tree 2>/dev/null | grep -i "untrusted application launcher" || true')"
 
           curl --silent --show-error --fail \
             --header "Authorization: Bearer ${AGENT_TOKEN}" \
@@ -161,6 +168,9 @@ jobs:
           docker exec "${container_id}" test -x /usr/bin/ristretto
           docker exec "${container_id}" test -x \
             /home/kasm-default-profile/Desktop/Renders.desktop
+          for launcher in google-chrome.desktop Blender.desktop Renders.desktop; do
+            docker exec "${container_id}" test -x "/home/kasm-user/Desktop/${launcher}"
+          done
           docker exec --env HOME=/home/kasm-user "${container_id}" \
             xdg-mime query default image/png \
             | grep --extended-regexp 'ristretto\.desktop$'
