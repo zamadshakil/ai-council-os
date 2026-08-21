@@ -109,7 +109,7 @@ jobs:
             | grep --fixed-strings 'google-chrome.desktop'
           docker exec "${container_id}" test -s \
             /opt/council/samples/BMW27_GPU.blend
-          docker exec "${container_id}" command -v ristretto
+          docker exec "${container_id}" test -x /usr/bin/ristretto
           docker exec "${container_id}" test -x \
             /home/kasm-default-profile/Desktop/Renders.desktop
           docker exec --env HOME=/home/kasm-user "${container_id}" \
