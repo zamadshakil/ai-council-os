@@ -101,7 +101,7 @@ jobs:
               --header "Authorization: Bearer ${AGENT_TOKEN}" \
               "http://127.0.0.1:${agent_port}/healthz" \
               | jq --exit-status \
-                '.desktop.ready == true and .desktop.x11_ready == true and .desktop.framebuffer.nonblack == true' \
+                '.ready == true and .workspace_writable == true and (.required_tools | [.[]] | all) and .desktop.ready == true and .desktop.x11_ready == true and .desktop.launchers.ready == true and .desktop.framebuffer.nonblack == true' \
                 >/dev/null; then
               agent_ready=1
               break
@@ -117,7 +117,7 @@ jobs:
             --header "Authorization: Bearer ${AGENT_TOKEN}" \
             "http://127.0.0.1:${agent_port}/v1/desktop/status" \
             | jq --exit-status \
-              '.ready and .x11_ready and (.missing_components | length == 0) and (.fatal_windows | length == 0) and .framebuffer.captured and .framebuffer.nonblack' \
+              '.ready and .x11_ready and .launchers.ready and (.missing_components | length == 0) and (.fatal_windows | length == 0) and .framebuffer.captured and .framebuffer.nonblack' \
               >/dev/null
 
           # A visible wallpaper is not sufficient if recovery left an XFCE
@@ -174,6 +174,24 @@ jobs:
           docker exec --env HOME=/home/kasm-user "${container_id}" \
             xdg-mime query default image/png \
             | grep --extended-regexp 'ristretto\.desktop$'
+
+          # Prove the watchdog repairs a real component failure without a
+          # modal error, rather than testing only the happy startup path.
+          docker exec "${container_id}" pkill --exact xfce4-panel
+          recovered=0
+          for _ in $(seq 1 24); do
+            if curl --silent --show-error --fail \
+              --header "Authorization: Bearer ${AGENT_TOKEN}" \
+              "http://127.0.0.1:${agent_port}/v1/desktop/status" \
+              | jq --exit-status \
+                '.ready and .launchers.ready and (.missing_components | length == 0) and (.fatal_windows | length == 0)' \
+                >/dev/null; then
+              recovered=1
+              break
+            fi
+            sleep 3
+          done
+          test "${recovered}" -eq 1
       - name: Release BuildKit cache before security scan
         shell: bash
         run: |

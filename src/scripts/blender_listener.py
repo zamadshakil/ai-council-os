@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -273,6 +274,31 @@ def _runtime_health() -> dict[str, Any]:
                     virtualgl_renderer = detected
                     virtualgl_display = candidate
                     break
+    workspace_writable = False
+    workspace_error = ""
+    try:
+        readiness_directory = _workspace() / ".council-blender"
+        readiness_directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=".workspace-readiness-",
+            dir=readiness_directory,
+        ) as readiness_probe:
+            readiness_probe.write(_utcnow())
+            readiness_probe.flush()
+            os.fsync(readiness_probe.fileno())
+        workspace_writable = True
+    except OSError as exc:
+        workspace_error = f"{type(exc).__name__}: {exc}"[:300]
+    required_tools = {
+        "browser": bool(shutil.which("google-chrome")),
+        "image_viewer": bool(shutil.which("ristretto")),
+        "ffmpeg": bool(shutil.which("ffmpeg")),
+        "rclone": bool(shutil.which("rclone")),
+        "flamenco_manager": Path("/opt/flamenco/flamenco-manager").is_file(),
+        "flamenco_worker": Path("/opt/flamenco/flamenco-worker").is_file(),
+    }
     try:
         import psutil
 
@@ -289,7 +315,14 @@ def _runtime_health() -> dict[str, Any]:
     except (OSError, ImportError, AttributeError):
         host = {}
     desktop = desktop_control.status()
-    ready = blender_code == 0 and nvidia_code == 0 and bool(gpus) and bool(desktop.get("ready"))
+    ready = (
+        blender_code == 0
+        and nvidia_code == 0
+        and bool(gpus)
+        and bool(desktop.get("ready"))
+        and workspace_writable
+        and all(required_tools.values())
+    )
     return {
         "status": "ok" if ready else "not_ready",
         "ready": ready,
@@ -304,6 +337,9 @@ def _runtime_health() -> dict[str, Any]:
         "virtualgl_available": bool(virtualgl_renderer),
         "virtualgl_renderer": virtualgl_renderer,
         "virtualgl_display": virtualgl_display,
+        "workspace_writable": workspace_writable,
+        "workspace_error": workspace_error,
+        "required_tools": required_tools,
         "desktop": desktop,
         **host,
     }

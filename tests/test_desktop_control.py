@@ -1,8 +1,18 @@
 import os
 
+import pytest
 from PIL import Image, ImageDraw
 
 from src.scripts import desktop_control
+
+
+@pytest.fixture(autouse=True)
+def _ready_launchers(monkeypatch):
+    monkeypatch.setattr(
+        desktop_control,
+        "_launcher_status",
+        lambda: {"ready": True, "directory": "/home/kasm-user/Desktop", "items": {}},
+    )
 
 
 def test_black_frame_is_rejected() -> None:

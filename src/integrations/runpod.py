@@ -624,6 +624,20 @@ async def verify_blender_agent(pod_id: str) -> dict[str, Any]:
         raise RunPodError("Blender is not installed in the selected pod image")
     if not data.get("nvidia_smi_available") or not data.get("gpu_visible"):
         raise RunPodError("The selected pod does not expose an NVIDIA GPU to the Blender image")
+    if not data.get("workspace_writable"):
+        raise RunPodError(
+            "The selected pod cannot write to its persistent workspace",
+            code="BLENDER_WORKSPACE_NOT_WRITABLE",
+            http_status=503,
+        )
+    required_tools = data.get("required_tools") if isinstance(data.get("required_tools"), dict) else {}
+    missing_tools = [name for name, available in required_tools.items() if not available]
+    if missing_tools:
+        raise RunPodError(
+            "The Blender runtime is missing required tools: " + ", ".join(missing_tools),
+            code="BLENDER_RUNTIME_INCOMPLETE",
+            http_status=503,
+        )
     desktop = data.get("desktop") if isinstance(data.get("desktop"), dict) else {}
     if not desktop.get("ready"):
         missing = ", ".join(desktop.get("missing_components") or [])

@@ -150,6 +150,7 @@ def status() -> dict[str, Any]:
     processes = _processes()
     missing = [name for name, pids in processes.items() if not pids]
     fatal_windows = _fatal_windows() if x_code == 0 else []
+    launchers = _launcher_status()
     framebuffer = _framebuffer() if x_code == 0 else {
         "captured": False,
         "nonblack": False,
@@ -159,6 +160,7 @@ def status() -> dict[str, Any]:
         x_code == 0
         and not missing
         and not fatal_windows
+        and bool(launchers["ready"])
         and bool(framebuffer.get("nonblack"))
     )
     value = {
@@ -170,6 +172,7 @@ def status() -> dict[str, Any]:
         "components": processes,
         "missing_components": missing,
         "fatal_windows": fatal_windows,
+        "launchers": launchers,
         "framebuffer": framebuffer,
     }
     try:
@@ -248,6 +251,25 @@ def ensure_desktop_launchers() -> dict[str, Any]:
     return {"updated": updated, "missing": missing}
 
 
+def _launcher_status() -> dict[str, Any]:
+    """Inspect the real artist profile, never the image's template profile."""
+    desktop = Path.home() / "Desktop"
+    launchers: dict[str, dict[str, Any]] = {}
+    for launcher_name in DESKTOP_LAUNCHERS:
+        path = desktop / launcher_name
+        launchers[launcher_name] = {
+            "present": path.is_file(),
+            "executable": path.is_file() and os.access(path, os.X_OK),
+        }
+    return {
+        "ready": all(
+            item["present"] and item["executable"] for item in launchers.values()
+        ),
+        "directory": str(desktop),
+        "items": launchers,
+    }
+
+
 def recover() -> dict[str, Any]:
     """Repair only the fixed XFCE desktop components on the fixed Kasm display."""
     before = status()
@@ -297,8 +319,11 @@ def watchdog() -> None:
         else:
             consecutive_failures += 1
             process_failure = bool(current["missing_components"])
+            launcher_failure = not bool(current["launchers"]["ready"])
             startup_black = time.monotonic() < startup_deadline and not current["framebuffer"].get("nonblack")
-            if consecutive_failures >= 3 and (process_failure or startup_black):
+            if consecutive_failures >= 3 and (
+                process_failure or launcher_failure or startup_black
+            ):
                 result = recover()
                 with LOG_PATH.open("a", encoding="utf-8") as log_file:
                     log_file.write(json.dumps({"at": _utcnow(), "recovery": result}) + "\n")
