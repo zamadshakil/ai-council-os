@@ -157,6 +157,10 @@ async def test_pod_lifecycle_uses_current_rest_contract(monkeypatch):
         }
 
     monkeypatch.setattr(runpod, "_rest", fake_rest)
+    async def fake_readiness(_pod_id):
+        return {"status": "ready", "gpu_available": 1}
+
+    monkeypatch.setattr(runpod, "_pod_resume_readiness", fake_readiness)
     started = await runpod.resume_pod("pod-safe-123")
     stopped = await runpod.stop_pod("pod-safe-123")
 
@@ -168,6 +172,44 @@ async def test_pod_lifecycle_uses_current_rest_contract(monkeypatch):
     ]
     assert started["desired_status"] == "RUNNING"
     assert stopped["desired_status"] == "EXITED"
+
+
+@pytest.mark.asyncio
+async def test_resume_blocks_before_paid_start_when_original_machine_has_no_gpu(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    async def fake_readiness(_pod_id):
+        return {
+            "status": "capacity_unavailable",
+            "gpu_available": 0,
+            "gpu_name": "RTX A6000",
+            "data_center": "EU-SE-1",
+        }
+
+    async def fake_rest(method, path, *, payload=None):
+        calls.append((method, path))
+        return {}
+
+    monkeypatch.setattr(runpod, "_pod_resume_readiness", fake_readiness)
+    monkeypatch.setattr(runpod, "_rest", fake_rest)
+
+    with pytest.raises(runpod.RunPodError) as raised:
+        await runpod.resume_pod("pod-safe-123")
+
+    assert raised.value.code == "RUNPOD_GPU_CAPACITY_UNAVAILABLE"
+    assert raised.value.http_status == 409
+    assert calls == []
+
+
+def test_runpod_provider_failures_are_safely_classified():
+    unavailable = runpod._provider_failure(400, {"error": "GPU unavailable on host"})
+    assert unavailable.code == "RUNPOD_GPU_CAPACITY_UNAVAILABLE"
+    assert unavailable.http_status == 409
+    assert "GPU unavailable on host" not in str(unavailable)
+
+    auth = runpod._provider_failure(401, {"error": "secret provider detail"})
+    assert auth.code == "RUNPOD_AUTH_FAILED"
+    assert "secret provider detail" not in str(auth)
 
 
 @pytest.mark.asyncio

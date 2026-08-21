@@ -8,7 +8,7 @@ import {
   MonitorPlay, Pause, Play, RefreshCw, RotateCcw, ShieldCheck, Square, XCircle,
 } from 'lucide-react';
 import {
-  actOnBlenderPod, actOnBlenderRenderJob, createBlenderRenderJob,
+  actOnBlenderPod, actOnBlenderRenderJob, ApiError, createBlenderRenderJob,
   fetchBlenderPods, fetchBlenderRenderArtifacts, fetchBlenderRenderFrames,
   fetchBlenderRenderJobs, fetchBlenderRenderTelemetry, provisionBlenderPod,
 } from '../lib/api';
@@ -131,6 +131,9 @@ export default function BlenderManagerPage() {
   const [provisionFeedback, setProvisionFeedback] = useState<{
     kind: 'error' | 'success'; message: string;
   } | null>(null);
+  const [podFeedback, setPodFeedback] = useState<Record<string, {
+    kind: 'error' | 'success'; message: string;
+  }>>({});
 
   const selected = jobs.find((job) => job.id === selectedId) ?? jobs[0];
   const selectedPod = pods.find((pod) => pod.id === (selected?.pod_id ?? podId));
@@ -220,16 +223,25 @@ export default function BlenderManagerPage() {
       ? window.confirm('Before replacing the old container, confirm that you inventoried /workspace and copied every critical file from container storage into /workspace. Continue only after the one-A6000 smoke image has passed.')
       : false;
     if (action === 'prepare_runtime' && !inventoryConfirmed) return;
-    setBusy(`${pod.id}:${action}`); setError(''); setNotice('');
+    setBusy(`${pod.id}:${action}`); setError(''); setNotice(''); setPodFeedback((current) => {
+      const next = { ...current }; delete next[pod.id]; return next;
+    });
     try {
       const response = await actOnBlenderPod(pod.id, action, inventoryConfirmed);
       setPods((current) => current.map((item) => item.id === pod.id ? response.resource : item));
       if (response.access) setRuntimeAccess(response.access);
-      setNotice(action === 'prepare_runtime'
+      const message = action === 'prepare_runtime'
         ? 'The stopped pod now uses the approved immutable Blender/Kasm image. /workspace was preserved.'
         : action === 'reveal_access' ? 'Kasm access is shown below. Do not share this password.'
-          : `${human(action)} accepted.`);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Pod action failed.'); }
+          : action === 'resume' ? 'RunPod accepted the start. The workstation may take a few minutes to become ready.'
+            : 'RunPod accepted the stop request.';
+      setPodFeedback((current) => ({ ...current, [pod.id]: { kind: 'success', message } }));
+    } catch (cause) {
+      const message = cause instanceof ApiError && cause.code === 'RUNPOD_GPU_CAPACITY_UNAVAILABLE'
+        ? cause.message
+        : cause instanceof Error ? cause.message : 'The machine action failed.';
+      setPodFeedback((current) => ({ ...current, [pod.id]: { kind: 'error', message } }));
+    }
     finally { setBusy(''); }
   }
 
@@ -334,7 +346,12 @@ export default function BlenderManagerPage() {
           <div className="flex items-start justify-between gap-3"><div><h3 className="font-bold text-white">{pod.name}</h3><p className="mt-1 break-all text-xs text-slate-400">{pod.image_name || 'Image not reported'}</p></div><span className={`rounded-full border px-2 py-1 text-[10px] font-black ${pod.desired_status === 'RUNNING' ? statusTone('ready') : statusTone('paused')}`}>{pod.desired_status}</span></div>
           <div className="mt-4 flex flex-wrap gap-2">
             {pod.proxy_url && <a href={pod.proxy_url} target="_blank" rel="noreferrer" className="inline-flex h-10 items-center gap-2 rounded-xl border border-cyan-300/25 px-3 text-xs font-bold text-cyan-100"><ExternalLink className="h-4 w-4" />Open Kasm</a>}
-            <button onClick={() => void podAction(pod, pod.desired_status === 'RUNNING' ? 'stop' : 'resume')} disabled={busy.startsWith(pod.id)} className="inline-flex h-10 items-center gap-2 rounded-xl bg-white/8 px-3 text-xs font-bold text-white disabled:opacity-45">{pod.desired_status === 'RUNNING' ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}{pod.desired_status === 'RUNNING' ? 'Stop billing' : 'Resume'}</button>
+            <button
+              onClick={() => void podAction(pod, pod.desired_status === 'RUNNING' ? 'stop' : 'resume')}
+              disabled={busy.startsWith(pod.id) || pod.resume_status === 'capacity_unavailable'}
+              title={pod.resume_status === 'capacity_unavailable' ? 'No free GPU remains on this pod’s physical machine. Refresh later or migrate it in RunPod.' : undefined}
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-white/8 px-3 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-45"
+            >{busy === `${pod.id}:${pod.desired_status === 'RUNNING' ? 'stop' : 'resume'}` ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : pod.desired_status === 'RUNNING' ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}{busy === `${pod.id}:resume` ? 'Resuming…' : busy === `${pod.id}:stop` ? 'Stopping…' : pod.desired_status === 'RUNNING' ? 'Stop billing' : 'Resume'}</button>
             {pod.desired_status !== 'RUNNING' && <button onClick={() => void podAction(pod, 'prepare_runtime')} disabled={busy.startsWith(pod.id)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-emerald-300/25 px-3 text-xs font-bold text-emerald-100 disabled:opacity-45"><ShieldCheck className="h-4 w-4" />Install approved runtime</button>}
             <button onClick={() => void podAction(pod, 'reveal_access')} disabled={busy.startsWith(pod.id)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/12 px-3 text-xs font-bold text-slate-200 disabled:opacity-45">Show Kasm login</button>
           </div>
@@ -345,6 +362,8 @@ export default function BlenderManagerPage() {
             <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">CPU <strong className="text-emerald-200">{pod.cpu_percent.toFixed(0)}%</strong></span>
             <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">RAM <strong className="text-amber-200">{pod.memory_percent.toFixed(0)}%</strong></span>
           </div> : <p className="mt-3 text-[11px] font-bold text-amber-200">Live provider telemetry unavailable</p>}
+          {pod.resume_status === 'capacity_unavailable' && <div role="status" className="mt-3 rounded-xl border border-amber-300/25 bg-amber-300/8 p-3 text-[11px] leading-5 text-amber-100"><strong>Resume unavailable:</strong> this pod’s physical machine currently has no free {pod.machine_gpu_name || 'GPU'}{pod.data_center_id ? ` in ${pod.data_center_id}` : ''}. Your <code>/workspace</code> is preserved. Use Refresh later or migrate the pod from RunPod.</div>}
+          {podFeedback[pod.id] && <div role={podFeedback[pod.id].kind === 'error' ? 'alert' : 'status'} className={`mt-3 rounded-xl border p-3 text-[11px] leading-5 ${podFeedback[pod.id].kind === 'error' ? 'border-rose-300/30 bg-rose-300/10 text-rose-100' : 'border-emerald-300/30 bg-emerald-300/10 text-emerald-100'}`}><strong>{podFeedback[pod.id].kind === 'error' ? 'Could not resume: ' : 'Machine update: '}</strong>{podFeedback[pod.id].message}</div>}
           {pod.agent_status === 'live' && <div className="mt-3 flex flex-wrap gap-2 text-[10px] font-bold">
             <span className={`rounded-full border px-2.5 py-1 ${gpuConfigured ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100' : 'border-amber-300/25 bg-amber-300/10 text-amber-100'}`}>Cycles {gpuConfigured ? `${guiState?.backend || 'GPU'} configured` : 'waiting for a Cycles scene'}</span>
             <span className={`rounded-full border px-2.5 py-1 ${blenderPid ? 'border-cyan-300/25 bg-cyan-300/10 text-cyan-100' : 'border-white/10 bg-white/[0.035] text-slate-400'}`}>Blender {blenderPid ? `PID ${blenderPid}` : 'not open'}</span>

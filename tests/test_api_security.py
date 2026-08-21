@@ -394,6 +394,40 @@ async def test_existing_pod_update_requires_inventory_and_exact_smoke_sha(
 
 
 @pytest.mark.asyncio
+async def test_blender_resume_preserves_safe_runpod_capacity_error(
+    api_client, monkeypatch
+):
+    csrf_token = await _login(api_client)
+    saved = await api_client.put(
+        "/api/integrations/runpod/credentials",
+        json={"credentials": {"api_key": "rotated-runpod-capacity-key"}},
+        headers={"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token},
+    )
+    assert saved.status_code == 200, saved.text
+    await integration_vault.mark_verification("runpod", True)
+
+    async def unavailable(_pod_id):
+        from src.integrations.runpod import RunPodError
+
+        raise RunPodError(
+            "This pod's original RunPod machine currently has no free RTX A6000. Your /workspace is preserved.",
+            code="RUNPOD_GPU_CAPACITY_UNAVAILABLE",
+            http_status=409,
+        )
+
+    monkeypatch.setattr("src.integrations.runpod.resume_pod", unavailable)
+    response = await api_client.post(
+        "/api/blender/pods/pod-safe-123/actions",
+        json={"action": "resume"},
+        headers={"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "RUNPOD_GPU_CAPACITY_UNAVAILABLE"
+    assert "/workspace is preserved" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_new_a6000_pod_requires_explicit_billing_confirmation_and_is_audited(
     api_client, monkeypatch
 ):

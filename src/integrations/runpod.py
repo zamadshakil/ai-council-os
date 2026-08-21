@@ -26,6 +26,93 @@ _RUNPOD_KASM_VNC_OPTIONS = (
 class RunPodError(RuntimeError):
     """Sanitized provider error that never includes a credential-bearing URL."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "RUNPOD_ACTION_FAILED",
+        http_status: int = 502,
+        provider_status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.http_status = http_status
+        self.provider_status = provider_status
+
+
+def _provider_failure(status: int, data: object) -> RunPodError:
+    """Map provider failures to safe, stable errors without echoing its body."""
+    messages: list[str] = []
+    if isinstance(data, dict):
+        for key in ("message", "error", "detail"):
+            value = data.get(key)
+            if isinstance(value, str):
+                messages.append(value)
+            elif isinstance(value, dict):
+                messages.extend(
+                    str(item) for item in value.values() if isinstance(item, str)
+                )
+        errors = data.get("errors")
+        if isinstance(errors, list):
+            messages.extend(
+                str(item.get("message", ""))
+                for item in errors
+                if isinstance(item, dict)
+            )
+    description = " ".join(messages).lower()
+    if status in {401, 403}:
+        return RunPodError(
+            "RunPod authorization failed. Re-verify the RunPod connection in Settings.",
+            code="RUNPOD_AUTH_FAILED",
+            http_status=502,
+            provider_status=status,
+        )
+    if status == 404:
+        return RunPodError(
+            "This RunPod machine no longer exists in the connected account.",
+            code="RUNPOD_POD_NOT_FOUND",
+            http_status=404,
+            provider_status=status,
+        )
+    if status == 429:
+        return RunPodError(
+            "RunPod is rate-limiting lifecycle requests. Wait briefly, then refresh.",
+            code="RUNPOD_RATE_LIMITED",
+            http_status=503,
+            provider_status=status,
+        )
+    if status == 402 or any(
+        marker in description
+        for marker in ("insufficient funds", "insufficient balance", "billing", "credit")
+    ):
+        return RunPodError(
+            "RunPod could not start billing for this machine. Check the RunPod account balance and billing status.",
+            code="RUNPOD_BILLING_BLOCKED",
+            http_status=409,
+            provider_status=status,
+        )
+    if any(
+        marker in description
+        for marker in ("no gpu", "gpu unavailable", "not available", "no capacity", "out of stock")
+    ):
+        return RunPodError(
+            "The stopped pod's original RunPod machine has no free GPU right now. Your /workspace remains preserved; refresh later or migrate the pod in RunPod.",
+            code="RUNPOD_GPU_CAPACITY_UNAVAILABLE",
+            http_status=409,
+            provider_status=status,
+        )
+    if status == 409:
+        return RunPodError(
+            "RunPod cannot resume this machine in its current state. Refresh its status before trying again.",
+            code="RUNPOD_POD_NOT_RESUMABLE",
+            http_status=409,
+            provider_status=status,
+        )
+    return RunPodError(
+        "RunPod could not complete this machine action. Refresh the machine status and check RunPod system logs.",
+        provider_status=status,
+    )
+
 
 def _api_key() -> str:
     key = integration_value("RUNPOD_API_KEY", "").strip()
@@ -70,11 +157,15 @@ async def _rest(
     try:
         data = response.json()
     except ValueError as exc:
+        if response.is_error:
+            raise _provider_failure(response.status_code, {}) from exc
         if not response.is_error and not response.content.strip():
             return {}
         raise RunPodError("RunPod returned an unreadable response") from exc
-    if response.is_error or not isinstance(data, (dict, list)):
-        raise RunPodError("RunPod rejected the request")
+    if response.is_error:
+        raise _provider_failure(response.status_code, data)
+    if not isinstance(data, (dict, list)):
+        raise RunPodError("RunPod returned an invalid response")
     if isinstance(data, list) and not all(isinstance(item, dict) for item in data):
         raise RunPodError("RunPod returned an invalid list response")
     return data
@@ -92,6 +183,8 @@ async def _pod_runtimes() -> dict[str, dict[str, Any]]:
       myself {
         pods {
           id
+          desiredStatus
+          machine { gpuAvailable gpuDisplayName dataCenterId }
           runtime {
             uptimeInSeconds
             gpus { id gpuUtilPercent memoryUtilPercent }
@@ -118,10 +211,55 @@ async def _pod_runtimes() -> dict[str, dict[str, Any]]:
         raise RunPodError("RunPod telemetry rejected the request")
     myself = (payload.get("data") or {}).get("myself") or {}
     pods = myself.get("pods") or []
+    states: dict[str, dict[str, Any]] = {}
+    for item in pods:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        state = dict(item.get("runtime") or {})
+        machine = item.get("machine") if isinstance(item.get("machine"), dict) else {}
+        state["_gpuAvailable"] = machine.get("gpuAvailable")
+        state["_gpuDisplayName"] = machine.get("gpuDisplayName")
+        state["_dataCenterId"] = machine.get("dataCenterId")
+        states[str(item["id"])] = state
+    return states
+
+
+async def _pod_resume_readiness(pod_id: str) -> dict[str, Any]:
+    """Read the stopped pod's host capacity without attempting a billable start."""
+    query = """
+    query CouncilPodResumeReadiness($podId: String!) {
+      pod(input: {podId: $podId}) {
+        id
+        desiredStatus
+        machine { gpuAvailable gpuDisplayName dataCenterId }
+      }
+    }
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                RUNPOD_GRAPHQL_URL,
+                params={"api_key": _api_key()},
+                json={"query": query, "variables": {"podId": pod_id}},
+            )
+        payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        return {"status": "unknown"}
+    if response.is_error or not isinstance(payload, dict) or payload.get("errors"):
+        return {"status": "unknown"}
+    pod = (payload.get("data") or {}).get("pod") or {}
+    machine = pod.get("machine") if isinstance(pod.get("machine"), dict) else {}
+    available = machine.get("gpuAvailable")
     return {
-        str(item.get("id")): dict(item.get("runtime") or {})
-        for item in pods
-        if isinstance(item, dict) and item.get("id")
+        "status": (
+            "running" if pod.get("desiredStatus") == "RUNNING"
+            else "capacity_unavailable" if available == 0
+            else "ready" if isinstance(available, (int, float)) and available > 0
+            else "unknown"
+        ),
+        "gpu_available": int(available) if isinstance(available, (int, float)) else None,
+        "gpu_name": str(machine.get("gpuDisplayName") or "GPU"),
+        "data_center": str(machine.get("dataCenterId") or ""),
     }
 
 
@@ -170,10 +308,21 @@ def _shape_pod(pod: dict[str, Any]) -> dict[str, Any]:
             except ValueError:
                 pass
     container = runtime.get("container") if isinstance(runtime.get("container"), dict) else {}
+    metrics_observed = any(
+        key in runtime for key in ("uptimeInSeconds", "gpus", "container")
+    )
+    available = runtime.get("_gpuAvailable")
+    desired_status = str(pod.get("desiredStatus", "UNKNOWN"))
+    resume_status = (
+        "running" if desired_status == "RUNNING"
+        else "capacity_unavailable" if available == 0
+        else "ready" if isinstance(available, (int, float)) and available > 0
+        else "unknown"
+    )
     return {
         "id": str(pod.get("id", "")),
         "name": str(pod.get("name", "") or pod.get("id", "")),
-        "desired_status": str(pod.get("desiredStatus", "UNKNOWN")),
+        "desired_status": desired_status,
         "image_name": str(pod.get("imageName") or pod.get("image") or ""),
         "gpu_count": int(pod.get("gpuCount") or gpu.get("count") or 0),
         "cost_per_hour": float(pod.get("costPerHr") or 0.0),
@@ -189,8 +338,14 @@ def _shape_pod(pod: dict[str, Any]) -> dict[str, Any]:
         ],
         "cpu_percent": float(container.get("cpuPercent") or 0),
         "memory_percent": float(container.get("memoryPercent") or 0),
-        "telemetry_status": "live" if runtime else "unavailable",
+        "telemetry_status": "live" if metrics_observed else "unavailable",
         "proxy_url": proxy_url,
+        "resume_status": resume_status,
+        "gpu_available_on_machine": (
+            int(available) if isinstance(available, (int, float)) else None
+        ),
+        "machine_gpu_name": str(runtime.get("_gpuDisplayName") or ""),
+        "data_center_id": str(runtime.get("_dataCenterId") or ""),
     }
 
 
@@ -370,6 +525,14 @@ async def _get_pod(pod_id: str) -> dict[str, Any]:
 
 async def resume_pod(pod_id: str) -> dict[str, Any]:
     pod_id = _pod_id(pod_id)
+    readiness = await _pod_resume_readiness(pod_id)
+    if readiness.get("status") == "capacity_unavailable":
+        location = f" in {readiness['data_center']}" if readiness.get("data_center") else ""
+        raise RunPodError(
+            f"This pod's original RunPod machine{location} currently has no free {readiness.get('gpu_name') or 'GPU'}. Your /workspace is preserved; refresh later or migrate the pod in RunPod.",
+            code="RUNPOD_GPU_CAPACITY_UNAVAILABLE",
+            http_status=409,
+        )
     await _rest("POST", f"/pods/{pod_id}/start")
     return await _get_pod(pod_id)
 

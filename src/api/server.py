@@ -2509,7 +2509,12 @@ async def act_on_blender_pod(
         code = "RUNPOD_RUNTIME_INVALID" if payload.action == "prepare_runtime" else "INVALID_POD_ID"
         raise _api_error(422, code, str(exc)) from exc
     except RunPodError as exc:
-        raise _api_error(502, "RUNPOD_ACTION_FAILED", str(exc)) from exc
+        raise _api_error(
+            exc.http_status,
+            exc.code,
+            str(exc),
+            provider_status=exc.provider_status,
+        ) from exc
     async with async_session() as session:
         event = await record_audit(
             session,

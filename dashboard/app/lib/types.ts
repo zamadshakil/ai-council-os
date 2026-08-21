@@ -295,6 +295,10 @@ export interface BlenderPod {
   memory_percent: number;
   telemetry_status: 'live' | 'unavailable';
   proxy_url: string;
+  resume_status?: 'running' | 'ready' | 'capacity_unavailable' | 'unknown';
+  gpu_available_on_machine?: number | null;
+  machine_gpu_name?: string;
+  data_center_id?: string;
   agent_status: 'live' | 'unavailable' | 'not_running';
   local_runtime: {
     sampled_at?: string;
