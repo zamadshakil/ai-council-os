@@ -101,7 +101,7 @@ jobs:
               --header "Authorization: Bearer ${AGENT_TOKEN}" \
               "http://127.0.0.1:${agent_port}/healthz" \
               | jq --exit-status \
-                '.ready == true and .workspace_writable == true and (.required_tools | [.[]] | all) and .desktop.ready == true and .desktop.x11_ready == true and .desktop.launchers.ready == true and .desktop.framebuffer.nonblack == true' \
+                '.blender_available == true and .workspace_writable == true and (.required_tools | [.[]] | all) and .desktop.ready == true and .desktop.x11_ready == true and .desktop.launchers.ready == true and .desktop.framebuffer.nonblack == true' \
                 >/dev/null; then
               agent_ready=1
               break
@@ -109,6 +109,10 @@ jobs:
             sleep 2
           done
           test "${agent_ready}" -eq 1
+
+          # GitHub-hosted builders do not expose NVIDIA devices. GPU/NVML and
+          # OptiX readiness remain mandatory in the paid one-A6000 rollout
+          # gate; this portable image gate proves every non-GPU prerequisite.
 
           # An HTTP 200 from KasmVNC is insufficient: the web client can load
           # while XFCE is dead and the framebuffer is completely black. Prove
