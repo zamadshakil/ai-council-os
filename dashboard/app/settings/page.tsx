@@ -8,6 +8,11 @@ import { AppearanceControl } from '../components/appearance-control';
 import { INTEGRATION_GUIDES } from './integration-guides';
 
 type EditorPanel = 'guide' | 'credentials' | 'connections';
+type LinkFeedback = {
+  target: string;
+  kind: 'error' | 'success';
+  message: string;
+};
 
 const ALLOWED: Record<string, string[]> = {
   openrouter: ['telegram_control', 'youtube_comments', 'reddit_prospector', 'youtube_descriptions', 'content_engine', 'instagram_comments'],
@@ -33,6 +38,7 @@ export default function SettingsPage() {
   const [notice, setNotice] = useState('');
   const [editorPanel, setEditorPanel] = useState<EditorPanel>('guide');
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [linkFeedback, setLinkFeedback] = useState<LinkFeedback | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -77,6 +83,7 @@ export default function SettingsPage() {
     setValues({});
     setError('');
     setNotice('');
+    setLinkFeedback(null);
     setShowAdvanced(false);
     setEditorPanel(connection.configured ? 'connections' : 'guide');
   }
@@ -107,29 +114,57 @@ export default function SettingsPage() {
   }
 
   async function toggleLink(connection: IntegrationConnection, workflowId: string) {
-    setBusy(`link:${connection.id}:${workflowId}`); setError(''); setNotice('');
+    const target = `workflow:${workflowId}`;
+    const definition = workflows.find((item) => item.id === workflowId);
+    const linked = connection.linked_workflows.includes(workflowId);
+    setLinkFeedback(null); setError(''); setNotice('');
+
+    if (!linked) {
+      const missingRequired = (REQUIRED[workflowId] ?? []).filter((providerId) => {
+        if (providerId === connection.id) return false;
+        return !integrations.find((item) => item.id === providerId)?.configured;
+      });
+      if (missingRequired.length > 0) {
+        const names = missingRequired.map((providerId) => integrations.find((item) => item.id === providerId)?.display_name ?? providerId);
+        setLinkFeedback({
+          target,
+          kind: 'error',
+          message: `${definition?.display_name ?? workflowId} also requires ${names.join(' and ')}. Configure ${names.length === 1 ? 'that connection' : 'those connections'} first; ${connection.display_name} was not linked.`,
+        });
+        return;
+      }
+    }
+
+    setBusy(`link:${connection.id}:${workflowId}`);
     try {
       const details = await fetchWorkflowDetails(workflowId);
       const current = Array.isArray(details.integration_providers) ? details.integration_providers.filter((item): item is string => typeof item === 'string') : [];
-      const linked = connection.linked_workflows.includes(workflowId);
       const desired = linked
         ? current.filter((item) => item !== connection.id)
         : [...new Set([...current, connection.id, ...(REQUIRED[workflowId] ?? [])])];
       await updateWorkflowIntegrations(workflowId, desired);
-      setNotice(`${connection.display_name} ${linked ? 'unlinked from' : 'linked to'} ${details.display_name}.`); await load();
-    } catch (linkError) { setError(linkError instanceof Error ? linkError.message : 'Unable to update the workflow link.'); }
+      setLinkFeedback({ target, kind: 'success', message: `${connection.display_name} ${linked ? 'was removed from' : 'is now linked to'} ${details.display_name}.` });
+      await load();
+    } catch (linkError) {
+      setLinkFeedback({
+        target,
+        kind: 'error',
+        message: linkError instanceof Error ? linkError.message : 'Unable to update this workflow link.',
+      });
+    }
     finally { setBusy(''); }
   }
 
   async function toggleCouncilLink(connection: IntegrationConnection, councilId: string) {
-    setBusy(`council-link:${connection.id}:${councilId}`); setError(''); setNotice('');
+    const target = `council:${councilId}`;
+    setBusy(`council-link:${connection.id}:${councilId}`); setLinkFeedback(null); setError(''); setNotice('');
     try {
       const linked = (connection.linked_councils ?? []).includes(councilId);
       const desired = linked ? [] : [connection.id];
       await updateCouncilIntegrations(councilId, desired);
-      setNotice(`${connection.display_name} ${linked ? 'unlinked from' : 'linked to'} ${councilId === 'sales' ? 'Sales Council approvals' : councilId}.`);
+      setLinkFeedback({ target, kind: 'success', message: `${connection.display_name} ${linked ? 'was removed from' : 'is now linked to'} ${councilId === 'sales' ? 'Sales Council approvals' : councilId}.` });
       await load();
-    } catch (linkError) { setError(linkError instanceof Error ? linkError.message : 'Unable to update the council link.'); }
+    } catch (linkError) { setLinkFeedback({ target, kind: 'error', message: linkError instanceof Error ? linkError.message : 'Unable to update this council link.' }); }
     finally { setBusy(''); }
   }
 
@@ -168,7 +203,7 @@ export default function SettingsPage() {
 
             {editorPanel === 'credentials' && <div><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-base font-black text-slate-100">Enter the values securely</h3><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-400">Secrets are encrypted on the server and are never returned to this browser. {selected.configured && 'To replace this connection, enter the complete required set again.'}</p></div>{advanced.size > 0 && <button type="button" onClick={() => setShowAdvanced((value) => !value)} className="rounded-xl border border-white/10 px-3 py-2 text-xs font-bold text-slate-300 hover:bg-white/5">{showAdvanced ? 'Hide advanced settings' : `Show ${advanced.size} advanced ${advanced.size === 1 ? 'field' : 'fields'}`}</button>}</div><div className="mt-6 grid gap-4 lg:grid-cols-2">{visibleFields.map((field) => { const fieldGuide = guide?.fields[field.key]; return <div key={field.key} className="rounded-2xl border border-white/8 bg-white/[0.025] p-4"><label className="block text-xs font-bold uppercase tracking-wide text-slate-300">{field.label}<span className={`ml-2 rounded-md px-1.5 py-0.5 text-[9px] ${field.required ? 'bg-cyan-300/10 text-cyan-300' : 'bg-white/5 text-slate-500'}`}>{field.required ? 'Required' : 'Optional'}</span><input type={field.secret ? 'password' : 'text'} autoComplete="off" value={values[field.key] ?? ''} onChange={(event) => setValues((current) => ({ ...current, [field.key]: event.target.value }))} placeholder={selected.configured_fields.includes(field.key) ? 'Stored securely — enter replacement' : fieldGuide?.example ?? 'Paste value'} className="mt-3 h-12 w-full input-shell rounded-xl px-3 text-sm font-normal normal-case tracking-normal text-slate-100 placeholder:text-slate-600 focus:border-cyan-300/50 focus:outline-none focus:ring-2 focus:ring-cyan-300/20" /></label>{fieldGuide && <details className="mt-3 rounded-xl border border-white/7 bg-[#06111d]/55 px-3 py-2 text-xs text-slate-400"><summary className="cursor-pointer font-bold text-cyan-200 marker:text-cyan-300">Where do I get this?</summary><p className="mt-2 leading-5">{fieldGuide.where}</p>{fieldGuide.note && <p className="mt-2 leading-5 text-amber-100/75">{fieldGuide.note}</p>}</details>}{field.help_text && !fieldGuide && <p className="mt-2 text-xs leading-5 text-slate-500">{field.help_text}</p>}</div>; })}</div><div className="mt-6 flex flex-wrap items-center gap-3"><button disabled={busy !== '' || !requiredComplete} onClick={() => void save()} className="flex h-11 items-center gap-2 rounded-xl bg-cyan-300 px-5 text-sm font-black text-[#031019] disabled:cursor-not-allowed disabled:opacity-35"><Save className="h-4 w-4" />Encrypt & save</button>{!requiredComplete && <p className="text-xs text-slate-500">Complete every Required field to save.</p>}{selected.configured && <button disabled={busy !== ''} onClick={() => void remove(selected.id)} className="ml-auto flex h-10 items-center gap-2 rounded-xl border border-rose-300/20 px-4 text-xs font-bold text-rose-300 disabled:opacity-50"><Trash2 className="h-4 w-4" />Remove connection</button>}</div></div>}
 
-            {editorPanel === 'connections' && <div className="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]"><section className="rounded-2xl border border-white/8 bg-white/[0.025] p-5"><div className="flex items-start justify-between gap-3"><div><p className="text-[11px] font-black uppercase tracking-[0.18em] text-cyan-300">Connection status</p><h3 className="mt-2 text-xl font-black capitalize text-slate-100">{selected.status.replaceAll('_', ' ')}</h3></div><ShieldCheck className={`h-7 w-7 ${selected.status === 'verified' ? 'text-emerald-300' : 'text-slate-500'}`} /></div>{selected.last_error && <p role="alert" className="mt-4 rounded-xl border border-rose-300/15 bg-rose-300/7 p-3 text-sm leading-5 text-rose-200">{selected.last_error}</p>}<p className="mt-4 text-sm leading-6 text-slate-400">Verification makes a small real request to {selected.display_name}. It does not publish content or start paid GPU resources.</p><button disabled={!selected.configured || busy !== ''} onClick={() => void verify(selected.id)} className="mt-5 flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-emerald-300/25 bg-emerald-300/10 px-4 text-sm font-black text-emerald-300 disabled:opacity-35"><Check className="h-4 w-4" />{busy === `verify:${selected.id}` ? 'Checking…' : selected.status === 'verified' ? 'Verify again' : 'Verify connection'}</button>{!selected.configured && <button type="button" onClick={() => setEditorPanel('credentials')} className="mt-3 h-10 w-full rounded-xl border border-white/10 text-xs font-bold text-slate-300">Enter credentials first</button>}</section><section><h3 className="text-base font-black text-slate-100">Choose where it is used</h3><p className="mt-1 text-sm leading-6 text-slate-400">A verified connection can be reused without copying its secret again. Toggle only the destinations you want active.</p>{(ALLOWED[selected.id] ?? []).length === 0 && (COUNCIL_ALLOWED[selected.id] ?? []).length === 0 && <div className="mt-4 rounded-2xl border border-white/8 bg-white/[0.025] p-4 text-sm text-slate-400">This connection is controlled from its dedicated workspace. {selected.id === 'runpod' ? 'Open Blender Manager after verification.' : ''}</div>}<div className="mt-4 space-y-2">{(ALLOWED[selected.id] ?? []).map((workflowId) => { const definition = workflows.find((item) => item.id === workflowId); const linked = selected.linked_workflows.includes(workflowId); return <button key={workflowId} disabled={selected.status !== 'verified' || busy !== ''} onClick={() => void toggleLink(selected, workflowId)} className="flex w-full items-center gap-3 rounded-xl border border-white/8 bg-white/[0.025] px-4 py-3 text-left transition hover:bg-white/5 disabled:opacity-35"><span className={`grid h-5 w-5 place-items-center rounded-md border ${linked ? 'border-cyan-300 bg-cyan-300 text-[#04111b]' : 'border-white/15'}`}>{linked && <Check className="h-3.5 w-3.5" />}</span><span className="flex-1 text-sm font-semibold text-slate-200">{definition?.display_name ?? workflowId}</span><span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{linked ? 'linked' : selected.status === 'verified' ? 'available' : 'verify first'}</span></button>; })}{(COUNCIL_ALLOWED[selected.id] ?? []).map((councilId) => { const linked = (selected.linked_councils ?? []).includes(councilId); return <button key={councilId} disabled={selected.status !== 'verified' || busy !== ''} onClick={() => void toggleCouncilLink(selected, councilId)} className="flex w-full items-center gap-3 rounded-xl border border-white/8 bg-white/[0.025] px-4 py-3 text-left transition hover:bg-white/5 disabled:opacity-35"><span className={`grid h-5 w-5 place-items-center rounded-md border ${linked ? 'border-violet-300 bg-violet-300 text-[#04111b]' : 'border-white/15'}`}>{linked && <Check className="h-3.5 w-3.5" />}</span><span className="flex-1 text-sm font-semibold text-slate-200">{councilId === 'sales' ? 'Sales Council approved leads' : councilId}</span><span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{linked ? 'linked' : selected.status === 'verified' ? 'available' : 'verify first'}</span></button>; })}</div></section></div>}
+            {editorPanel === 'connections' && <div className="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]"><section className="rounded-2xl border border-white/8 bg-white/[0.025] p-5"><div className="flex items-start justify-between gap-3"><div><p className="text-[11px] font-black uppercase tracking-[0.18em] text-cyan-300">Connection status</p><h3 className="mt-2 text-xl font-black capitalize text-slate-100">{selected.status.replaceAll('_', ' ')}</h3></div><ShieldCheck className={`h-7 w-7 ${selected.status === 'verified' ? 'text-emerald-300' : 'text-slate-500'}`} /></div>{selected.last_error && <p role="alert" className="mt-4 rounded-xl border border-rose-300/15 bg-rose-300/7 p-3 text-sm leading-5 text-rose-200">{selected.last_error}</p>}<p className="mt-4 text-sm leading-6 text-slate-400">Verification makes a small real request to {selected.display_name}. It does not publish content or start paid GPU resources.</p><button disabled={!selected.configured || busy !== ''} onClick={() => void verify(selected.id)} className="mt-5 flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-emerald-300/25 bg-emerald-300/10 px-4 text-sm font-black text-emerald-300 disabled:opacity-35"><Check className="h-4 w-4" />{busy === `verify:${selected.id}` ? 'Checking…' : selected.status === 'verified' ? 'Verify again' : 'Verify connection'}</button>{!selected.configured && <button type="button" onClick={() => setEditorPanel('credentials')} className="mt-3 h-10 w-full rounded-xl border border-white/10 text-xs font-bold text-slate-300">Enter credentials first</button>}</section><section><h3 className="text-base font-black text-slate-100">Choose where it is used</h3><p className="mt-1 text-sm leading-6 text-slate-400">A verified connection can be reused without copying its secret again. Toggle only the destinations you want active.</p>{(ALLOWED[selected.id] ?? []).length === 0 && (COUNCIL_ALLOWED[selected.id] ?? []).length === 0 && <div className="mt-4 rounded-2xl border border-white/8 bg-white/[0.025] p-4 text-sm text-slate-400">This connection is controlled from its dedicated workspace. {selected.id === 'runpod' ? 'Open Blender Manager after verification.' : ''}</div>}<div className="mt-4 space-y-2">{(ALLOWED[selected.id] ?? []).map((workflowId) => { const definition = workflows.find((item) => item.id === workflowId); const linked = selected.linked_workflows.includes(workflowId); const target = `workflow:${workflowId}`; const isBusy = busy === `link:${selected.id}:${workflowId}`; const feedback = linkFeedback?.target === target ? linkFeedback : null; return <div key={workflowId}><button aria-describedby={feedback ? `${target}-feedback` : undefined} disabled={selected.status !== 'verified' || busy !== ''} onClick={() => void toggleLink(selected, workflowId)} className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition disabled:opacity-35 ${feedback?.kind === 'error' ? 'border-rose-300/30 bg-rose-300/[0.055]' : feedback?.kind === 'success' ? 'border-emerald-300/25 bg-emerald-300/[0.045]' : 'border-white/8 bg-white/[0.025] hover:bg-white/5'}`}><span className={`grid h-5 w-5 place-items-center rounded-md border ${linked ? 'border-cyan-300 bg-cyan-300 text-[#04111b]' : 'border-white/15'}`}>{isBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : linked && <Check className="h-3.5 w-3.5" />}</span><span className="flex-1 text-sm font-semibold text-slate-200">{definition?.display_name ?? workflowId}</span><span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{isBusy ? 'saving…' : linked ? 'linked' : selected.status === 'verified' ? 'available' : 'verify first'}</span></button>{feedback && <p id={`${target}-feedback`} role={feedback.kind === 'error' ? 'alert' : 'status'} className={`mx-2 rounded-b-xl border-x border-b px-3 py-2.5 text-xs leading-5 ${feedback.kind === 'error' ? 'border-rose-300/20 bg-rose-300/[0.07] text-rose-200' : 'border-emerald-300/20 bg-emerald-300/[0.06] text-emerald-200'}`}>{feedback.message}</p>}</div>; })}{(COUNCIL_ALLOWED[selected.id] ?? []).map((councilId) => { const linked = (selected.linked_councils ?? []).includes(councilId); const target = `council:${councilId}`; const isBusy = busy === `council-link:${selected.id}:${councilId}`; const feedback = linkFeedback?.target === target ? linkFeedback : null; return <div key={councilId}><button aria-describedby={feedback ? `${target}-feedback` : undefined} disabled={selected.status !== 'verified' || busy !== ''} onClick={() => void toggleCouncilLink(selected, councilId)} className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition disabled:opacity-35 ${feedback?.kind === 'error' ? 'border-rose-300/30 bg-rose-300/[0.055]' : feedback?.kind === 'success' ? 'border-emerald-300/25 bg-emerald-300/[0.045]' : 'border-white/8 bg-white/[0.025] hover:bg-white/5'}`}><span className={`grid h-5 w-5 place-items-center rounded-md border ${linked ? 'border-violet-300 bg-violet-300 text-[#04111b]' : 'border-white/15'}`}>{isBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : linked && <Check className="h-3.5 w-3.5" />}</span><span className="flex-1 text-sm font-semibold text-slate-200">{councilId === 'sales' ? 'Sales Council approved leads' : councilId}</span><span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{isBusy ? 'saving…' : linked ? 'linked' : selected.status === 'verified' ? 'available' : 'verify first'}</span></button>{feedback && <p id={`${target}-feedback`} role={feedback.kind === 'error' ? 'alert' : 'status'} className={`mx-2 rounded-b-xl border-x border-b px-3 py-2.5 text-xs leading-5 ${feedback.kind === 'error' ? 'border-rose-300/20 bg-rose-300/[0.07] text-rose-200' : 'border-emerald-300/20 bg-emerald-300/[0.06] text-emerald-200'}`}>{feedback.message}</p>}</div>; })}</div></section></div>}
           </div>
         </div></div>;
       })()}
