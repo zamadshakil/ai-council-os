@@ -27,15 +27,18 @@ class CouncilModelProfile:
 
 COUNCIL_MODEL_PROFILES: dict[str, CouncilModelProfile] = {
     "grant": CouncilModelProfile(
-        generator="anthropic/claude-sonnet-5",
-        critic="google/gemini-3.6-flash",
+        # Long, high-stakes drafts use Luna's higher-reasoning mode. It is the
+        # same low-cost base model, while the critic stays on another provider
+        # so the generator is not grading its own work.
+        generator="openai/gpt-5.6-luna-pro",
+        critic="google/gemini-3.7-flash",
     ),
     "sales": CouncilModelProfile(
-        generator="openai/gpt-5.6-terra",
-        critic="anthropic/claude-sonnet-5",
+        generator="openai/gpt-5.6-luna",
+        critic="google/gemini-3.7-flash",
     ),
     "content": CouncilModelProfile(
-        generator="google/gemini-3.6-flash",
+        generator="google/gemini-3.7-flash",
         critic="openai/gpt-5.6-luna",
     ),
 }
@@ -52,8 +55,8 @@ OPERATIONAL_MODELS = APPROVED_MODELS | {BRAIN_MODEL}
 # production code should call ``get_council_model`` instead of selecting tiers.
 _COMPATIBILITY_TIERS = {
     "fast": "openai/gpt-5.6-luna",
-    "smart": "google/gemini-3.6-flash",
-    "reasoning": "anthropic/claude-sonnet-5",
+    "smart": "google/gemini-3.7-flash",
+    "reasoning": "openai/gpt-5.6-luna-pro",
 }
 
 

@@ -44,12 +44,18 @@ Blender Manager reads live RunPod state, can explicitly start/stop a selected po
 
 OpenRouter is the only model gateway. Readiness verifies the configured IDs against OpenRouter; there is no silent provider or emergency-model substitution.
 
-- Grant generator: `anthropic/claude-sonnet-5`
-- Grant critic: `google/gemini-3.6-flash`
-- Sales generator: `openai/gpt-5.6-terra`
-- Sales critic: `anthropic/claude-sonnet-5`
-- Content generator: `google/gemini-3.6-flash`
+- Grant generator: `openai/gpt-5.6-luna-pro`
+- Grant critic: `google/gemini-3.7-flash`
+- Sales generator: `openai/gpt-5.6-luna`
+- Sales critic: `google/gemini-3.7-flash`
+- Content generator: `google/gemini-3.7-flash`
 - Content critic: `openai/gpt-5.6-luna`
+
+This cost-optimized routing uses Luna for sales and critique volume, Luna Pro
+for complex grant drafting, and Gemini 3.7 Flash where an independent model or
+content generation adds value. Each generator is reviewed by a different model
+family. Model IDs remain strict and are validated against OpenRouter during
+readiness checks.
 
 ## Local development
 

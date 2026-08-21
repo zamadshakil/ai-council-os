@@ -66,15 +66,30 @@ class CouncilPolicyTests(unittest.TestCase):
         self.assertEqual(ALLOWED_COUNCILS, {"grant", "sales", "content"})
         self.assertEqual(
             COUNCIL_MODEL_PROFILES["grant"].generator,
-            "anthropic/claude-sonnet-5",
+            "openai/gpt-5.6-luna-pro",
         )
         self.assertEqual(
             COUNCIL_MODEL_PROFILES["sales"].generator,
-            "openai/gpt-5.6-terra",
+            "openai/gpt-5.6-luna",
+        )
+        self.assertEqual(
+            COUNCIL_MODEL_PROFILES["content"].generator,
+            "google/gemini-3.7-flash",
+        )
+        self.assertEqual(
+            {
+                COUNCIL_MODEL_PROFILES[council].critic for council in ("grant", "sales")
+            },
+            {"google/gemini-3.7-flash"},
         )
         self.assertEqual(
             COUNCIL_MODEL_PROFILES["content"].critic,
             "openai/gpt-5.6-luna",
+        )
+        self.assertTrue(
+            APPROVED_MODELS.isdisjoint(
+                {"anthropic/claude-sonnet-5", "openai/gpt-5.6-terra"}
+            )
         )
         self.assertFalse(
             any(
