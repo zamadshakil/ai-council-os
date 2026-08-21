@@ -82,6 +82,44 @@ def test_nvml_process_evidence_survives_one_unsupported_context_class():
 
 
 @pytest.mark.asyncio
+async def test_agent_verification_rejects_software_only_interactive_3d(monkeypatch):
+    async def software_only(*_args, **_kwargs):
+        return {
+            "blender_available": True,
+            "nvidia_smi_available": True,
+            "gpu_visible": True,
+            "workspace_writable": True,
+            "required_tools": {"browser": True, "image_viewer": True},
+            "desktop": {"ready": True},
+            "interactive_3d_acceleration_ready": False,
+        }
+
+    monkeypatch.setattr(runpod, "_agent_request", software_only)
+    with pytest.raises(runpod.RunPodError) as error:
+        await runpod.verify_blender_agent("pod-safe-123")
+    assert error.value.code == "BLENDER_INTERACTIVE_GPU_NOT_READY"
+
+
+@pytest.mark.asyncio
+async def test_agent_verification_accepts_virtualgl_nvidia_path(monkeypatch):
+    async def accelerated(*_args, **_kwargs):
+        return {
+            "blender_available": True,
+            "nvidia_smi_available": True,
+            "gpu_visible": True,
+            "workspace_writable": True,
+            "required_tools": {"browser": True, "image_viewer": True},
+            "desktop": {"ready": True},
+            "interactive_3d_acceleration_ready": True,
+            "virtualgl_renderer": "NVIDIA RTX A6000/PCIe/SSE2",
+        }
+
+    monkeypatch.setattr(runpod, "_agent_request", accelerated)
+    result = await runpod.verify_blender_agent("pod-safe-123")
+    assert result["interactive_3d_acceleration_ready"] is True
+
+
+@pytest.mark.asyncio
 async def test_blender_job_progress_is_durable(session_factory):
     jobs = JobService(session_factory=session_factory)
     queued = await jobs.enqueue(

@@ -798,6 +798,12 @@ async def verify_blender_agent(pod_id: str) -> dict[str, Any]:
             code="BLENDER_DESKTOP_NOT_READY",
             http_status=503,
         )
+    if not data.get("interactive_3d_acceleration_ready"):
+        raise RunPodError(
+            "Kasm is online, but interactive 3D applications have no verified NVIDIA rendering path.",
+            code="BLENDER_INTERACTIVE_GPU_NOT_READY",
+            http_status=503,
+        )
     return data
 
 

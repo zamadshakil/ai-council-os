@@ -315,11 +315,17 @@ def _runtime_health() -> dict[str, Any]:
     except (OSError, ImportError, AttributeError):
         host = {}
     desktop = desktop_control.status()
+    interactive_3d_acceleration_ready = bool(
+        renderer
+        and "llvmpipe" not in renderer.lower()
+        and "software" not in renderer.lower()
+    ) or bool(virtualgl_renderer)
     ready = (
         blender_code == 0
         and nvidia_code == 0
         and bool(gpus)
         and bool(desktop.get("ready"))
+        and interactive_3d_acceleration_ready
         and workspace_writable
         and all(required_tools.values())
     )
@@ -337,6 +343,7 @@ def _runtime_health() -> dict[str, Any]:
         "virtualgl_available": bool(virtualgl_renderer),
         "virtualgl_renderer": virtualgl_renderer,
         "virtualgl_display": virtualgl_display,
+        "interactive_3d_acceleration_ready": interactive_3d_acceleration_ready,
         "workspace_writable": workspace_writable,
         "workspace_error": workspace_error,
         "required_tools": required_tools,
