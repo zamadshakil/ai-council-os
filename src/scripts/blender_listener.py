@@ -542,11 +542,18 @@ def _gpu_evidence(
         and report.get("source_unchanged") is True
         and _completed_new_frame(report)
     )
-    process_observed = bool(attached) or namespace_correlated
-    compute_observed = bool(active) or namespace_correlated
+    direct_correlated = bool(
+        target_pid
+        and len(active) >= 2
+        and _enabled_gpu_reported(report)
+        and report.get("source_unchanged") is True
+        and _completed_new_frame(report)
+    )
+    process_observed = direct_correlated or namespace_correlated
+    compute_observed = direct_correlated or namespace_correlated
     binding_method = (
         "direct_nvml_pid"
-        if attached
+        if direct_correlated
         else "isolated_workload_window"
         if namespace_correlated
         else "none"
@@ -566,6 +573,7 @@ def _gpu_evidence(
         "gpu_process_observed": process_observed,
         "gpu_compute_observed": compute_observed,
         "gpu_process_binding": binding_method,
+        "direct_nvml_pid_sample_count": len(attached),
         "managed_blender_pid": target_pid,
         "nvml_pid_namespace_mismatch_observed": bool(
             target_pid

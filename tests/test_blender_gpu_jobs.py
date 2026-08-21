@@ -120,7 +120,19 @@ def test_gpu_evidence_prefers_direct_nvml_pid_binding():
                 "host_ram_used_mb": 1_000,
                 "host_ram_total_mb": 64_000,
                 "power_watts": 250,
-            }
+            },
+            {
+                "blender_pid": 42,
+                "managed_blender_pid": 42,
+                "managed_process_alive": True,
+                "nvml_pids": [42],
+                "gpu_utilization": 85,
+                "vram_used_mb": 2_600,
+                "vram_total_mb": 49_000,
+                "host_ram_used_mb": 1_010,
+                "host_ram_total_mb": 64_000,
+                "power_watts": 260,
+            },
         ],
         baseline=[{"gpu_utilization": 0, "vram_used_mb": 100}],
         target_pid=42,
@@ -130,6 +142,7 @@ def test_gpu_evidence_prefers_direct_nvml_pid_binding():
     assert evidence["gpu_compute_observed"] is True
     assert evidence["gpu_process_binding"] == "direct_nvml_pid"
     assert evidence["nvml_pid_namespace_mismatch_observed"] is False
+    assert evidence["direct_nvml_pid_sample_count"] == 2
 
 
 def test_gpu_evidence_correlates_isolated_container_workload_when_nvml_uses_host_pid():
