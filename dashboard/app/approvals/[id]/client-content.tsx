@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, Download, RefreshCw, Send, Workflow } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, ChevronDown, Download, RefreshCw, Send, Workflow } from 'lucide-react';
 import { DebateTrace } from '../../components/debate-trace';
 import { ContentVariantGrid, readContentVariants } from '../../components/structured-output';
 import { fetchTask, getGrantExportUrl, submitApproval } from '../../lib/api';
@@ -23,6 +23,7 @@ export function TaskDetailContent({ id }: { id: string }) {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState<ApprovalAction | null>(null);
   const [error, setError] = useState('');
+  const [showTrace, setShowTrace] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -127,15 +128,9 @@ export function TaskDetailContent({ id }: { id: string }) {
         {(task.warning || task.error) && <p className="mt-4 rounded-xl border border-amber-300/15 bg-amber-300/8 p-3 text-sm text-amber-200">{retiredModelFailure ? 'Historical run: this attempt used the retired Sonnet model and failed its output contract. Retry uses the current Luna Pro/Gemini routing.' : task.warning || task.error}</p>}
       </section>
 
-      {isDraftOnlyContent && <section className="flex flex-col gap-4 rounded-2xl border border-amber-300/20 bg-amber-300/8 p-5 sm:flex-row sm:items-center sm:justify-between"><div><p className="flex items-center gap-2 font-bold text-amber-100"><Workflow className="h-4 w-4" /> Draft lab result — no destination automation is attached</p><p className="mt-1 text-sm leading-6 text-slate-300">This Council run can review copy, but it cannot publish or track six destinations. Content Engine creates one independently validated approval per platform and sends approved items through verified integrations.</p></div><Link href="/workflows/content_engine" className="flex h-10 shrink-0 items-center justify-center rounded-xl bg-cyan-300 px-4 text-sm font-black text-[#04111b]">Create real automation</Link></section>}
+      {isDraftOnlyContent && <section className="flex flex-col gap-4 rounded-2xl border border-amber-300/20 bg-amber-300/8 p-5 sm:flex-row sm:items-center sm:justify-between"><div><p className="flex items-center gap-2 font-bold text-amber-100"><Workflow className="h-4 w-4" /> Draft lab result — no destination automation is attached</p><p className="mt-1 text-sm leading-6 text-slate-300">This Council run can review copy, but it cannot publish or track six destinations. Content Engine creates one independently validated approval per platform and sends approved items through verified integrations.</p></div><Link href="/workflows/content_engine" onClick={() => window.sessionStorage.setItem('council-os:content-engine-draft', JSON.stringify({ title: task.task_description.slice(0, 100), transcript: task.task_description, sourceId: `task-${task.task_id}` }))} className="flex h-10 shrink-0 items-center justify-center rounded-xl bg-cyan-300 px-4 text-sm font-black text-[#04111b]">Create real automation</Link></section>}
 
       {workflowName && <section className="surface-card flex flex-col gap-4 rounded-2xl border-cyan-300/20 p-5 sm:flex-row sm:items-center sm:justify-between"><div><p className="flex items-center gap-2 font-bold text-cyan-100"><Send className="h-4 w-4" /> Automation delivery attached</p><p className="mt-1 text-sm leading-6 text-slate-300"><span className="font-bold capitalize">{workflowName.replaceAll('_', ' ')}</span>{platformName ? ` · ${platformName}` : ''} · {manualPosting ? 'approval prepares a manual-ready item' : 'approval queues the verified destination API'}.</p></div><span className="rounded-full border border-cyan-300/20 bg-cyan-300/8 px-3 py-1.5 text-xs font-bold capitalize text-cyan-200">{publicationState || task.status.replaceAll('_', ' ')}</span></section>}
-
-      <section className="surface-card rounded-2xl p-6" aria-live="polite">
-        <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="eyebrow">Live execution</p><h2 className="mt-1 text-lg font-bold capitalize text-slate-100">{progressStage}</h2></div>{ACTIVE_STATUSES.has(task.status) && <span className="flex items-center gap-2 rounded-full border border-cyan-300/20 bg-cyan-300/8 px-3 py-1.5 text-xs font-bold text-cyan-200"><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Updating every 4 seconds</span>}</div>
-        <div className="mt-4 grid gap-3 sm:grid-cols-3"><div className="rounded-xl border border-white/8 bg-white/[0.025] p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Completed model steps</p><p className="mt-1 text-xl font-black text-slate-100">{progress?.step_count ?? task.debate_history.length}</p></div><div className="rounded-xl border border-white/8 bg-white/[0.025] p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Drafts generated</p><p className="mt-1 text-xl font-black text-slate-100">{progress?.draft_count ?? task.iterations}</p></div><div className="rounded-xl border border-white/8 bg-white/[0.025] p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Latest actor</p><p className="mt-1 text-sm font-bold capitalize text-slate-200">{progress?.last_role || (task.debate_history.length ? task.debate_history.at(-1)?.role : 'Not started')}</p></div></div>
-        <div className="mt-5"><DebateTrace messages={task.debate_history} /></div>
-      </section>
 
       <div className="grid gap-7 xl:grid-cols-[1fr_22rem]">
         <section className="surface-card rounded-2xl p-6">
@@ -159,7 +154,7 @@ export function TaskDetailContent({ id }: { id: string }) {
           </div>
         </section>
 
-        <aside className="space-y-4">
+        <aside className="space-y-4 xl:sticky xl:top-28 xl:self-start">
           {hubspotStatus && <div className="surface-card rounded-2xl p-5">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-sm font-bold text-slate-100">HubSpot CRM</h2>
@@ -169,7 +164,7 @@ export function TaskDetailContent({ id }: { id: string }) {
           </div>}
           <div className="surface-card rounded-2xl p-5">
             <label htmlFor="decision-notes" className="text-sm font-bold text-slate-200">Decision notes</label>
-            <textarea id="decision-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={5_000} className="mt-3 min-h-28 w-full resize-y input-shell rounded-xl p-3 text-sm text-slate-100 outline-none focus:border-cyan-300/40" placeholder="Optional audit note" />
+            <textarea id="decision-notes" value={notes} onChange={(event) => setNotes(event.target.value)} disabled={!canDecide && !canRetry && !canCancel} maxLength={5_000} className="mt-3 min-h-28 w-full resize-y input-shell rounded-xl p-3 text-sm text-slate-100 outline-none focus:border-cyan-300/40 disabled:cursor-not-allowed disabled:opacity-55" placeholder="Optional audit note" />
             {error && <p role="alert" className="mt-3 rounded-lg bg-red-50 p-3 text-xs text-red-700">{error}</p>}
             {reconciliationRequired && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">The provider outcome is uncertain. Check the destination manually; automatic retry is disabled to prevent a duplicate post.</p>}
             <div className="mt-4 grid gap-2">
@@ -179,11 +174,33 @@ export function TaskDetailContent({ id }: { id: string }) {
               </>}
               {canRetry && <button disabled={submitting !== null} onClick={() => void act('retry')} className="h-10 rounded-xl bg-blue-600 text-sm font-bold text-white disabled:opacity-50">{submitting === 'retry' ? 'Queueing…' : 'Retry'}</button>}
               {canCancel && <button disabled={submitting !== null} onClick={() => void act('cancel')} className="h-10 rounded-xl border border-zinc-300 text-sm font-bold text-zinc-700 disabled:opacity-50">{submitting === 'cancel' ? 'Cancelling…' : 'Cancel run'}</button>}
-              {!canDecide && !canRetry && !canCancel && <p className="text-center text-xs text-zinc-500">No action is available in this state.</p>}
+              {!canDecide && !canRetry && !canCancel && task.status === 'approved' && <p className="flex items-start gap-2 rounded-xl border border-emerald-300/15 bg-emerald-300/8 p-3 text-xs leading-5 text-emerald-200"><CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> {isDraftOnlyContent ? 'Draft approval recorded. Nothing was published because this historical task has no destination workflow.' : `Approval recorded. Delivery state: ${publicationState || task.status.replaceAll('_', ' ')}.`}</p>}
+              {!canDecide && !canRetry && !canCancel && task.status !== 'approved' && <p className="text-center text-xs text-zinc-500">This decision is complete; no additional action is available.</p>}
             </div>
           </div>
         </aside>
       </div>
+
+      <section className="surface-card rounded-2xl p-6" aria-live="polite">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p className="eyebrow">Execution evidence</p>
+            <h2 className="mt-1 text-lg font-bold capitalize text-slate-100">{progressStage}</h2>
+            <p className="mt-1 text-sm text-slate-500">Inspect model work only when you need to audit how the deliverable was produced.</p>
+          </div>
+          <button type="button" onClick={() => setShowTrace((current) => !current)} aria-expanded={showTrace} className="flex min-h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 text-sm font-bold text-slate-300 hover:border-cyan-300/25 hover:text-cyan-100">
+            {showTrace ? 'Hide model work' : 'Review model work'}
+            <ChevronDown className={`h-4 w-4 transition-transform ${showTrace ? 'rotate-180' : ''}`} />
+          </button>
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <div className="rounded-xl border border-white/8 bg-white/[0.025] p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Completed steps</p><p className="mt-1 text-xl font-black text-slate-100">{progress?.step_count ?? task.debate_history.length}</p></div>
+          <div className="rounded-xl border border-white/8 bg-white/[0.025] p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Drafts generated</p><p className="mt-1 text-xl font-black text-slate-100">{progress?.draft_count ?? task.iterations}</p></div>
+          <div className="rounded-xl border border-white/8 bg-white/[0.025] p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Latest actor</p><p className="mt-1 text-sm font-bold capitalize text-slate-200">{progress?.last_role || (task.debate_history.length ? task.debate_history.at(-1)?.role : 'Not started')}</p></div>
+        </div>
+        {ACTIVE_STATUSES.has(task.status) && <span className="mt-4 inline-flex items-center gap-2 rounded-full border border-cyan-300/20 bg-cyan-300/8 px-3 py-1.5 text-xs font-bold text-cyan-200"><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Updating every 4 seconds</span>}
+        {showTrace && <div className="mt-5 border-t border-white/8 pt-5"><DebateTrace messages={task.debate_history} /></div>}
+      </section>
 
     </div>
   );
