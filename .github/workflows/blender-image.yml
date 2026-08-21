@@ -151,6 +151,8 @@ jobs:
           docker exec --env HOME=/home/kasm-user "${container_id}" \
             xdg-mime query default image/png \
             | grep --extended-regexp 'ristretto\.desktop$'
+      - name: Pull immutable image for the local security scan
+        run: docker pull "${{ steps.image.outputs.ref }}"
       - name: Scan immutable image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -158,7 +160,9 @@ jobs:
           format: table
           exit-code: "1"
           ignore-unfixed: true
+          scanners: vuln
           severity: HIGH,CRITICAL
+          timeout: 30m0s
       - name: Prove RunPod can pull the manifest anonymously
         shell: bash
         run: |

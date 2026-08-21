@@ -1,6 +1,50 @@
 # syntax=docker/dockerfile:1.7
 
 ARG KASM_BASE_IMAGE=kasmweb/core-ubuntu-noble@sha256:491cdbb3f6e5fb25d9cbd41320e1f5f415713e4ab646097a03e5c551bd817835
+ARG FLAMENCO_GO_BUILDER=mirror.gcr.io/library/golang@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36
+
+# Blender Foundation's latest stable Flamenco release is still 3.9.3, but its
+# published binaries were compiled with Go dependencies that now have fixed
+# HIGH/CRITICAL advisories. Rebuild the exact official release commit with the
+# fixed dependency set instead of weakening the image scan or using a beta.
+FROM ${FLAMENCO_GO_BUILDER} AS flamenco-build
+
+USER root
+
+ARG FLAMENCO_SOURCE_COMMIT=6f0311eae5cf183132811da3d8941532c67b4f90
+ARG FLAMENCO_VERSION=3.9.3
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git make \
+    && rm -rf /var/lib/apt/lists/* \
+    && git init /src \
+    && git -C /src remote add origin https://projects.blender.org/studio/flamenco.git \
+    && git -C /src fetch --depth 1 origin "${FLAMENCO_SOURCE_COMMIT}" \
+    && git -C /src checkout --detach FETCH_HEAD \
+    && test "$(git -C /src rev-parse HEAD)" = "${FLAMENCO_SOURCE_COMMIT}" \
+    && test "$(sed -n 's/^VERSION := //p' /src/Makefile)" = "${FLAMENCO_VERSION}" \
+    && useradd --create-home --uid 10001 flamenco-build \
+    && chown -R flamenco-build:flamenco-build /src
+
+USER 10001:10001
+WORKDIR /src
+
+RUN go version | grep --fixed-strings 'go1.26.6' \
+    && go mod edit -toolchain=go1.26.6 \
+    && go get \
+        github.com/getkin/kin-openapi@v0.144.0 \
+        golang.org/x/crypto@v0.53.0 \
+        golang.org/x/net@v0.56.0 \
+        golang.org/x/text@v0.39.0 \
+    && go mod tidy \
+    && go mod verify \
+    && go test ./... \
+    && make flamenco-manager-without-webapp flamenco-worker \
+    && ./flamenco-manager -version | grep --fixed-strings "${FLAMENCO_VERSION}" \
+    && ./flamenco-worker -version | grep --fixed-strings "${FLAMENCO_VERSION}" \
+    && mkdir -p /tmp/flamenco-release \
+    && cp flamenco-manager flamenco-worker LICENSE README.md /tmp/flamenco-release/
+
 FROM ${KASM_BASE_IMAGE}
 
 USER root
@@ -12,7 +56,6 @@ ARG GOOGLE_CHROME_VERSION=151.0.7922.173-1
 ARG GOOGLE_CHROME_SHA256=878e5ab495b8a694980fca61bc09b37e651ccedce2291c73434d16e48a2646fd
 ARG BLENDER_GPU_SAMPLE_SHA256=74f5dc6d718fc565e0ff50e355be7f8b1a58983cc9ae79775608d8905c269ee4
 ARG FLAMENCO_VERSION=3.9.3
-ARG FLAMENCO_SHA256=c3cf18daac34cbfc34e87c8aee883da351c0d31fedd498f445b815698cf504f2
 
 ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
@@ -57,18 +100,12 @@ RUN curl --fail --location --retry 5 --retry-delay 3 \
     && rm /tmp/blender.tar.xz \
     && /opt/blender/blender --background --version
 
-# Flamenco is pinned to the current stable Blender Foundation release. The
-# Manager is never published from the container; Council OS reaches it through
-# the authenticated pod agent. Workers use shared /workspace paths.
-RUN curl --fail --location --retry 5 --retry-delay 3 \
-        "https://flamenco.blender.org/downloads/flamenco-${FLAMENCO_VERSION}-linux-amd64.tar.gz" \
-        --output /tmp/flamenco.tar.gz \
-    && echo "${FLAMENCO_SHA256}  /tmp/flamenco.tar.gz" | sha256sum --check --strict \
-    && mkdir -p /opt/flamenco \
-    && tar -xzf /tmp/flamenco.tar.gz -C /opt/flamenco --strip-components=1 \
-    && rm /tmp/flamenco.tar.gz \
-    && /opt/flamenco/flamenco-manager -version \
-    && /opt/flamenco/flamenco-worker -version
+# The Manager remains private inside the pod; Council OS reaches it through the
+# authenticated agent. Workers use shared /workspace paths. The source/build
+# toolchain is discarded with the builder stage.
+COPY --from=flamenco-build /tmp/flamenco-release/ /opt/flamenco/
+RUN /opt/flamenco/flamenco-manager -version | grep --fixed-strings "${FLAMENCO_VERSION}" \
+    && /opt/flamenco/flamenco-worker -version | grep --fixed-strings "${FLAMENCO_VERSION}"
 
 # Small, checksum-pinned Blender Foundation demo used only for an explicitly
 # requested GPU smoke test. It avoids depending on an artist upload while
