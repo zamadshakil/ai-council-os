@@ -1500,7 +1500,16 @@ html[data-reduce-transparency] .liquid-nav-selection {
     display: none;
   }
 
-  .glass-sidebar nav > a {
+  .glass-sidebar nav > div,
+  .glass-sidebar nav > div > div {
+    display: contents;
+  }
+
+  .glass-sidebar nav > div > p {
+    display: none;
+  }
+
+  .glass-sidebar nav a {
     width: 52px;
     min-width: 52px;
     height: 52px;
