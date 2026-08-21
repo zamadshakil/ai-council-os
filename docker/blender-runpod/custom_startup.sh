@@ -59,6 +59,13 @@ else
     ' </dev/null >> /workspace/logs/agent-supervisor.log 2>&1 &
 
     echo "$!" > /workspace/.council-blender/agent-supervisor.pid
+
+    nohup bash -c '
+        exec 9>/workspace/.council-blender/desktop-watchdog.lock
+        flock -n 9 || exit 0
+        exec /opt/council-agent/bin/python /opt/council/desktop_control.py
+    ' </dev/null >> /workspace/logs/desktop-watchdog-supervisor.log 2>&1 &
+    echo "$!" > /workspace/.council-blender/desktop-watchdog.pid
     echo "$(date -u +%FT%TZ) Council OS Blender agent supervisor started in background" \
         >> /workspace/logs/startup.log
 fi

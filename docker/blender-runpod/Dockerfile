@@ -145,7 +145,8 @@ RUN mkdir -p /opt/council /workspace/render_jobs /workspace/logs /workspace/.con
         /home/kasm-default-profile/Desktop /home/kasm-default-profile/.config/rclone
 
 COPY src/scripts/blender_listener.py src/scripts/blender_job.py src/scripts/blender_mixdown.py src/scripts/blender_gui_bootstrap.py \
-    src/scripts/flamenco_control.py src/scripts/flamenco_gateway.py src/scripts/flamenco_gpu_bootstrap.py /opt/council/
+    src/scripts/desktop_control.py src/scripts/flamenco_control.py src/scripts/flamenco_gateway.py \
+    src/scripts/flamenco_gpu_bootstrap.py /opt/council/
 COPY docker/blender-runpod/blender-launcher.sh /usr/local/bin/blender
 COPY docker/blender-runpod/chrome-launcher.sh /usr/bin/google-chrome
 COPY docker/blender-runpod/custom_startup.sh /dockerstartup/custom_startup.sh

@@ -624,6 +624,15 @@ async def verify_blender_agent(pod_id: str) -> dict[str, Any]:
         raise RunPodError("Blender is not installed in the selected pod image")
     if not data.get("nvidia_smi_available") or not data.get("gpu_visible"):
         raise RunPodError("The selected pod does not expose an NVIDIA GPU to the Blender image")
+    desktop = data.get("desktop") if isinstance(data.get("desktop"), dict) else {}
+    if not desktop.get("ready"):
+        missing = ", ".join(desktop.get("missing_components") or [])
+        detail = f" Missing components: {missing}." if missing else ""
+        raise RunPodError(
+            "Kasm is reachable, but its Linux desktop is not ready." + detail,
+            code="BLENDER_DESKTOP_NOT_READY",
+            http_status=503,
+        )
     return data
 
 

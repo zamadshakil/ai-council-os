@@ -11,6 +11,7 @@ on:
       - "src/scripts/blender_job.py"
       - "src/scripts/blender_mixdown.py"
       - "src/scripts/blender_gui_bootstrap.py"
+      - "src/scripts/desktop_control.py"
       - "src/scripts/flamenco_control.py"
       - "src/scripts/flamenco_gateway.py"
       - "src/scripts/flamenco_gpu_bootstrap.py"
@@ -99,13 +100,25 @@ jobs:
             if curl --silent --show-error --fail \
               --header "Authorization: Bearer ${AGENT_TOKEN}" \
               "http://127.0.0.1:${agent_port}/healthz" \
-              | jq --exit-status '.status == "ok" or .status == "not_ready"' >/dev/null; then
+              | jq --exit-status \
+                '.desktop.ready == true and .desktop.x11_ready == true and .desktop.framebuffer.nonblack == true' \
+                >/dev/null; then
               agent_ready=1
               break
             fi
             sleep 2
           done
           test "${agent_ready}" -eq 1
+
+          # An HTTP 200 from KasmVNC is insufficient: the web client can load
+          # while XFCE is dead and the framebuffer is completely black. Prove
+          # the real session, compositor, panel, desktop, and pixels instead.
+          curl --silent --show-error --fail \
+            --header "Authorization: Bearer ${AGENT_TOKEN}" \
+            "http://127.0.0.1:${agent_port}/v1/desktop/status" \
+            | jq --exit-status \
+              '.ready and .x11_ready and (.missing_components | length == 0) and .framebuffer.captured and .framebuffer.nonblack' \
+              >/dev/null
 
           curl --silent --show-error --fail \
             --header "Authorization: Bearer ${AGENT_TOKEN}" \

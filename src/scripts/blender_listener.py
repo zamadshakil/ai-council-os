@@ -25,8 +25,9 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 try:
-    from . import flamenco_control
+    from . import desktop_control, flamenco_control
 except ImportError:  # Flat /opt/council layout inside the RunPod image.
+    import desktop_control
     import flamenco_control
 
 
@@ -287,7 +288,8 @@ def _runtime_health() -> dict[str, Any]:
         }
     except (OSError, ImportError, AttributeError):
         host = {}
-    ready = blender_code == 0 and nvidia_code == 0 and bool(gpus)
+    desktop = desktop_control.status()
+    ready = blender_code == 0 and nvidia_code == 0 and bool(gpus) and bool(desktop.get("ready"))
     return {
         "status": "ok" if ready else "not_ready",
         "ready": ready,
@@ -302,6 +304,7 @@ def _runtime_health() -> dict[str, Any]:
         "virtualgl_available": bool(virtualgl_renderer),
         "virtualgl_renderer": virtualgl_renderer,
         "virtualgl_display": virtualgl_display,
+        "desktop": desktop,
         **host,
     }
 
@@ -1039,6 +1042,18 @@ async def health() -> dict[str, Any]:
 async def runtime() -> dict[str, Any]:
     """Return instantaneous pod-local GPU evidence without exposing commands."""
     return await asyncio.to_thread(_runtime_snapshot)
+
+
+@app.get("/v1/desktop/status", dependencies=[Depends(_authorize)])
+async def desktop_status() -> dict[str, Any]:
+    """Report process and framebuffer evidence for the fixed Kasm display."""
+    return await asyncio.to_thread(desktop_control.status)
+
+
+@app.post("/v1/desktop/recover", dependencies=[Depends(_authorize)])
+async def recover_desktop() -> dict[str, Any]:
+    """Restart only allowlisted XFCE components; never accepts commands."""
+    return await asyncio.to_thread(desktop_control.recover)
 
 
 def _flamenco_error(exc: Exception) -> HTTPException:
