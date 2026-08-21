@@ -11,6 +11,9 @@ on:
       - "src/scripts/blender_job.py"
       - "src/scripts/blender_mixdown.py"
       - "src/scripts/blender_gui_bootstrap.py"
+      - "src/scripts/flamenco_control.py"
+      - "src/scripts/flamenco_gateway.py"
+      - "src/scripts/flamenco_gpu_bootstrap.py"
 
 permissions:
   contents: read
@@ -58,11 +61,13 @@ jobs:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
           VNC_PASSWORD: kasm-ci-password
           AGENT_TOKEN: council-os-ci-agent-token-0123456789abcdef
+          WORKER_PROXY_TOKEN: council-os-ci-worker-proxy-token-0123456789abcdef
         run: |
           set -euo pipefail
           container_id="$(docker run --detach --rm --shm-size=512m \
             --env "VNC_PW=${VNC_PASSWORD}" \
             --env "BLENDER_AGENT_TOKEN=${AGENT_TOKEN}" \
+            --env "FLAMENCO_WORKER_PROXY_TOKEN=${WORKER_PROXY_TOKEN}" \
             --publish 127.0.0.1::6901 \
             --publish 127.0.0.1::8001 \
             "${IMAGE_REF}")"
@@ -101,6 +106,37 @@ jobs:
             sleep 2
           done
           test "${agent_ready}" -eq 1
+
+          curl --silent --show-error --fail \
+            --header "Authorization: Bearer ${AGENT_TOKEN}" \
+            --header 'Content-Type: application/json' \
+            --data '{"role":"coordinator"}' \
+            "http://127.0.0.1:${agent_port}/v1/flamenco/processes/start" >/dev/null
+
+          flamenco_ready=0
+          for _ in $(seq 1 30); do
+            if curl --silent --show-error --fail \
+              --header "Authorization: Bearer ${AGENT_TOKEN}" \
+              "http://127.0.0.1:${agent_port}/v1/flamenco/status" \
+              | jq --exit-status \
+                '.expected_version == "3.9.3" and .manager.running and .worker.running and (.registered_workers | length) == 1' \
+                >/dev/null; then
+              flamenco_ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "${flamenco_ready}" -eq 1
+
+          # The remote-Worker token may reach only the Worker proxy. It must
+          # never authenticate to full pod-agent administration endpoints.
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${WORKER_PROXY_TOKEN}" \
+            "http://127.0.0.1:${agent_port}/healthz")" -eq 401
+          curl --silent --show-error --fail \
+            --header "Authorization: Bearer ${WORKER_PROXY_TOKEN}" \
+            "http://127.0.0.1:${agent_port}/v1/flamenco/worker-proxy/api/v3/version" \
+            | jq --exit-status '.version == "3.9.3"' >/dev/null
 
           docker exec "${container_id}" google-chrome --version \
             | grep --fixed-strings 'Google Chrome'

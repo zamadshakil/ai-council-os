@@ -44,7 +44,7 @@ For HubSpot, create a **Service Key** under HubSpot Development → Keys → Ser
 
 Pod power control and render execution are separate security boundaries. In the portal the administrator supplies only a rotated RunPod API key. Council OS generates and encrypts a separate agent token and Kasm password; stored values are never returned to the browser. The agent accepts allowlisted render jobs and cancellation only. It never accepts arbitrary Python or shell input.
 
-The version-controlled runtime is in `docker/blender-runpod`. It pins Ubuntu 24.04 Kasm, Blender 5.0.1 and the safe agent. It exposes Kasm on `6901/http` for interactive editing and the agent on `8001/http`. Automated final renders run headlessly and do not depend on Kasm/X11. Do not install an NVIDIA kernel driver in the image; RunPod supplies the host driver and NVIDIA Container Toolkit. Keep all sources, local frames, rclone configuration and durable agent state under `/workspace`, because the container disk is not preserved when the pod is stopped or updated.
+The version-controlled runtime is in `docker/blender-runpod`. It pins Ubuntu 24.04 Kasm, Blender 5.0.1, Flamenco 3.9.3 and the safe agent. It exposes Kasm on `6901/http` for interactive editing and the agent on `8001/http`. Flamenco Manager binds only to pod loopback and is not exposed. Automated final renders run headlessly and do not depend on Kasm/X11. Do not install an NVIDIA kernel driver in the image; RunPod supplies the host driver and NVIDIA Container Toolkit. Keep all sources, local frames, rclone configuration, Flamenco state and durable agent state under `/workspace`, because the container disk is not preserved when the pod is stopped or updated.
 
 The Blender image workflow publishes only immutable full-commit-SHA tags to GHCR and blocks HIGH/CRITICAL vulnerability findings. Before setting `BLENDER_RUNPOD_IMAGE`, verify that exact registry manifest exists. The value must end in a full 40-character Git commit SHA; mutable tags such as `latest` are rejected.
 
@@ -58,6 +58,26 @@ Roll out the runtime in this order:
 6. In Blender Manager, explicitly confirm that inventory before preparing the existing pod runtime. Council OS rejects the update unless both the inventory confirmation and matching smoke-approved SHA are present.
 7. Run production-scene preflight and representative benchmark. Missing assets, insufficient local/Drive capacity, absent GPU-compute evidence, or excessive memory are hard blockers.
 8. Approve the 50-frame continuous soak before the complete animation. Start with one A6000; scaling remains disabled until deterministic output and queue behavior pass.
+
+The dashboard offers **Flamenco managed** for approved headless renders. Approval
+creates a separate `.flamenco.blend` copy with the benchmarked settings; the
+artist's source is never overwritten. Council OS starts the loopback Manager and
+local Worker, submits one idempotent job, reconciles task ranges into its own
+frame records, and maps pause/resume/cancel/retry through its authenticated,
+versioned action API. Completed valid frames remain reusable. The global kill
+switch requests a farm pause and continues monitoring until the pause settles.
+
+Do not expose port 8080. Do not use Flamenco's SQLite database as Council OS
+state: it is scheduler-local only. PostgreSQL remains authoritative for render
+metadata, approvals, audit history, frame validation, telemetry and delivery.
+Do not add extra Workers until the one-A6000 benchmark and 50-frame soak pass.
+When scaling is later approved, mount one RunPod network volume at `/workspace`
+on the coordinator and every Worker. Each remote Worker receives the HTTPS
+`FLAMENCO_COORDINATOR_AGENT_URL` and the coordinator's distinct write-only
+`FLAMENCO_COORDINATOR_AGENT_TOKEN`, whose value is the coordinator's generated
+`FLAMENCO_WORKER_PROXY_TOKEN` rather than its full agent token; its loopback
+gateway exposes only Worker protocol calls. Google Drive and R2 are delivery/object storage choices, not
+Flamenco's live shared filesystem.
 
 Google Drive is import/export storage only. Configure rclone persistently at `/workspace/.config/rclone/rclone.conf`. Never render from a mounted Drive folder and never restore the old bidirectional sync loop. A Drive quota-full result blocks delivery without deleting local validated output; rate-limit results remain retryable.
 

@@ -48,6 +48,7 @@ from src.api.schemas import (
     ApprovalActionRequest,
     BlenderPodActionRequest,
     BlenderPodProvisionRequest,
+    BlenderFlamencoProcessRequest,
     BlenderRenderActionRequest,
     BlenderRenderJobRequest,
     BlenderTemplateJobRequest,
@@ -2376,6 +2377,7 @@ async def provision_blender_pod(
                 template_id=template["id"],
                 image_name=image_name,
                 agent_token=values["BLENDER_AGENT_TOKEN"],
+                flamenco_proxy_token=values["FLAMENCO_WORKER_PROXY_TOKEN"],
                 kasm_password=values["VNC_PW"],
                 idempotency_key=payload.idempotency_key,
             )
@@ -2485,6 +2487,7 @@ async def act_on_blender_pod(
                         pod_id,
                         image_name=image_name,
                         agent_token=values["BLENDER_AGENT_TOKEN"],
+                        flamenco_proxy_token=values["FLAMENCO_WORKER_PROXY_TOKEN"],
                         kasm_password=values["VNC_PW"],
                     )
                     pod["runtime_prepared"] = True
@@ -2624,6 +2627,106 @@ async def list_blender_render_jobs(_: RequestActor = Depends(require_admin)):
     return {"render_jobs": await list_jobs()}
 
 
+@app.get("/api/blender/flamenco/status")
+async def get_blender_flamenco_status(
+    pod_id: str = Query(min_length=3, max_length=100, pattern=r"^[A-Za-z0-9_-]+$"),
+    _: RequestActor = Depends(require_admin),
+):
+    """Read Flamenco state through the authenticated pod agent."""
+    from src.integrations.flamenco import get_flamenco_status
+    from src.integrations.runpod import RunPodError
+
+    values = await _provider_runtime("runpod")
+    try:
+        with use_integration_configuration(values):
+            return await get_flamenco_status(pod_id)
+    except RunPodError as exc:
+        raise _api_error(502, "FLAMENCO_UNAVAILABLE", str(exc)) from exc
+
+
+@app.post("/api/blender/flamenco/processes")
+async def control_blender_flamenco_processes(
+    payload: BlenderFlamencoProcessRequest,
+    request: Request,
+    actor: RequestActor = Depends(require_admin),
+):
+    """Start/stop the allowlisted Manager and Worker without exposing its API."""
+    from src.integrations.flamenco import start_flamenco, stop_flamenco_process
+    from src.integrations.runpod import RunPodError
+
+    if payload.action == "start" and (await get_kill_switch_db())["is_active"]:
+        raise _api_error(423, "KILL_SWITCH_ACTIVE", "Resume the system before starting Flamenco")
+    request_payload = payload.model_dump(mode="json")
+    scope = f"blender.flamenco.process:{payload.pod_id}:{payload.role}:{payload.action}"
+    async with async_session() as session:
+        replay = await _begin_idempotent_mutation(
+            session,
+            scope=scope,
+            idempotency_key=payload.idempotency_key,
+            request_payload=request_payload,
+        )
+        if replay is not None:
+            return replay
+        values = await _provider_runtime("runpod")
+        try:
+            with use_integration_configuration(values):
+                if payload.action == "start":
+                    if payload.role == "manager":
+                        raise _api_error(
+                            422,
+                            "INVALID_FLAMENCO_ROLE",
+                            "Start the coordinator so Manager and its local Worker are brought up together",
+                        )
+                    resource = await start_flamenco(payload.pod_id, payload.role)
+                elif payload.role == "coordinator":
+                    worker = await stop_flamenco_process(payload.pod_id, "worker")
+                    manager = await stop_flamenco_process(payload.pod_id, "manager")
+                    resource = {"worker": worker, "manager": manager}
+                else:
+                    resource = await stop_flamenco_process(payload.pod_id, payload.role)
+        except RunPodError as exc:
+            raise _api_error(502, "FLAMENCO_ACTION_FAILED", str(exc)) from exc
+
+        event = await record_audit(
+            session,
+            action=f"blender.flamenco_{payload.action}",
+            resource_type="runpod_pod",
+            resource_id=payload.pod_id,
+            actor_type=actor.actor_type,
+            actor_id=actor.actor_id,
+            request_id=getattr(request.state, "request_id", ""),
+            details={"role": payload.role},
+        )
+        response_payload = _mutation(resource, 1, event.id)
+        return await _commit_idempotent_mutation(
+            session,
+            scope=scope,
+            idempotency_key=payload.idempotency_key,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            resource_id=payload.pod_id,
+        )
+
+
+@app.get("/api/blender/flamenco/logs/{role}")
+async def get_blender_flamenco_logs(
+    role: str,
+    pod_id: str = Query(min_length=3, max_length=100, pattern=r"^[A-Za-z0-9_-]+$"),
+    _: RequestActor = Depends(require_admin),
+):
+    from src.integrations.flamenco import get_flamenco_logs
+    from src.integrations.runpod import RunPodError
+
+    if role not in {"manager", "worker"}:
+        raise _api_error(422, "INVALID_FLAMENCO_ROLE", "Role must be manager or worker")
+    values = await _provider_runtime("runpod")
+    try:
+        with use_integration_configuration(values):
+            return await get_flamenco_logs(pod_id, role)
+    except RunPodError as exc:
+        raise _api_error(502, "FLAMENCO_UNAVAILABLE", str(exc)) from exc
+
+
 @app.get("/api/blender/render-jobs/{render_job_id}")
 async def get_blender_render_job(
     render_job_id: str,
@@ -2693,6 +2796,12 @@ async def create_blender_render_job(
 
     if (await get_kill_switch_db())["is_active"]:
         raise _api_error(423, "KILL_SWITCH_ACTIVE", "Resume the system before starting GPU work")
+    if payload.scheduler == "flamenco" and payload.render_mode != "headless":
+        raise _api_error(
+            422,
+            "FLAMENCO_HEADLESS_ONLY",
+            "Flamenco schedules restartable headless batches; use the native mode for manual Kasm rendering",
+        )
     values = await _provider_runtime("runpod")
     if len(values.get("BLENDER_AGENT_TOKEN", "")) < 32:
         raise _api_error(
@@ -2725,6 +2834,9 @@ async def create_blender_render_job(
             status="queued",
             stage="render.preflight",
             render_mode=payload.render_mode,
+            scheduler=payload.scheduler,
+            coordinator_pod_id=payload.pod_id if payload.scheduler == "flamenco" else "",
+            worker_pod_ids=[payload.pod_id] if payload.scheduler == "flamenco" else [],
             output_profile=payload.output_profile,
             frame_start=payload.frame_start,
             frame_end=payload.frame_end,
@@ -2739,6 +2851,7 @@ async def create_blender_render_job(
                 "require_drive": payload.require_drive,
                 "drive_path": payload.drive_path,
                 "single_gpu_only": True,
+                "scheduler": payload.scheduler,
             },
             auto_stop=payload.auto_stop,
         )
@@ -2765,6 +2878,7 @@ async def create_blender_render_job(
                 "pod_id": payload.pod_id,
                 "render_mode": payload.render_mode,
                 "output_profile": payload.output_profile,
+                "scheduler": payload.scheduler,
                 "require_drive": payload.require_drive,
             },
         )
@@ -2788,6 +2902,7 @@ async def act_on_blender_render_job(
 ):
     """Apply an optimistic, idempotent administrator render action."""
     from src.core.rendering import frame_batches, job_resource
+    from src.integrations.flamenco import act_on_flamenco_job
     from src.integrations.runpod import RunPodError, stop_pod
 
     if payload.action in {"run_preflight", "approve_benchmark", "resume", "retry_failed_frames", "retry_delivery"}:
@@ -2839,32 +2954,87 @@ async def act_on_blender_render_job(
             else:
                 if job.frame_start is None or job.frame_end is None:
                     raise _api_error(409, "RENDER_RANGE_UNKNOWN", "Scene frame range is unavailable")
-                numbers = list(range(job.frame_start, job.frame_end + 1, job.frame_step))
-                job.status, job.stage = "rendering", "render.frame_batch"
-                batch = frame_batches(numbers, batch_size)[0]
-                digest = hashlib.sha256(",".join(map(str, batch)).encode()).hexdigest()[:16]
-                await session.execute(
-                    update(RenderFrameModel)
-                    .where(
-                        RenderFrameModel.render_job_id == job.id,
-                        RenderFrameModel.frame_number.in_(batch),
+                if job.scheduler == "flamenco":
+                    job.status, job.stage = "preparing_flamenco", "render.prepare_flamenco"
+                    new_jobs.append(_new_job(
+                        workflow_id="blender_manager", job_type="blender.render_stage",
+                        payload={"render_job_id": job.id, "stage": "render.prepare_flamenco", "frames": []},
+                        idempotency_key=f"render:{job.id}:render.prepare_flamenco:{payload.idempotency_key}",
+                        priority=20,
+                    ))
+                else:
+                    numbers = list(range(job.frame_start, job.frame_end + 1, job.frame_step))
+                    job.status, job.stage = "rendering", "render.frame_batch"
+                    batch = frame_batches(numbers, batch_size)[0]
+                    digest = hashlib.sha256(",".join(map(str, batch)).encode()).hexdigest()[:16]
+                    await session.execute(
+                        update(RenderFrameModel)
+                        .where(
+                            RenderFrameModel.render_job_id == job.id,
+                            RenderFrameModel.frame_number.in_(batch),
+                        )
+                        .values(batch_key=digest, status="pending")
                     )
-                    .values(batch_key=digest, status="pending")
-                )
-                new_jobs.append(_new_job(
-                    workflow_id="blender_manager", job_type="blender.render_stage",
-                    payload={"render_job_id": job.id, "stage": "render.frame_batch", "frames": batch},
-                    idempotency_key=f"render:{job.id}:render.frame_batch:{digest}", priority=20,
-                ))
+                    new_jobs.append(_new_job(
+                        workflow_id="blender_manager", job_type="blender.render_stage",
+                        payload={"render_job_id": job.id, "stage": "render.frame_batch", "frames": batch},
+                        idempotency_key=f"render:{job.id}:render.frame_batch:{digest}", priority=20,
+                    ))
         elif payload.action == "pause":
             if job.status in {"completed", "cancelled"}:
                 raise _api_error(409, "RENDER_NOT_PAUSABLE", "Completed or cancelled render cannot be paused")
-            job.status = "paused"
+            if job.scheduler == "flamenco" and job.scheduler_job_id:
+                values = await _provider_runtime("runpod")
+                try:
+                    with use_integration_configuration(values):
+                        await act_on_flamenco_job(
+                            job.coordinator_pod_id or job.pod_id,
+                            job.scheduler_job_id,
+                            "pause",
+                            reason="Paused by Council OS administrator",
+                        )
+                except RunPodError as exc:
+                    raise _api_error(502, "FLAMENCO_ACTION_FAILED", str(exc)) from exc
+                job.status = "pausing"
+                sequence = int((job.scheduler_state or {}).get("monitor_sequence") or 0) + 1
+                new_jobs.append(_new_job(
+                    workflow_id="blender_manager", job_type="blender.flamenco_monitor",
+                    payload={"render_job_id": job.id, "sequence": sequence},
+                    idempotency_key=f"render:{job.id}:flamenco.monitor:{sequence}:{payload.idempotency_key}",
+                    priority=20,
+                ))
+            else:
+                job.status = "paused"
         elif payload.action == "resume":
             if job.status != "paused":
                 raise _api_error(409, "RENDER_NOT_PAUSED", "Render is not paused")
-            stage = job.stage if job.stage.startswith("render.") else "render.preflight"
-            if stage == "render.frame_batch":
+            if job.scheduler == "flamenco" and job.scheduler_job_id:
+                values = await _provider_runtime("runpod")
+                try:
+                    with use_integration_configuration(values):
+                        await act_on_flamenco_job(
+                            job.coordinator_pod_id or job.pod_id,
+                            job.scheduler_job_id,
+                            "resume",
+                            reason="Resumed by Council OS administrator",
+                        )
+                except RunPodError as exc:
+                    raise _api_error(502, "FLAMENCO_ACTION_FAILED", str(exc)) from exc
+                job.status, job.stage = "rendering", "render.flamenco"
+                sequence = int((job.scheduler_state or {}).get("monitor_sequence") or 0) + 1
+                new_jobs.append(_new_job(
+                    workflow_id="blender_manager", job_type="blender.flamenco_monitor",
+                    payload={"render_job_id": job.id, "sequence": sequence},
+                    idempotency_key=f"render:{job.id}:flamenco.monitor:{sequence}:{payload.idempotency_key}",
+                    priority=20,
+                ))
+            else:
+                stage = job.stage if job.stage.startswith("render.") else "render.preflight"
+                if job.scheduler == "flamenco" and stage in {
+                    "render.prepare_flamenco", "render.flamenco_submit", "render.flamenco",
+                }:
+                    stage = "render.prepare_flamenco"
+            if job.scheduler != "flamenco" and stage == "render.frame_batch":
                 remaining = (
                     await session.execute(
                         select(RenderFrameModel.frame_number).where(
@@ -2904,18 +3074,40 @@ async def act_on_blender_render_job(
                         payload={"render_job_id": job.id, "stage": stage, "frames": batch},
                         idempotency_key=f"render:{job.id}:resume:{digest}:{payload.idempotency_key}", priority=20,
                     ))
-            else:
+            elif not (job.scheduler == "flamenco" and job.scheduler_job_id):
                 new_jobs.append(_new_job(
                     workflow_id="blender_manager", job_type="blender.render_stage",
                     payload={"render_job_id": job.id, "stage": stage, "frames": []},
                     idempotency_key=f"render:{job.id}:{stage}:{payload.idempotency_key}", priority=20,
                 ))
-            job.status = "awaiting_kasm_render" if stage == "render.observe_gui" else "queued"
+            if not (job.scheduler == "flamenco" and job.scheduler_job_id):
+                job.status = "awaiting_kasm_render" if stage == "render.observe_gui" else "queued"
         elif payload.action == "cancel":
             if job.status == "completed":
                 raise _api_error(409, "RENDER_ALREADY_COMPLETED", "Completed render cannot be cancelled")
-            job.status, job.stage, job.error = "cancelled", "cancelled", "Cancelled by administrator"
-            job.finished_at = utcnow()
+            if job.scheduler == "flamenco" and job.scheduler_job_id:
+                values = await _provider_runtime("runpod")
+                try:
+                    with use_integration_configuration(values):
+                        await act_on_flamenco_job(
+                            job.coordinator_pod_id or job.pod_id,
+                            job.scheduler_job_id,
+                            "cancel",
+                            reason="Cancelled by Council OS administrator",
+                        )
+                except RunPodError as exc:
+                    raise _api_error(502, "FLAMENCO_ACTION_FAILED", str(exc)) from exc
+                job.status, job.stage, job.error = "cancelling", "render.flamenco", ""
+                sequence = int((job.scheduler_state or {}).get("monitor_sequence") or 0) + 1
+                new_jobs.append(_new_job(
+                    workflow_id="blender_manager", job_type="blender.flamenco_monitor",
+                    payload={"render_job_id": job.id, "sequence": sequence},
+                    idempotency_key=f"render:{job.id}:flamenco.monitor:{sequence}:{payload.idempotency_key}",
+                    priority=20,
+                ))
+            else:
+                job.status, job.stage, job.error = "cancelled", "cancelled", "Cancelled by administrator"
+                job.finished_at = utcnow()
         elif payload.action == "retry_failed_frames":
             frames = (
                 await session.execute(
@@ -2927,7 +3119,30 @@ async def act_on_blender_render_job(
             ).scalars().all()
             if not frames:
                 raise _api_error(409, "NO_FAILED_FRAMES", "No failed or missing frames need retry")
-            job.status, job.stage, job.error = "rendering", "render.frame_batch", ""
+            if job.scheduler == "flamenco":
+                if not job.scheduler_job_id:
+                    raise _api_error(409, "FLAMENCO_JOB_MISSING", "Flamenco job has not been submitted")
+                values = await _provider_runtime("runpod")
+                try:
+                    with use_integration_configuration(values):
+                        await act_on_flamenco_job(
+                            job.coordinator_pod_id or job.pod_id,
+                            job.scheduler_job_id,
+                            "retry",
+                            reason="Retry requested by Council OS administrator",
+                        )
+                except RunPodError as exc:
+                    raise _api_error(502, "FLAMENCO_ACTION_FAILED", str(exc)) from exc
+                job.status, job.stage, job.error = "rendering", "render.flamenco", ""
+                sequence = int((job.scheduler_state or {}).get("monitor_sequence") or 0) + 1
+                new_jobs.append(_new_job(
+                    workflow_id="blender_manager", job_type="blender.flamenco_monitor",
+                    payload={"render_job_id": job.id, "sequence": sequence},
+                    idempotency_key=f"render:{job.id}:flamenco.monitor:{sequence}:{payload.idempotency_key}",
+                    priority=20,
+                ))
+            else:
+                job.status, job.stage, job.error = "rendering", "render.frame_batch", ""
             await session.execute(
                 update(RenderFrameModel)
                 .where(
@@ -2936,21 +3151,22 @@ async def act_on_blender_render_job(
                 )
                 .values(status="pending")
             )
-            batch = frame_batches(frames, batch_size)[0]
-            digest = hashlib.sha256(",".join(map(str, batch)).encode()).hexdigest()[:16]
-            await session.execute(
-                update(RenderFrameModel)
-                .where(
-                    RenderFrameModel.render_job_id == job.id,
-                    RenderFrameModel.frame_number.in_(batch),
+            if job.scheduler != "flamenco":
+                batch = frame_batches(frames, batch_size)[0]
+                digest = hashlib.sha256(",".join(map(str, batch)).encode()).hexdigest()[:16]
+                await session.execute(
+                    update(RenderFrameModel)
+                    .where(
+                        RenderFrameModel.render_job_id == job.id,
+                        RenderFrameModel.frame_number.in_(batch),
+                    )
+                    .values(batch_key=digest)
                 )
-                .values(batch_key=digest)
-            )
-            new_jobs.append(_new_job(
-                workflow_id="blender_manager", job_type="blender.render_stage",
-                payload={"render_job_id": job.id, "stage": "render.frame_batch", "frames": batch},
-                idempotency_key=f"render:{job.id}:retry:{digest}:{payload.idempotency_key}", priority=20,
-            ))
+                new_jobs.append(_new_job(
+                    workflow_id="blender_manager", job_type="blender.render_stage",
+                    payload={"render_job_id": job.id, "stage": "render.frame_batch", "frames": batch},
+                    idempotency_key=f"render:{job.id}:retry:{digest}:{payload.idempotency_key}", priority=20,
+                ))
         elif payload.action == "retry_delivery":
             job.status, job.stage, job.error = "delivering", "render.deliver", ""
             new_jobs.append(_new_job(

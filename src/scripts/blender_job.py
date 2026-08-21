@@ -19,7 +19,11 @@ from typing import Any
 def _arguments() -> argparse.Namespace:
     values = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
-    parser.add_argument("--operation", choices=("preflight", "benchmark", "frame_batch"), required=True)
+    parser.add_argument(
+        "--operation",
+        choices=("preflight", "benchmark", "frame_batch", "prepare_flamenco"),
+        required=True,
+    )
     parser.add_argument("--source", required=True)
     parser.add_argument("--report", required=True)
     parser.add_argument("--output-directory", required=True)
@@ -250,6 +254,26 @@ def _render_frames(bpy: Any, args: argparse.Namespace, output_directory: Path) -
     return results
 
 
+def _prepare_flamenco_copy(
+    bpy: Any,
+    args: argparse.Namespace,
+    output_directory: Path,
+) -> Path:
+    """Write an isolated farm copy with the benchmarked GPU settings.
+
+    The artist's source file is never saved over. Flamenco Workers all open
+    this immutable prepared copy from the shared /workspace volume.
+    """
+    scene = bpy.context.scene
+    _prepare_render(scene, args, output_directory)
+    scene["council_cycles_backend"] = str(args.backend or "OPTIX").upper()
+    target = output_directory / "scene.flamenco.blend"
+    temporary = output_directory / "scene.flamenco.preparing.blend"
+    bpy.ops.wm.save_as_mainfile(filepath=str(temporary))
+    temporary.replace(target)
+    return target
+
+
 def main() -> int:
     args = _arguments()
     report_path = Path(args.report)
@@ -288,6 +312,14 @@ def main() -> int:
                 report["status"] = "blocked"
             else:
                 frames = _render_frames(bpy, args, output_directory)
+                report["status"] = "completed"
+        elif args.operation == "prepare_flamenco":
+            if missing or not gpu.get("backend"):
+                report["status"] = "blocked"
+            else:
+                prepared = _prepare_flamenco_copy(bpy, args, output_directory)
+                report["prepared_source_path"] = str(prepared)
+                report["prepared_source_checksum"] = _sha256(prepared)
                 report["status"] = "completed"
         else:
             report["status"] = "blocked" if missing or not gpu.get("backend") else "completed"

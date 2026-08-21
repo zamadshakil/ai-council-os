@@ -287,6 +287,7 @@ async def create_a6000_pod(
     template_id: str,
     image_name: str,
     agent_token: str,
+    flamenco_proxy_token: str,
     kasm_password: str,
     idempotency_key: str,
 ) -> dict[str, Any]:
@@ -298,7 +299,7 @@ async def create_a6000_pod(
     image_name = validate_blender_image(image_name)
     if not _POD_ID.fullmatch(template_id.strip()):
         raise ValueError("Invalid RunPod template identifier")
-    if len(agent_token) < 32 or len(kasm_password) < 16:
+    if len(agent_token) < 32 or len(flamenco_proxy_token) < 32 or len(kasm_password) < 16:
         raise ValueError("Generated Blender runtime credentials are invalid")
     if not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", idempotency_key):
         raise ValueError("Invalid provisioning idempotency key")
@@ -323,6 +324,7 @@ async def create_a6000_pod(
             "dockerStartCmd": [],
             "env": {
                 "BLENDER_AGENT_TOKEN": agent_token,
+                "FLAMENCO_WORKER_PROXY_TOKEN": flamenco_proxy_token,
                 "BLENDER_AGENT_PORT": "8001",
                 "BLENDER_WORKSPACE_ROOT": "/workspace",
                 "NVIDIA_VISIBLE_DEVICES": "all",
@@ -383,12 +385,13 @@ async def update_pod_runtime(
     *,
     image_name: str,
     agent_token: str,
+    flamenco_proxy_token: str,
     kasm_password: str,
 ) -> dict[str, Any]:
     """Update a stopped pod without changing or deleting its /workspace volume."""
     pod_id = _pod_id(pod_id)
     image_name = validate_blender_image(image_name)
-    if len(agent_token) < 32 or len(kasm_password) < 16:
+    if len(agent_token) < 32 or len(flamenco_proxy_token) < 32 or len(kasm_password) < 16:
         raise ValueError("Generated Blender runtime credentials are invalid")
     updated = await _rest(
         "POST",
@@ -401,6 +404,7 @@ async def update_pod_runtime(
             "dockerStartCmd": [],
             "env": {
                 "BLENDER_AGENT_TOKEN": agent_token,
+                "FLAMENCO_WORKER_PROXY_TOKEN": flamenco_proxy_token,
                 "BLENDER_AGENT_PORT": "8001",
                 "BLENDER_WORKSPACE_ROOT": "/workspace",
                 "NVIDIA_VISIBLE_DEVICES": "all",
@@ -492,7 +496,7 @@ async def submit_render_stage(
     """Submit one allowlisted stage to the authenticated pod agent."""
     if operation not in {
         "preflight", "benchmark", "observe_gui", "frame_batch",
-        "validate", "encode", "deliver",
+        "prepare_flamenco", "validate", "encode", "deliver",
     }:
         raise ValueError("Unsupported Blender render operation")
     if backend not in {"AUTO", "OPTIX", "CUDA"}:

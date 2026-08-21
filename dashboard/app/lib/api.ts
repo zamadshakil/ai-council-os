@@ -549,6 +549,7 @@ export async function createBlenderRenderJob(input: {
   pod_id: string;
   source_path: string;
   render_mode: 'kasm_gui' | 'headless';
+  scheduler: 'native' | 'flamenco';
   output_profile: 'delivery' | 'compositing';
   frame_start: number | null;
   frame_end: number | null;

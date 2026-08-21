@@ -183,6 +183,7 @@ class BlenderRenderJobRequest(StrictModel):
     pod_id: str = Field(min_length=3, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     source_path: str = Field(min_length=7, max_length=1000)
     render_mode: Literal["kasm_gui", "headless"] = "headless"
+    scheduler: Literal["native", "flamenco"] = "native"
     output_profile: Literal["delivery", "compositing"] = "delivery"
     frame_start: int | None = Field(default=None, ge=0, le=1_000_000)
     frame_end: int | None = Field(default=None, ge=0, le=1_000_000)
@@ -227,6 +228,13 @@ class BlenderRenderActionRequest(StrictModel):
         "retry_failed_frames", "retry_delivery", "stop_pod",
     ]
     expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+
+
+class BlenderFlamencoProcessRequest(StrictModel):
+    pod_id: str = Field(min_length=3, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    action: Literal["start", "stop"]
+    role: Literal["coordinator", "worker", "manager"]
     idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
 
 

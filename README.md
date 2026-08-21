@@ -2,7 +2,7 @@
 
 AI Council OS is a self-hosted, human-approved automation platform for three production councils: Grant, Sales, and Content. It combines a FastAPI backend, durable PostgreSQL jobs, a Next.js operator dashboard, Telegram controls, six supported workflows, a PostgreSQL-backed Grant knowledge base, and a separate Blender cloud-GPU manager.
 
-The product is intentionally narrow. CAD generation, Strategy and Support councils, browser submission to EU portals, account creation, and automatic Reddit posting are outside this release. Blender management is isolated from the council system. It never executes model-generated Python: the pod agent exposes only a trusted validate/repair/benchmark operation.
+The product is intentionally narrow. CAD generation, Strategy and Support councils, browser submission to EU portals, account creation, and automatic Reddit posting are outside this release. Blender management is isolated from the council system. It never executes model-generated Python: the pod agent exposes an authenticated allowlist for preflight, benchmark, render-stage, and private Flamenco farm-control operations.
 
 ## What ships
 
@@ -29,7 +29,7 @@ All external writes require approval. Every destination has an independent task 
 
 The dashboard provides Overview, Queue/Approvals, Councils, Workflows, Blender Manager, History/Analytics, Knowledge, and Integrations/Settings views. It uses server-side sessions, HTTP-only cookies, CSRF protection, optimistic versions, and database-backed state. It does not fabricate connection status, costs, confidence, schedules, pod state, or account names.
 
-Blender Manager reads live RunPod state, can explicitly start/stop a selected pod, and queues durable template jobs. A job preserves the source `.blend`, enables Cycles GPU devices and persistent data, applies bounded benchmark settings, checks missing external assets, saves a new copy, renders one proof frame, records the detected GPU backend, and can stop billing automatically. If GPU use cannot be proven, the job fails rather than reporting success.
+Blender Manager reads live RunPod state, can explicitly start/stop a selected pod, and queues durable production jobs. A job preserves the source `.blend`, enables Cycles GPU devices and persistent data, applies bounded benchmark settings, checks missing external assets, saves an isolated farm copy, renders proof frames, records the detected GPU backend, and can stop billing automatically. Approved headless runs may use the pinned private Flamenco 3.9.3 scheduler for restartable frame tasks; PostgreSQL, approvals, NVML evidence, validation, encoding, and delivery remain controlled by Council OS. If GPU use cannot be proven, the job fails rather than reporting success.
 
 ### Durable production core
 

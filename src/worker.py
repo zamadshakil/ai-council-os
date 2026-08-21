@@ -120,6 +120,8 @@ class DurableWorker:
         self.register("crm.hubspot_sync", self._sync_hubspot_sales)
         self.register("blender.template_repair", self._run_blender_template_job)
         self.register("blender.render_stage", self._run_blender_render_stage)
+        self.register("blender.flamenco_submit", self._run_flamenco_submit)
+        self.register("blender.flamenco_monitor", self._run_flamenco_monitor)
         for provider in ("telegram", "youtube", "meta"):
             self.register(f"webhook.{provider}", self._accept_webhook)
 
@@ -187,7 +189,12 @@ class DurableWorker:
                 "brain.learn",
             }:
                 return await decrypted_provider_env("openrouter")
-            if claim.job_type in {"blender.template_repair", "blender.render_stage"}:
+            if claim.job_type in {
+                "blender.template_repair",
+                "blender.render_stage",
+                "blender.flamenco_submit",
+                "blender.flamenco_monitor",
+            }:
                 return await decrypted_provider_env("runpod")
             if claim.job_type == "crm.hubspot_sync":
                 return await decrypted_provider_env("hubspot")
@@ -317,6 +324,7 @@ class DurableWorker:
                 switch
                 and switch.is_active
                 and not claim.job_type.startswith("webhook.")
+                and claim.job_type != "blender.flamenco_monitor"
             ):
                 return False, "global kill switch is active"
             if claim.job_type in {
@@ -326,7 +334,12 @@ class DurableWorker:
                 "brain.learn",
             } or claim.job_type.startswith("webhook."):
                 return True, ""
-            if claim.job_type in {"blender.template_repair", "blender.render_stage"}:
+            if claim.job_type in {
+                "blender.template_repair",
+                "blender.render_stage",
+                "blender.flamenco_submit",
+                "blender.flamenco_monitor",
+            }:
                 try:
                     await decrypted_provider_env("runpod")
                 except VaultConfigurationError:
@@ -1296,7 +1309,7 @@ class DurableWorker:
         operation = stage.removeprefix("render.")
         if operation not in {
             "preflight", "benchmark", "observe_gui", "frame_batch",
-            "validate", "encode", "deliver",
+            "prepare_flamenco", "validate", "encode", "deliver",
         }:
             raise RuntimeError("Render stage is not allowlisted")
         async with db.async_session() as session:
@@ -1584,6 +1597,31 @@ class DurableWorker:
                         row.version += 1
                         await session.commit()
                 should_stop = persisted.auto_stop
+            elif operation == "prepare_flamenco":
+                prepared_path = str(report.get("prepared_source_path") or "")
+                prepared_checksum = str(report.get("prepared_source_checksum") or "")
+                if not prepared_path.startswith(f"/workspace/render_jobs/{render_job_id}/"):
+                    raise RuntimeError("The Flamenco farm copy was not created in the render workspace")
+                async with db.async_session() as session:
+                    row = await session.get(RenderJobModel, render_job_id, with_for_update=True)
+                    if row:
+                        row.scheduler_state = {
+                            **(row.scheduler_state or {}),
+                            "prepared_source_path": prepared_path,
+                            "prepared_source_checksum": prepared_checksum,
+                        }
+                        row.status = "queueing_flamenco"
+                        row.stage = "render.flamenco_submit"
+                        row.version += 1
+                        await session.commit()
+                await self.jobs.enqueue(
+                    workflow_id="blender_manager",
+                    job_type="blender.flamenco_submit",
+                    payload={"render_job_id": render_job_id},
+                    idempotency_key=f"render:{render_job_id}:flamenco.submit",
+                    priority=20,
+                    max_attempts=4,
+                )
             elif operation in {"observe_gui", "frame_batch"}:
                 counted = await rendering.refresh_frame_counts(render_job_id)
                 if counted.completed_frame_count >= counted.expected_frame_count:
@@ -1681,6 +1719,232 @@ class DurableWorker:
                     await stop_pod(pod_id)
                 except Exception:
                     logger.exception("Could not auto-stop RunPod pod %s", pod_id)
+
+    @staticmethod
+    def _flamenco_frame_expression(start: int, end: int, step: int) -> str:
+        if step <= 1:
+            return f"{start}-{end}" if start != end else str(start)
+        return ",".join(str(value) for value in range(start, end + 1, step))
+
+    @staticmethod
+    def _flamenco_task_frames(name: str) -> list[int]:
+        if not name.startswith("render-"):
+            return []
+        values: list[int] = []
+        for part in name.removeprefix("render-").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                first, last = part.split("-", 1)
+                values.extend(range(int(first), int(last) + 1))
+            else:
+                values.append(int(part))
+        return sorted(set(values))
+
+    async def _run_flamenco_submit(
+        self,
+        payload: dict[str, Any],
+        _: JobClaim,
+    ) -> dict[str, Any]:
+        """Start the protected scheduler and submit one idempotent farm job."""
+        from src.integrations.flamenco import start_flamenco, submit_flamenco_render
+
+        render_job_id = str(payload.get("render_job_id") or "")
+        async with db.async_session() as session:
+            row = await session.get(RenderJobModel, render_job_id)
+        if row is None:
+            raise RuntimeError("The production render job no longer exists")
+        if row.scheduler != "flamenco":
+            raise RuntimeError("The render is not configured for Flamenco")
+        if row.status in {"paused", "cancelled", "completed"}:
+            return {"render_job_id": render_job_id, "status": row.status}
+        if row.frame_start is None or row.frame_end is None:
+            raise RuntimeError("Flamenco requires a preflighted scene frame range")
+        state = row.scheduler_state or {}
+        source_path = str(state.get("prepared_source_path") or "")
+        if not source_path:
+            raise RuntimeError("The immutable Flamenco scene copy is unavailable")
+        coordinator_pod_id = row.coordinator_pod_id or row.pod_id
+        await start_flamenco(coordinator_pod_id, "coordinator")
+        if row.scheduler_job_id:
+            flamenco_job_id = row.scheduler_job_id
+            submitted: dict[str, Any] = {"id": flamenco_job_id, "reused": True}
+        else:
+            scene = (row.preflight or {}).get("scene", {})
+            image_format = "OPEN_EXR" if row.output_profile == "compositing" else "PNG"
+            extension = ".exr" if row.output_profile == "compositing" else ".png"
+            submitted = await submit_flamenco_render(
+                coordinator_pod_id,
+                render_job_id=row.id,
+                name=f"Council OS render {row.id[:8]}",
+                source_path=source_path,
+                output_directory=f"/workspace/render_jobs/{row.id}/frames",
+                frames=self._flamenco_frame_expression(row.frame_start, row.frame_end, row.frame_step),
+                chunk_size=max(1, min(int((row.benchmark or {}).get("recommended_batch_size") or 1), 50)),
+                fps=float(scene.get("fps") or 24),
+                image_format=image_format,
+                image_extension=extension,
+                scene=str(scene.get("name") or "Scene"),
+                priority=50,
+            )
+            flamenco_job_id = str(submitted.get("id") or "")
+        if not flamenco_job_id:
+            raise RuntimeError("Flamenco did not return a scheduler job identifier")
+        async with db.async_session() as session:
+            current = await session.get(RenderJobModel, render_job_id, with_for_update=True)
+            if current is None:
+                raise RuntimeError("The production render job no longer exists")
+            current.scheduler_job_id = flamenco_job_id
+            current.status = "rendering"
+            current.stage = "render.flamenco"
+            current.scheduler_state = {
+                **(current.scheduler_state or {}),
+                "flamenco_status": str(submitted.get("status") or "queued"),
+                "monitor_sequence": 0,
+            }
+            current.version += 1
+            await session.commit()
+        await self.jobs.enqueue(
+            workflow_id="blender_manager",
+            job_type="blender.flamenco_monitor",
+            payload={"render_job_id": render_job_id, "sequence": 1},
+            idempotency_key=f"render:{render_job_id}:flamenco.monitor:1",
+            priority=20,
+            max_attempts=5,
+            available_at=utcnow() + timedelta(seconds=15),
+        )
+        return {
+            "render_job_id": render_job_id,
+            "flamenco_job_id": flamenco_job_id,
+            "status": "queued",
+        }
+
+    async def _run_flamenco_monitor(
+        self,
+        payload: dict[str, Any],
+        _: JobClaim,
+    ) -> dict[str, Any]:
+        """Reconcile Flamenco task state into Council OS durable frame state."""
+        from src.integrations.flamenco import act_on_flamenco_job, get_flamenco_job
+
+        render_job_id = str(payload.get("render_job_id") or "")
+        sequence = max(1, int(payload.get("sequence") or 1))
+        async with db.async_session() as session:
+            row = await session.get(RenderJobModel, render_job_id)
+        if row is None:
+            raise RuntimeError("The production render job no longer exists")
+        if row.status in {"completed", "cancelled"}:
+            return {"render_job_id": render_job_id, "status": row.status}
+        if not row.scheduler_job_id:
+            raise RuntimeError("The Flamenco scheduler job identifier is missing")
+        coordinator_pod_id = row.coordinator_pod_id or row.pod_id
+        switch = await db.get_kill_switch_db()
+        result = await get_flamenco_job(coordinator_pod_id, row.scheduler_job_id)
+        observed_job = result.get("job") if isinstance(result.get("job"), dict) else {}
+        observed_status = str(observed_job.get("status") or "unknown")
+        if switch["is_active"] and observed_status not in {
+            "paused", "pause-requested", "canceled", "cancel-requested", "completed", "failed",
+        }:
+            result = await act_on_flamenco_job(
+                coordinator_pod_id,
+                row.scheduler_job_id,
+                "pause",
+                reason="Council OS global kill switch activated",
+            )
+        job = result.get("job") if isinstance(result.get("job"), dict) else {}
+        task_container = result.get("tasks") if isinstance(result.get("tasks"), dict) else {}
+        tasks = task_container.get("tasks") if isinstance(task_container.get("tasks"), list) else []
+        status = str(job.get("status") or "unknown")
+        task_counts: dict[str, int] = {}
+        async with db.async_session() as session:
+            current = await session.get(RenderJobModel, render_job_id, with_for_update=True)
+            if current is None:
+                raise RuntimeError("The production render job no longer exists")
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                task_status = str(task.get("status") or "unknown")
+                task_counts[task_status] = task_counts.get(task_status, 0) + 1
+                frames = self._flamenco_task_frames(str(task.get("name") or ""))
+                if not frames:
+                    continue
+                frame_status = {
+                    "active": "rendering",
+                    "queued": "pending",
+                    "completed": "rendered",
+                    "failed": "failed",
+                    "soft-failed": "failed",
+                    "canceled": "failed",
+                    "paused": "pending",
+                }.get(task_status, "pending")
+                await session.execute(
+                    update(RenderFrameModel)
+                    .where(
+                        RenderFrameModel.render_job_id == render_job_id,
+                        RenderFrameModel.frame_number.in_(frames),
+                        RenderFrameModel.status != "completed",
+                    )
+                    .values(
+                        status=frame_status,
+                        error=("Flamenco task failed" if frame_status == "failed" else ""),
+                    )
+                )
+            current.scheduler_state = {
+                **(current.scheduler_state or {}),
+                "flamenco_status": status,
+                "activity": str(job.get("activity") or ""),
+                "steps_completed": int(job.get("steps_completed") or 0),
+                "steps_total": int(job.get("steps_total") or 0),
+                "task_counts": task_counts,
+                "monitor_sequence": sequence,
+            }
+            if status == "paused":
+                current.status = "paused"
+            elif status == "pause-requested":
+                current.status = "pausing"
+            elif status == "completed":
+                current.status = "validating"
+                current.stage = "render.validate"
+            elif status == "failed":
+                current.status = "needs_frame_retry"
+                current.error = "Flamenco stopped after repeated task failures; completed outputs were retained"
+            elif status in {"canceled", "cancel-requested"}:
+                current.status = "cancelled" if status == "canceled" else "cancelling"
+                if status == "canceled":
+                    current.finished_at = utcnow()
+            else:
+                current.status = "rendering"
+                current.stage = "render.flamenco"
+            current.version += 1
+            await session.commit()
+
+        if status == "completed":
+            await self.jobs.enqueue(
+                workflow_id="blender_manager",
+                job_type="blender.render_stage",
+                payload={"render_job_id": render_job_id, "stage": "render.validate", "frames": []},
+                idempotency_key=f"render:{render_job_id}:render.validate:flamenco",
+                priority=20,
+                max_attempts=3,
+            )
+        elif status not in {"failed", "canceled", "paused"}:
+            next_sequence = sequence + 1
+            await self.jobs.enqueue(
+                workflow_id="blender_manager",
+                job_type="blender.flamenco_monitor",
+                payload={"render_job_id": render_job_id, "sequence": next_sequence},
+                idempotency_key=f"render:{render_job_id}:flamenco.monitor:{next_sequence}",
+                priority=20,
+                max_attempts=5,
+                available_at=utcnow() + timedelta(seconds=15),
+            )
+        return {
+            "render_job_id": render_job_id,
+            "flamenco_job_id": row.scheduler_job_id,
+            "status": status,
+            "task_counts": task_counts,
+        }
 
     async def _run_blender_template_job(
         self,

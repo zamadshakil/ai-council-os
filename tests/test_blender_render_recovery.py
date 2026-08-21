@@ -110,6 +110,7 @@ async def test_runtime_update_preserves_workspace_and_uses_immutable_image(monke
         "pod-safe-123",
         image_name=image,
         agent_token="a" * 48,
+        flamenco_proxy_token="c" * 48,
         kasm_password="b" * 20,
     )
     payload = captured["payload"]
@@ -125,12 +126,14 @@ async def test_runtime_update_preserves_workspace_and_uses_immutable_image(monke
     assert payload["env"]["NVIDIA_DRIVER_CAPABILITIES"] == (
         "compute,utility,graphics,display,video"
     )
+    assert payload["env"]["FLAMENCO_WORKER_PROXY_TOKEN"] == "c" * 48
     assert "-sslOnly 0" in payload["env"]["VNCOPTIONS"]
     with pytest.raises(ValueError, match="immutable"):
         await runpod.update_pod_runtime(
             "pod-safe-123",
             image_name="ghcr.io/astrofood/ai-council-blender:latest",
             agent_token="a" * 48,
+            flamenco_proxy_token="c" * 48,
             kasm_password="b" * 20,
         )
 
@@ -262,6 +265,7 @@ async def test_a6000_provisioning_is_exactly_one_secure_on_demand_gpu(monkeypatc
         template_id="template-safe-1",
         image_name=image,
         agent_token="a" * 48,
+        flamenco_proxy_token="c" * 48,
         kasm_password="b" * 20,
         idempotency_key="provision-test-123",
     )
@@ -276,6 +280,7 @@ async def test_a6000_provisioning_is_exactly_one_secure_on_demand_gpu(monkeypatc
     assert request["minRAMPerGPU"] == 64
     assert request["volumeInGb"] == 250
     assert request["volumeMountPath"] == "/workspace"
+    assert request["env"]["FLAMENCO_WORKER_PROXY_TOKEN"] == "c" * 48
     assert "-sslOnly 0" in request["env"]["VNCOPTIONS"]
     assert pod["gpu_count"] == 1
 

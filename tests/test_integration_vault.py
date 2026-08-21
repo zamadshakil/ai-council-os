@@ -101,6 +101,8 @@ async def test_legacy_verified_runpod_connection_backfills_internal_runtime_cred
 
     assert values["RUNPOD_API_KEY"] == "legacy-runpod-api-key"
     assert len(values["BLENDER_AGENT_TOKEN"]) >= 32
+    assert len(values["FLAMENCO_WORKER_PROXY_TOKEN"]) >= 32
+    assert values["FLAMENCO_WORKER_PROXY_TOKEN"] != values["BLENDER_AGENT_TOKEN"]
     assert len(values["VNC_PW"]) >= 16
     assert values["BLENDER_AGENT_PORT"] == "8001"
     assert values["BLENDER_WORKSPACE_ROOT"] == "/workspace"
@@ -109,7 +111,8 @@ async def test_legacy_verified_runpod_connection_backfills_internal_runtime_cred
         assert stored is not None
         assert stored.status == "verified"
         assert sorted(stored.credential_fields) == [
-            "agent_port", "agent_token", "api_key", "kasm_password", "workspace_root"
+            "agent_port", "agent_token", "api_key", "flamenco_proxy_token",
+            "kasm_password", "workspace_root"
         ]
 
 

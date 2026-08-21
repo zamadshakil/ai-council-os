@@ -20,8 +20,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+import httpx
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+try:
+    from . import flamenco_control
+except ImportError:  # Flat /opt/council layout inside the RunPod image.
+    import flamenco_control
 
 
 JOB_ID = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
@@ -67,7 +73,7 @@ class RenderStageRequest(StrictModel):
     render_job_id: str = Field(min_length=8, max_length=128)
     operation: Literal[
         "preflight", "benchmark", "observe_gui", "frame_batch",
-        "validate", "encode", "deliver",
+        "prepare_flamenco", "validate", "encode", "deliver",
     ]
     source_path: str = Field(min_length=7, max_length=1000)
     output_profile: Literal["delivery", "compositing"] = "delivery"
@@ -205,6 +211,14 @@ async def _authorize(authorization: str = Header(default="")) -> None:
     supplied = authorization.removeprefix("Bearer ").strip()
     if len(expected) < 32 or not supplied or not hmac.compare_digest(expected, supplied):
         raise HTTPException(status_code=401, detail="Blender agent authentication failed")
+
+
+async def _authorize_worker_proxy(authorization: str = Header(default="")) -> None:
+    """Authenticate a remote Worker without granting pod-agent privileges."""
+    expected = os.getenv("FLAMENCO_WORKER_PROXY_TOKEN", "").strip()
+    supplied = authorization.removeprefix("Bearer ").strip()
+    if len(expected) < 32 or not supplied or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=401, detail="Flamenco Worker proxy authentication failed")
 
 
 def _command_output(command: list[str], timeout: int = 20) -> tuple[int, str]:
@@ -469,7 +483,7 @@ async def _run_blender_pass(
     job_dir: Path,
     *,
     pass_name: str,
-    operation: Literal["preflight", "benchmark", "frame_batch"],
+    operation: Literal["preflight", "benchmark", "frame_batch", "prepare_flamenco"],
     frames: list[int],
     backend: Literal["AUTO", "OPTIX", "CUDA"],
     persistent_data: bool,
@@ -961,7 +975,7 @@ async def _execute_operation(request: RenderStageRequest, source: Path, render_r
     state.update({"status": "running", "stage": request.operation, "error": ""})
     _write_state(request.job_id, state)
     try:
-        if request.operation in {"preflight", "benchmark", "frame_batch"}:
+        if request.operation in {"preflight", "benchmark", "frame_batch", "prepare_flamenco"}:
             report = await _run_blender(request, source, render_root, job_dir)
         elif request.operation == "observe_gui":
             report = await _observe_gui(request, source, render_root, job_dir)
@@ -1025,6 +1039,117 @@ async def health() -> dict[str, Any]:
 async def runtime() -> dict[str, Any]:
     """Return instantaneous pod-local GPU evidence without exposing commands."""
     return await asyncio.to_thread(_runtime_snapshot)
+
+
+def _flamenco_error(exc: Exception) -> HTTPException:
+    status = 422 if isinstance(exc, ValueError) else 503
+    return HTTPException(status_code=status, detail=str(exc)[:500])
+
+
+@app.get("/v1/flamenco/status", dependencies=[Depends(_authorize)])
+async def flamenco_status() -> dict[str, Any]:
+    """Report real Manager/Worker state without exposing Flamenco directly."""
+    return await flamenco_control.status()
+
+
+@app.post("/v1/flamenco/processes/start", dependencies=[Depends(_authorize)])
+async def start_flamenco_process(
+    request: flamenco_control.FlamencoStartRequest,
+) -> dict[str, Any]:
+    try:
+        if request.role == "coordinator":
+            manager = await asyncio.to_thread(flamenco_control.start_manager)
+            worker = await asyncio.to_thread(flamenco_control.start_worker)
+            return {"manager": manager, "worker": worker, "status": await flamenco_control.status()}
+        worker = await asyncio.to_thread(flamenco_control.start_worker)
+        return {"worker": worker, "status": await flamenco_control.status()}
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise _flamenco_error(exc) from exc
+
+
+@app.post("/v1/flamenco/processes/{role}/stop", dependencies=[Depends(_authorize)])
+async def stop_flamenco_process(role: str) -> dict[str, Any]:
+    if role not in {"manager", "worker"}:
+        raise HTTPException(status_code=422, detail="Unsupported Flamenco process role")
+    try:
+        result = await asyncio.to_thread(flamenco_control.stop_role, role)
+        return {"process": result, "status": await flamenco_control.status()}
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise _flamenco_error(exc) from exc
+
+
+@app.get("/v1/flamenco/logs/{role}", dependencies=[Depends(_authorize)])
+async def get_flamenco_logs(role: str) -> dict[str, Any]:
+    if role not in {"manager", "worker"}:
+        raise HTTPException(status_code=422, detail="Unsupported Flamenco process role")
+    return {"role": role, "lines": await asyncio.to_thread(flamenco_control.log_tail, role)}
+
+
+@app.post("/v1/flamenco/jobs", dependencies=[Depends(_authorize)])
+async def create_flamenco_job(
+    request: flamenco_control.FlamencoJobRequest,
+) -> dict[str, Any]:
+    try:
+        return await flamenco_control.submit_job(request)
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise _flamenco_error(exc) from exc
+
+
+@app.get("/v1/flamenco/jobs/{job_id}", dependencies=[Depends(_authorize)])
+async def get_flamenco_job(job_id: str) -> dict[str, Any]:
+    try:
+        return await flamenco_control.get_job(job_id)
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise _flamenco_error(exc) from exc
+
+
+@app.post("/v1/flamenco/jobs/{job_id}/actions", dependencies=[Depends(_authorize)])
+async def act_on_flamenco_job(
+    job_id: str,
+    request: flamenco_control.FlamencoJobAction,
+) -> dict[str, Any]:
+    try:
+        return await flamenco_control.act_on_job(job_id, request)
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise _flamenco_error(exc) from exc
+
+
+def _worker_proxy_allowed(path: str) -> bool:
+    normalized = f"/{path.lstrip('/')}"
+    return normalized == "/api/v3/version" or normalized.startswith("/api/v3/worker/")
+
+
+@app.api_route(
+    "/v1/flamenco/worker-proxy/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    dependencies=[Depends(_authorize_worker_proxy)],
+)
+async def flamenco_worker_proxy(path: str, request: Request) -> Response:
+    """Forward only Flamenco Worker protocol calls to the local Manager."""
+    target_path = f"/{path.lstrip('/')}"
+    if not _worker_proxy_allowed(target_path) or ".." in target_path:
+        raise HTTPException(status_code=403, detail="Only the Flamenco Worker protocol is allowed")
+    body = await request.body()
+    headers: dict[str, str] = {}
+    content_type = request.headers.get("content-type")
+    if content_type:
+        headers["Content-Type"] = content_type
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=120)) as client:
+            upstream = await client.request(
+                request.method,
+                f"http://127.0.0.1:8080{target_path}",
+                params=request.query_params,
+                headers=headers,
+                content=body,
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="Flamenco Manager is unavailable") from exc
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type"),
+    )
 
 
 @app.post("/v1/jobs", dependencies=[Depends(_authorize)])

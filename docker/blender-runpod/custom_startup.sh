@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-mkdir -p /workspace/logs /workspace/render_jobs /workspace/.council-blender/samples
+mkdir -p /workspace/logs /workspace/render_jobs /workspace/.council-blender/samples \
+    /workspace/.council-flamenco
 sample_target=/workspace/.council-blender/samples/Blender-282.blend
 if [[ ! -s "$sample_target" ]]; then
     cp /opt/council/samples/Blender-282.blend "$sample_target"
@@ -17,6 +18,29 @@ if [[ ${#agent_token} -lt 32 ]]; then
     # desktop and KasmVNC server can continue starting even when the optional
     # Council OS agent is not configured.
 else
+    coordinator_url="${FLAMENCO_COORDINATOR_AGENT_URL:-}"
+    if [[ -n "$coordinator_url" ]]; then
+        coordinator_token="${FLAMENCO_COORDINATOR_AGENT_TOKEN:-}"
+        if [[ ${#coordinator_token} -lt 32 ]]; then
+            echo "FLAMENCO_COORDINATOR_AGENT_TOKEN is missing or too short; remote Worker gateway disabled." \
+                >> /workspace/logs/startup.log
+        else
+            # Remote Flamenco Workers cannot add Council OS authentication to
+            # their requests. This loopback-only gateway adds the coordinator's
+            # distinct token; port 8181 is not exposed.
+            nohup bash -c '
+                exec 9>/workspace/.council-flamenco/gateway.lock
+                flock -n 9 || exit 0
+                while true; do
+                    /opt/council-agent/bin/python /opt/council/flamenco_gateway.py \
+                        >> /workspace/logs/flamenco-gateway.log 2>&1
+                    sleep 5
+                done
+            ' </dev/null >> /workspace/logs/flamenco-gateway-supervisor.log 2>&1 &
+            echo "$!" > /workspace/.council-flamenco/gateway-supervisor.pid
+        fi
+    fi
+
     # The custom startup hook is on Kasm's critical path. Run the restart loop
     # in the background and return immediately; keeping it in the foreground
     # prevents KasmVNC from ever binding port 6901. flock ensures a repeated

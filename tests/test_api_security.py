@@ -348,7 +348,10 @@ async def test_existing_pod_update_requires_inventory_and_exact_smoke_sha(
     async def fake_pods():
         return [{"id": "pod-safe-123", "desired_status": "EXITED"}]
 
-    async def fake_update(pod_id, *, image_name, agent_token, kasm_password):
+    async def fake_update(
+        pod_id, *, image_name, agent_token, flamenco_proxy_token, kasm_password
+    ):
+        assert flamenco_proxy_token != agent_token
         return {
             "id": pod_id,
             "desired_status": "EXITED",
@@ -469,6 +472,8 @@ async def test_blender_template_job_is_durable_and_never_serializes_agent_token(
     )
     agent_token = generated["BLENDER_AGENT_TOKEN"]
     assert len(agent_token) >= 32
+    assert len(generated["FLAMENCO_WORKER_PROXY_TOKEN"]) >= 32
+    assert generated["FLAMENCO_WORKER_PROXY_TOKEN"] != agent_token
     assert len(generated["VNC_PW"]) >= 16
     assert generated["BLENDER_AGENT_PORT"] == "8001"
     assert generated["BLENDER_WORKSPACE_ROOT"] == "/workspace"
@@ -627,6 +632,98 @@ async def test_production_render_creation_is_atomic_idempotent_and_versioned(
         ).scalars().all()
     assert len(batches) == 1
     assert batches[0].payload["frames"] == list(range(1, 11))
+
+
+@pytest.mark.asyncio
+async def test_flamenco_render_is_headless_only_and_approval_queues_prepared_copy(
+    api_client, monkeypatch
+):
+    csrf_token = await _login(api_client)
+    saved = await api_client.put(
+        "/api/integrations/runpod/credentials",
+        json={"credentials": {"api_key": "rotated-runpod-production-key"}},
+        headers={"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token},
+    )
+    assert saved.status_code == 200, saved.text
+    await integration_vault.mark_verification("runpod", True)
+
+    async def fake_pods():
+        return [{
+            "id": "pod-safe-123",
+            "name": "One A6000",
+            "desired_status": "EXITED",
+            "gpu_count": 1,
+            "cost_per_hour": 0.53,
+        }]
+
+    monkeypatch.setattr("src.integrations.runpod.list_pods", fake_pods)
+    body = {
+        "pod_id": "pod-safe-123",
+        "source_path": "/workspace/project/scene.blend",
+        "render_mode": "headless",
+        "scheduler": "flamenco",
+        "output_profile": "delivery",
+        "frame_start": None,
+        "frame_end": None,
+        "frame_step": 1,
+        "samples": 0,
+        "resolution_percent": 100,
+        "require_drive": False,
+        "drive_path": "Council OS Renders",
+        "auto_stop": True,
+        "idempotency_key": "flamenco-render-create-001",
+    }
+    headers = {"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token}
+
+    incompatible = await api_client.post(
+        "/api/blender/render-jobs",
+        json={**body, "render_mode": "kasm_gui", "idempotency_key": "flamenco-gui-reject-001"},
+        headers=headers,
+    )
+    assert incompatible.status_code == 422
+    assert incompatible.json()["error"]["code"] == "FLAMENCO_HEADLESS_ONLY"
+
+    created = await api_client.post("/api/blender/render-jobs", json=body, headers=headers)
+    assert created.status_code == 200, created.text
+    resource = created.json()["resource"]
+    assert resource["scheduler"] == "flamenco"
+    assert resource["coordinator_pod_id"] == "pod-safe-123"
+
+    async with server.async_session() as session:
+        persisted = await session.get(RenderJobModel, resource["id"], with_for_update=True)
+        assert persisted is not None
+        persisted.status = "awaiting_benchmark_approval"
+        persisted.stage = "render.benchmark"
+        persisted.frame_start = 1
+        persisted.frame_end = 4000
+        persisted.benchmark = {"recommended_batch_size": 1}
+        persisted.version += 1
+        await session.commit()
+        approval_version = persisted.version
+
+    approved = await api_client.post(
+        f"/api/blender/render-jobs/{resource['id']}/actions",
+        json={
+            "action": "approve_benchmark",
+            "expected_version": approval_version,
+            "idempotency_key": "flamenco-render-approve-001",
+        },
+        headers=headers,
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["resource"]["status"] == "preparing_flamenco"
+    assert approved.json()["resource"]["stage"] == "render.prepare_flamenco"
+    async with server.async_session() as session:
+        prepared = (
+            await session.execute(
+                server.select(WorkflowRunModel).where(
+                    WorkflowRunModel.job_type == "blender.render_stage",
+                    WorkflowRunModel.payload["render_job_id"].as_string() == resource["id"],
+                    WorkflowRunModel.payload["stage"].as_string() == "render.prepare_flamenco",
+                )
+            )
+        ).scalars().all()
+    assert len(prepared) == 1
 
 
 def test_meta_webhook_parser_extracts_only_supported_comment_fields():

@@ -403,6 +403,11 @@ export interface BlenderArtifact {
 export interface BlenderRenderJob {
   id: string;
   pod_id: string;
+  scheduler: 'native' | 'flamenco';
+  scheduler_job_id: string;
+  coordinator_pod_id: string;
+  worker_pod_ids: string[];
+  scheduler_state: JsonObject;
   source_path: string;
   source_checksum: string;
   status: string;

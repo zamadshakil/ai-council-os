@@ -19,7 +19,8 @@ import {
 
 const ACTIVE = new Set([
   'queued', 'running', 'benchmarking', 'rendering', 'validating', 'encoding',
-  'delivering', 'retrying', 'awaiting_kasm_render',
+  'delivering', 'retrying', 'awaiting_kasm_render', 'preparing_flamenco',
+  'queueing_flamenco', 'pausing', 'cancelling',
 ]);
 
 function human(value: string): string {
@@ -120,6 +121,7 @@ export default function BlenderManagerPage() {
   const [podId, setPodId] = useState('');
   const [sourcePath, setSourcePath] = useState('/workspace/template.blend');
   const [renderMode, setRenderMode] = useState<'headless' | 'kasm_gui'>('headless');
+  const [scheduler, setScheduler] = useState<'flamenco' | 'native'>('flamenco');
   const [profile, setProfile] = useState<'delivery' | 'compositing'>('delivery');
   const [drivePath, setDrivePath] = useState('Council OS Renders');
   const [requireDrive, setRequireDrive] = useState(true);
@@ -179,7 +181,8 @@ export default function BlenderManagerPage() {
     setBusy('create'); setError(''); setNotice('');
     try {
       const response = await createBlenderRenderJob({
-        pod_id: podId, source_path: sourcePath, render_mode: renderMode, output_profile: profile,
+        pod_id: podId, source_path: sourcePath, render_mode: renderMode,
+        scheduler: renderMode === 'headless' ? scheduler : 'native', output_profile: profile,
         frame_start: null, frame_end: null, frame_step: 1, samples: 0, resolution_percent: 100,
         require_drive: requireDrive, drive_path: drivePath, auto_stop: autoStop,
         idempotency_key: `render-${crypto.randomUUID()}`,
@@ -201,7 +204,9 @@ export default function BlenderManagerPage() {
       setNotice(action === 'approve_benchmark'
         ? selected.render_mode === 'kasm_gui'
           ? 'Kasm render is armed. Open Blender and choose Render → Render Animation.'
-          : 'Approved. Durable headless frame batches are now queued on the one-GPU baseline.'
+          : selected.scheduler === 'flamenco'
+            ? 'Approved. Flamenco is preparing the isolated scene and will schedule restartable frame tasks.'
+            : 'Approved. Durable headless frame batches are now queued on the one-GPU baseline.'
         : `${human(action)} accepted.`);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Render action failed.'); }
     finally { setBusy(''); }
@@ -256,6 +261,8 @@ export default function BlenderManagerPage() {
   const benchmark = record(selected?.benchmark);
   const evidence = record(benchmark.gpu_evidence);
   const soak = record(benchmark.soak);
+  const schedulerState = record(selected?.scheduler_state);
+  const schedulerTaskCounts = record(schedulerState.task_counts);
   const missingAssets = Array.isArray(preflight.missing_assets) ? preflight.missing_assets : [];
   const avgFrameSeconds = number(benchmark.average_frame_seconds);
   const estimatedHours = selected && avgFrameSeconds ? avgFrameSeconds * selected.expected_frame_count / 3600 : 0;
@@ -291,6 +298,10 @@ export default function BlenderManagerPage() {
             { value: 'headless' as const, title: 'Automated safe run', detail: 'Recommended · durable batches, retries, and no desktop dependency' },
             { value: 'kasm_gui' as const, title: 'Render from Kasm', detail: 'Manual · click Render Animation in the Blender desktop' },
           ]).map((choice) => <button key={choice.value} type="button" aria-pressed={renderMode === choice.value} onClick={() => setRenderMode(choice.value)} className={`rounded-xl border p-4 text-left transition ${renderMode === choice.value ? 'border-cyan-300/55 bg-cyan-300/12 text-white ring-2 ring-cyan-300/20' : 'border-white/12 bg-white/[0.035] text-slate-300'}`}><strong className="block">{choice.title}</strong><span className="mt-1 block text-xs text-slate-400">{choice.detail}</span></button>)}</div></fieldset>
+          {renderMode === 'headless' && <fieldset className="space-y-2 lg:col-span-2"><legend className="field-label">Frame scheduler</legend><div className="grid gap-2 sm:grid-cols-2">{([
+            { value: 'flamenco' as const, title: 'Flamenco managed', detail: 'Recommended · visible tasks, pause/resume, retained frames, and worker-safe retries' },
+            { value: 'native' as const, title: 'Council OS fallback', detail: 'Single-machine batches without a separate farm scheduler' },
+          ]).map((choice) => <button key={choice.value} type="button" aria-pressed={scheduler === choice.value} onClick={() => setScheduler(choice.value)} className={`rounded-xl border p-4 text-left transition ${scheduler === choice.value ? 'border-emerald-300/55 bg-emerald-300/10 text-white ring-2 ring-emerald-300/15' : 'border-white/12 bg-white/[0.035] text-slate-300'}`}><strong className="block">{choice.title}</strong><span className="mt-1 block text-xs leading-5 text-slate-400">{choice.detail}</span></button>)}</div><p className="field-helper">The first safe run stays on one A6000. Multi-worker scaling remains locked until the measured 50-frame soak passes.</p></fieldset>}
           <fieldset className="space-y-2"><legend className="field-label">Output workflow</legend><div className="grid grid-cols-2 gap-2">{(['delivery', 'compositing'] as const).map((value) => <button key={value} type="button" aria-pressed={profile === value} onClick={() => setProfile(value)} className={`rounded-xl border p-3 text-left text-sm transition ${profile === value ? 'border-cyan-300/55 bg-cyan-300/12 text-white ring-2 ring-cyan-300/20' : 'border-white/12 bg-white/[0.035] text-slate-300'}`}><strong className="block">{value === 'delivery' ? '4K delivery' : 'Compositing'}</strong><span className="mt-1 block text-xs text-slate-400">{value === 'delivery' ? '16-bit PNG + MP4' : 'Half-float EXR frames'}</span></button>)}</div></fieldset>
           <label className="space-y-2"><span className="field-label">Google Drive destination</span><input disabled={!requireDrive} value={drivePath} onChange={(event) => setDrivePath(event.target.value)} className="input-shell h-12 rounded-xl px-4 disabled:opacity-45" /><span className="field-helper">Drive is used only after local rendering finishes.</span></label>
           <label className="flex min-h-20 items-start gap-3 rounded-xl border border-white/12 bg-white/[0.035] p-4"><input type="checkbox" checked={requireDrive} onChange={(event) => setRequireDrive(event.target.checked)} className="mt-1 h-5 w-5 accent-cyan-300" /><span><strong className="block text-sm text-white">Require delivery capacity</strong><span className="field-helper mt-1">Block the full render if Drive quota or the write probe fails.</span></span></label>
@@ -353,12 +364,13 @@ export default function BlenderManagerPage() {
       <div className="surface-card rounded-[28px] p-6 lg:p-8">
         {!selected ? <div className="grid min-h-80 place-items-center text-center"><div><FolderOpen className="mx-auto h-10 w-10 text-slate-600" /><p className="mt-3 text-slate-400">Create or select a render to inspect it.</p></div></div> : <div className="space-y-7">
           <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
-            <div><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full border px-3 py-1 text-xs font-black ${statusTone(selected.status)}`}>{human(selected.status)}</span><span className="rounded-full border border-white/10 px-3 py-1 text-xs font-bold text-slate-300">{selected.render_mode === 'kasm_gui' ? 'Kasm Blender' : 'Automated headless'}</span></div><h2 className="mt-3 break-all text-2xl font-black text-white">{selected.source_path}</h2><p className="mt-2 text-sm text-slate-400">Stage: {human(selected.stage)}</p></div>
+            <div><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full border px-3 py-1 text-xs font-black ${statusTone(selected.status)}`}>{human(selected.status)}</span><span className="rounded-full border border-white/10 px-3 py-1 text-xs font-bold text-slate-300">{selected.render_mode === 'kasm_gui' ? 'Kasm Blender' : 'Automated headless'}</span><span className="rounded-full border border-emerald-300/20 bg-emerald-300/8 px-3 py-1 text-xs font-bold text-emerald-100">{selected.scheduler === 'flamenco' ? 'Flamenco 3.9.3' : 'Native scheduler'}</span></div><h2 className="mt-3 break-all text-2xl font-black text-white">{selected.source_path}</h2><p className="mt-2 text-sm text-slate-400">Stage: {human(selected.stage)}</p></div>
             <div className="flex flex-wrap gap-2">{selectedPod?.proxy_url && <a href={selectedPod.proxy_url} target="_blank" rel="noreferrer" className="inline-flex h-10 items-center gap-2 rounded-xl border border-cyan-300/25 px-3 text-xs font-bold text-cyan-100"><ExternalLink className="h-4 w-4" />Open Kasm Blender</a>}{selected.status === 'awaiting_benchmark_approval' && <button onClick={() => void renderAction('approve_benchmark')} disabled={!!busy} className="inline-flex h-10 items-center gap-2 rounded-xl bg-emerald-300 px-3 text-xs font-black text-[#04140d]"><MonitorPlay className="h-4 w-4" />{selected.render_mode === 'kasm_gui' ? 'Approve & arm Kasm' : 'Approve safe render'}</button>}{ACTIVE.has(selected.status) && <button onClick={() => void renderAction('pause')} disabled={!!busy} className="inline-flex h-10 items-center gap-2 rounded-xl bg-amber-300 px-3 text-xs font-black text-[#181004]"><Pause className="h-4 w-4" />Pause</button>}{selected.status === 'paused' && <button onClick={() => void renderAction('resume')} disabled={!!busy} className="inline-flex h-10 items-center gap-2 rounded-xl bg-cyan-300 px-3 text-xs font-black text-[#04111b]"><Play className="h-4 w-4" />Resume</button>}{selected.status === 'needs_frame_retry' && <button onClick={() => void renderAction('retry_failed_frames')} disabled={!!busy} className="inline-flex h-10 items-center gap-2 rounded-xl bg-cyan-300 px-3 text-xs font-black text-[#04111b]"><RotateCcw className="h-4 w-4" />Retry missing frames</button>}{selected.stage === 'render.deliver' && selected.status !== 'completed' && <button onClick={() => void renderAction('retry_delivery')} disabled={!!busy} className="inline-flex h-10 items-center gap-2 rounded-xl bg-cyan-300 px-3 text-xs font-black text-[#04111b]"><CloudUpload className="h-4 w-4" />Retry delivery</button>}{!['completed', 'cancelled'].includes(selected.status) && <button onClick={() => void renderAction('cancel')} disabled={!!busy} className="inline-flex h-10 items-center gap-2 rounded-xl border border-rose-300/25 px-3 text-xs font-bold text-rose-100"><XCircle className="h-4 w-4" />Cancel</button>}</div>
           </div>
 
           {selected.error && <div role="alert" className="rounded-2xl border border-rose-300/25 bg-rose-300/8 p-4 text-sm text-rose-100"><strong>Blocked:</strong> {selected.error}</div>}
           {selected.status === 'awaiting_kasm_render' && <div className="rounded-2xl border border-amber-300/25 bg-amber-300/8 p-5"><p className="font-bold text-amber-100">Waiting for the artist in Kasm</p><ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-amber-50/85"><li>Open Kasm Blender using the button above.</li><li>Open this exact scene.</li><li>Choose Render → Render Animation. Council OS applies the approved GPU/image-sequence settings in memory.</li></ol></div>}
+          {selected.scheduler === 'flamenco' && <div className="rounded-2xl border border-emerald-300/20 bg-emerald-300/[0.055] p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-bold text-emerald-100">Flamenco execution</p><p className="mt-1 text-sm text-slate-300">Manager remains private inside the coordinator pod. Council OS reconciles its tasks into the frame map below.</p></div><span className="rounded-full border border-emerald-300/20 px-3 py-1 text-xs font-bold text-emerald-100">{human(text(schedulerState.flamenco_status) || 'not started')}</span></div><dl className="mt-4 grid grid-cols-2 gap-3 text-xs sm:grid-cols-4"><div><dt className="text-slate-500">Scheduler job</dt><dd className="mt-1 truncate font-mono text-slate-200" title={selected.scheduler_job_id}>{selected.scheduler_job_id ? selected.scheduler_job_id.slice(0, 8) : 'Pending'}</dd></div><div><dt className="text-slate-500">Workers</dt><dd className="mt-1 font-bold text-white">{selected.worker_pod_ids.length || 1} configured</dd></div><div><dt className="text-slate-500">Completed tasks</dt><dd className="mt-1 font-bold text-white">{number(schedulerTaskCounts.completed)}</dd></div><div><dt className="text-slate-500">Failed tasks</dt><dd className="mt-1 font-bold text-white">{number(schedulerTaskCounts.failed) + number(schedulerTaskCounts['soft-failed'])}</dd></div></dl></div>}
 
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Scene</p><p className="mt-2 font-bold text-white">{number(scene.resolution_x) ? `${number(scene.resolution_x)}×${number(scene.resolution_y)}` : 'Awaiting preflight'}</p><p className="mt-1 text-xs text-slate-400">{number(scene.fps) ? `${number(scene.fps).toFixed(2)} fps` : 'Frame rate unavailable'}</p></div><div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Frame range</p><p className="mt-2 font-bold text-white">{selected.frame_start ?? '—'}–{selected.frame_end ?? '—'}</p><p className="mt-1 text-xs text-slate-400">{selected.expected_frame_count || 0} expected</p></div><div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Estimate</p><p className="mt-2 font-bold text-white">{estimatedHours ? `${estimatedHours.toFixed(1)} GPU hr` : 'Awaiting benchmark'}</p><p className="mt-1 text-xs text-slate-400">{estimatedCost ? `≈ $${estimatedCost.toFixed(2)} at current rate` : 'No cost promise before samples'}</p></div><div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Storage projection</p><p className="mt-2 font-bold text-white">{bytes(number(benchmark.projected_output_bytes_with_margin))}</p><p className="mt-1 text-xs text-slate-400">Local safe free: {bytes(number(storage.safety_free_bytes))}</p></div></div>
 

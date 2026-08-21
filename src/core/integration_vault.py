@@ -89,6 +89,7 @@ PROVIDERS: dict[str, ProviderSpec] = {
     "runpod": ProviderSpec("runpod", "RunPod", "Cloud GPU control and authenticated Blender template jobs.", (
         CredentialField("api_key", "API key", "RUNPOD_API_KEY"),
         CredentialField("agent_token", "Blender agent token", "BLENDER_AGENT_TOKEN", required=False, internal=True),
+        CredentialField("flamenco_proxy_token", "Flamenco Worker proxy token", "FLAMENCO_WORKER_PROXY_TOKEN", required=False, internal=True),
         CredentialField("kasm_password", "Kasm password", "VNC_PW", required=False, internal=True),
         CredentialField("agent_port", "Blender agent proxy port", "BLENDER_AGENT_PORT", required=False, secret=False, internal=True),
         CredentialField("workspace_root", "Pod workspace root", "BLENDER_WORKSPACE_ROOT", required=False, secret=False, internal=True),
@@ -276,6 +277,7 @@ async def put_credentials(
             previous = _decrypt(row.encrypted_credentials) if row is not None else {}
             normalized.update({
                 "agent_token": previous.get("agent_token") or secrets.token_urlsafe(48),
+                "flamenco_proxy_token": previous.get("flamenco_proxy_token") or secrets.token_urlsafe(48),
                 "kasm_password": previous.get("kasm_password") or secrets.token_urlsafe(18),
                 "agent_port": previous.get("agent_port") or "8001",
                 "workspace_root": previous.get("workspace_root") or "/workspace",
@@ -428,6 +430,8 @@ async def decrypted_provider_env(provider: str, *, require_verified: bool = True
             repaired = dict(values)
             if len(repaired.get("agent_token", "")) < 32:
                 repaired["agent_token"] = secrets.token_urlsafe(48)
+            if len(repaired.get("flamenco_proxy_token", "")) < 32:
+                repaired["flamenco_proxy_token"] = secrets.token_urlsafe(48)
             if len(repaired.get("kasm_password", "")) < 16:
                 repaired["kasm_password"] = secrets.token_urlsafe(18)
             repaired.setdefault("agent_port", "8001")
