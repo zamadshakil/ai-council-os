@@ -825,7 +825,17 @@ async def health_check():
 async def readiness_check():
     db_ok = await database_ready()
     try:
-        models = await validate_approved_models()
+        # Production credentials live in the encrypted integration vault, not
+        # necessarily in process environment variables. Readiness must test
+        # the same verified credential source used by durable council jobs.
+        try:
+            model_configuration = await integration_vault.decrypted_provider_env(
+                "openrouter"
+            )
+        except integration_vault.VaultConfigurationError:
+            model_configuration = {}
+        with use_integration_configuration(model_configuration):
+            models = await validate_approved_models()
     except Exception as exc:
         models = {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
     ready = db_ok and bool(models.get("ready"))
