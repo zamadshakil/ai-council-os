@@ -133,7 +133,13 @@ class DurableTaskRepository:
                     f"Duplicate external item {(task.source, task.external_id)!r}"
                 )
 
+            # PostgreSQL enforces the ExternalItem -> Task foreign key
+            # immediately.  Persist the parent row before either attaching a
+            # reserved external item or inserting a new one.  The work remains
+            # in the same transaction, so a later dedupe/approval failure
+            # still rolls the task back atomically.
             session.add(row)
+            await session.flush()
             if item:
                 item.task_id = task.task_id
                 item.metadata_json = {**(item.metadata_json or {}), "workflow": task.workflow}

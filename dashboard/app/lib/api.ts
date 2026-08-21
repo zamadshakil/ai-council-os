@@ -119,7 +119,10 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
       csrfToken = '';
       if (typeof window !== 'undefined') window.dispatchEvent(new Event('council:unauthorized'));
     }
-    const parsed = readError(payload, response.statusText || 'Request failed.');
+    const fallback = response.status >= 500
+      ? 'The server could not process this request. Please retry; if it happens again, check the system activity log.'
+      : response.statusText || 'Request failed.';
+    const parsed = readError(payload, fallback);
     throw new ApiError(parsed.message, response.status, parsed.code);
   }
   return payload as T;

@@ -1015,7 +1015,13 @@ async def create_council_run(
             status="awaiting_approval",
             version=1,
         )
-        session.add_all([task, run, approval])
+        # SQLAlchemy cannot infer flush ordering from bare foreign-key values
+        # when no ORM relationship is present.  PostgreSQL enforces the
+        # council_runs.task_id foreign key immediately, so persist the parent
+        # task before inserting the run and approval rows.
+        session.add(task)
+        await session.flush()
+        session.add_all([run, approval])
         await session.flush()
         context["run_id"] = run.id
         context["priority"] = payload.priority
@@ -5032,7 +5038,9 @@ async def streamable_http_mcp(request: Request):
                             },
                             idempotency_key=f"mcp:council:{proposal_digest}",
                         )
-                        session.add_all([task, run, approval, job])
+                        session.add(task)
+                        await session.flush()
+                        session.add_all([run, approval, job])
                         await session.commit()
                     else:
                         job = (

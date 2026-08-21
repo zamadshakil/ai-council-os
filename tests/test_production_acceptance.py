@@ -93,7 +93,9 @@ async def test_retry_creates_one_fresh_run_and_job_on_same_task(
             status="awaiting_approval",
             version=1,
         )
-        session.add_all([task, original_run, approval])
+        session.add(task)
+        await session.flush()
+        session.add_all([original_run, approval])
         await session.commit()
 
     result = await approvals.act(
