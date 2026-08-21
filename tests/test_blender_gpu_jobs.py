@@ -7,6 +7,7 @@ from src.core.models import WorkflowRunModel
 from src.integrations import runpod
 from src.scripts.blender_listener import (
     TemplateJobRequest,
+    _gpu_evidence,
     _nvml_running_pids,
     _within_workspace,
 )
@@ -79,6 +80,171 @@ def test_nvml_process_evidence_survives_one_unsupported_context_class():
             return [Process()]
 
     assert _nvml_running_pids(FakeNvml, object()) == [404]
+
+
+def _completed_optix_report() -> dict:
+    return {
+        "status": "completed",
+        "source_unchanged": True,
+        "cycles_backend_selected": "OPTIX",
+        "gpu": {
+            "enabled_gpu_count": 1,
+            "devices": [
+                {"name": "NVIDIA RTX A6000", "type": "OPTIX", "enabled": True}
+            ],
+        },
+        "frames": [
+            {
+                "frame_number": 1,
+                "status": "completed",
+                "attempts": 1,
+                "size_bytes": 9_000_000,
+            }
+        ],
+    }
+
+
+def test_gpu_evidence_prefers_direct_nvml_pid_binding():
+    report = _completed_optix_report()
+    evidence = _gpu_evidence(
+        report,
+        [
+            {
+                "blender_pid": 42,
+                "managed_blender_pid": 42,
+                "managed_process_alive": True,
+                "nvml_pids": [42],
+                "gpu_utilization": 80,
+                "vram_used_mb": 2_500,
+                "vram_total_mb": 49_000,
+                "host_ram_used_mb": 1_000,
+                "host_ram_total_mb": 64_000,
+                "power_watts": 250,
+            }
+        ],
+        baseline=[{"gpu_utilization": 0, "vram_used_mb": 100}],
+        target_pid=42,
+    )
+
+    assert evidence["gpu_process_observed"] is True
+    assert evidence["gpu_compute_observed"] is True
+    assert evidence["gpu_process_binding"] == "direct_nvml_pid"
+    assert evidence["nvml_pid_namespace_mismatch_observed"] is False
+
+
+def test_gpu_evidence_correlates_isolated_container_workload_when_nvml_uses_host_pid():
+    report = _completed_optix_report()
+    evidence = _gpu_evidence(
+        report,
+        [
+            {
+                "blender_pid": None,
+                "managed_blender_pid": 42,
+                "managed_process_alive": True,
+                "nvml_pids": [31_337],
+                "gpu_utilization": 99,
+                "vram_used_mb": 2_800,
+                "vram_total_mb": 49_000,
+                "host_ram_used_mb": 1_000,
+                "host_ram_total_mb": 64_000,
+                "power_watts": 270,
+            },
+            {
+                "blender_pid": None,
+                "managed_blender_pid": 42,
+                "managed_process_alive": True,
+                "nvml_pids": [],
+                "gpu_utilization": 95,
+                "vram_used_mb": 2_700,
+                "vram_total_mb": 49_000,
+                "host_ram_used_mb": 1_020,
+                "host_ram_total_mb": 64_000,
+                "power_watts": 260,
+            },
+        ],
+        baseline=[{"gpu_utilization": 1, "vram_used_mb": 120}],
+        target_pid=42,
+    )
+
+    assert evidence["gpu_process_observed"] is True
+    assert evidence["gpu_compute_observed"] is True
+    assert evidence["gpu_process_binding"] == "isolated_workload_window"
+    assert evidence["nvml_pid_namespace_mismatch_observed"] is True
+    assert evidence["baseline_vram_mb"] == 120
+    assert evidence["correlated_gpu_sample_count"] == 2
+
+
+def test_gpu_evidence_correlates_when_managed_platform_hides_nvml_process_list():
+    report = _completed_optix_report()
+    telemetry = [
+        {
+            "blender_pid": None,
+            "managed_blender_pid": 42,
+            "managed_process_alive": True,
+            "nvml_pids": [],
+            "gpu_utilization": utilization,
+            "vram_used_mb": 2_600,
+            "vram_total_mb": 49_000,
+            "host_ram_used_mb": 1_000,
+            "host_ram_total_mb": 64_000,
+            "power_watts": 250,
+        }
+        for utilization in (90, 99)
+    ]
+
+    evidence = _gpu_evidence(
+        report,
+        telemetry,
+        baseline=[{"gpu_utilization": 0, "vram_used_mb": 100}],
+        target_pid=42,
+    )
+
+    assert evidence["gpu_process_observed"] is True
+    assert evidence["gpu_compute_observed"] is True
+    assert evidence["gpu_process_binding"] == "isolated_workload_window"
+    assert evidence["nvml_pid_namespace_mismatch_observed"] is False
+    assert evidence["nvml_context_count_max"] == 0
+
+
+def test_gpu_evidence_never_accepts_utilization_without_new_frame_and_gpu_device():
+    report = _completed_optix_report()
+    report["frames"][0]["reused"] = True
+    report["gpu"]["enabled_gpu_count"] = 0
+    evidence = _gpu_evidence(
+        report,
+        [
+            {
+                "blender_pid": None,
+                "managed_blender_pid": 42,
+                "managed_process_alive": True,
+                "nvml_pids": [31_337],
+                "gpu_utilization": 99,
+                "vram_used_mb": 2_800,
+                "vram_total_mb": 49_000,
+                "host_ram_used_mb": 1_000,
+                "host_ram_total_mb": 64_000,
+                "power_watts": 270,
+            },
+            {
+                "blender_pid": None,
+                "managed_blender_pid": 42,
+                "managed_process_alive": True,
+                "nvml_pids": [],
+                "gpu_utilization": 95,
+                "vram_used_mb": 2_700,
+                "vram_total_mb": 49_000,
+                "host_ram_used_mb": 1_020,
+                "host_ram_total_mb": 64_000,
+                "power_watts": 260,
+            },
+        ],
+        baseline=[{"gpu_utilization": 0, "vram_used_mb": 100}],
+        target_pid=42,
+    )
+
+    assert evidence["gpu_process_observed"] is False
+    assert evidence["gpu_compute_observed"] is False
+    assert evidence["gpu_process_binding"] == "none"
 
 
 @pytest.mark.asyncio

@@ -394,10 +394,15 @@ def _sample_gpu(target_pid: int | None = None) -> list[dict[str, Any]]:
                 except pynvml.NVMLError:
                     power = 0.0
                 pids = _nvml_running_pids(pynvml, handle)
-                blender_pid = target_pid if target_pid in pids else next((pid for pid in pids if _is_blender_pid(pid)), None)
+                direct_pid_match = bool(target_pid and target_pid in pids)
+                blender_pid = target_pid if direct_pid_match else next((pid for pid in pids if _is_blender_pid(pid)), None)
                 samples.append({
                     "sampled_at": _utcnow(), "gpu_index": index,
                     "blender_pid": blender_pid,
+                    "managed_blender_pid": target_pid,
+                    "managed_process_alive": bool(target_pid and _is_blender_pid(target_pid)),
+                    "nvml_pids": pids,
+                    "nvml_pid_namespace_match": direct_pid_match,
                     "gpu_utilization": float(utilization.gpu),
                     "vram_used_mb": round(vram.used / 1024 / 1024, 2),
                     "vram_total_mb": round(vram.total / 1024 / 1024, 2),
@@ -462,10 +467,91 @@ async def _monitor(job_id: str, done: asyncio.Event, target_pid: int | None = No
             pass
 
 
-def _gpu_evidence(report: dict[str, Any], telemetry: list[dict[str, Any]]) -> dict[str, Any]:
+def _enabled_gpu_reported(report: dict[str, Any]) -> bool:
+    gpu = report.get("gpu") if isinstance(report.get("gpu"), dict) else {}
+    devices = gpu.get("devices") if isinstance(gpu.get("devices"), list) else []
+    return bool(
+        str(report.get("cycles_backend_selected") or "") in {"OPTIX", "CUDA"}
+        and int(gpu.get("enabled_gpu_count") or 0) > 0
+        and any(
+            isinstance(device, dict)
+            and device.get("enabled") is True
+            and str(device.get("type") or "").upper() != "CPU"
+            for device in devices
+        )
+    )
+
+
+def _completed_new_frame(report: dict[str, Any]) -> bool:
+    frames = report.get("frames") if isinstance(report.get("frames"), list) else []
+    return any(
+        isinstance(frame, dict)
+        and frame.get("status") == "completed"
+        and not frame.get("reused")
+        and int(frame.get("attempts") or 0) > 0
+        and int(frame.get("size_bytes") or 0) > 0
+        for frame in frames
+    )
+
+
+def _gpu_evidence(
+    report: dict[str, Any],
+    telemetry: list[dict[str, Any]],
+    *,
+    baseline: list[dict[str, Any]] | None = None,
+    target_pid: int | None = None,
+) -> dict[str, Any]:
+    """Bind GPU activity to one managed Blender execution window.
+
+    NVML exposes host PIDs on container platforms that use an isolated PID
+    namespace. In that topology the numeric Blender PID cannot equal NVML's
+    PID even though both describe the same process. We prefer an exact PID
+    match, but can prove attribution from four independent signals inside the
+    agent's serialized render lock: Blender is alive, Blender selected an
+    enabled CUDA/OptiX device, and utilization plus VRAM rise materially above
+    a pre-spawn baseline while a new frame is produced. Requiring an NVML PID
+    here would reintroduce the container namespace bug because some managed
+    platforms hide the host process list entirely. The selected method is
+    persisted so the dashboard never implies that a direct PID match occurred
+    when it did not.
+    """
+    baseline = baseline or []
     attached = [sample for sample in telemetry if sample.get("blender_pid")]
     active = [sample for sample in attached if float(sample.get("gpu_utilization") or 0) > 0]
-    observed = attached or telemetry
+    managed = [sample for sample in telemetry if sample.get("managed_process_alive")]
+    baseline_util = max(
+        (float(sample.get("gpu_utilization") or 0) for sample in baseline),
+        default=0.0,
+    )
+    baseline_vram = max(
+        (float(sample.get("vram_used_mb") or 0) for sample in baseline),
+        default=0.0,
+    )
+    utilization_floor = max(5.0, baseline_util + 5.0)
+    correlated = [
+        sample
+        for sample in managed
+        if float(sample.get("gpu_utilization") or 0) >= utilization_floor
+        and float(sample.get("vram_used_mb") or 0) >= baseline_vram + 128.0
+    ]
+    namespace_correlated = bool(
+        target_pid
+        and not attached
+        and len(correlated) >= 2
+        and _enabled_gpu_reported(report)
+        and report.get("source_unchanged") is True
+        and _completed_new_frame(report)
+    )
+    process_observed = bool(attached) or namespace_correlated
+    compute_observed = bool(active) or namespace_correlated
+    binding_method = (
+        "direct_nvml_pid"
+        if attached
+        else "isolated_workload_window"
+        if namespace_correlated
+        else "none"
+    )
+    observed = attached or correlated or telemetry
     utils = [float(sample.get("gpu_utilization") or 0) for sample in observed]
     vrams = [float(sample.get("vram_used_mb") or 0) for sample in observed]
     total_vrams = [float(sample.get("vram_total_mb") or 0) for sample in observed]
@@ -477,8 +563,23 @@ def _gpu_evidence(report: dict[str, Any], telemetry: list[dict[str, Any]]) -> di
         memory_growth = ((host_ram[-1] - host_ram[0]) / host_ram[0]) * 100
     return {
         "cycles_backend_selected": str(report.get("cycles_backend_selected") or ""),
-        "gpu_process_observed": bool(attached),
-        "gpu_compute_observed": bool(active),
+        "gpu_process_observed": process_observed,
+        "gpu_compute_observed": compute_observed,
+        "gpu_process_binding": binding_method,
+        "managed_blender_pid": target_pid,
+        "nvml_pid_namespace_mismatch_observed": bool(
+            target_pid
+            and not attached
+            and any(sample.get("nvml_pids") for sample in managed)
+        ),
+        "nvml_context_count_max": max(
+            (len(sample.get("nvml_pids") or []) for sample in telemetry),
+            default=0,
+        ),
+        "managed_process_sample_count": len(managed),
+        "correlated_gpu_sample_count": len(correlated),
+        "baseline_gpu_utilization": baseline_util,
+        "baseline_vram_mb": baseline_vram,
         "average_gpu_utilization": round(sum(utils) / len(utils), 2) if utils else 0.0,
         "peak_gpu_utilization": max(utils, default=0.0),
         "peak_vram_mb": max(vrams, default=0.0),
@@ -486,6 +587,7 @@ def _gpu_evidence(report: dict[str, Any], telemetry: list[dict[str, Any]]) -> di
         "peak_host_ram_mb": max(host_ram, default=0.0),
         "host_ram_total_mb": max(host_total, default=0.0),
         "host_ram_growth_percent": round(memory_growth, 2),
+        "peak_power_watts": max(powers, default=0.0),
         "power_draw_samples": powers[-180:],
     }
 
@@ -564,6 +666,11 @@ async def _run_blender_pass(
     log_path = job_dir / "operation.log"
     output_directory.mkdir(parents=True, exist_ok=True)
     before = len(_telemetry_samples(request.job_id))
+    baseline: list[dict[str, Any]] = []
+    for sample_index in range(3):
+        baseline.extend(await asyncio.to_thread(_sample_gpu))
+        if sample_index < 2:
+            await asyncio.sleep(0.25)
     command = [
         os.getenv("BLENDER_BINARY", "blender").strip() or "blender", "-b", str(source),
         "--python", str(Path(__file__).with_name("blender_job.py").resolve()), "--",
@@ -592,7 +699,12 @@ async def _run_blender_pass(
         await monitor
     report = _read_json(report_path)
     samples = _telemetry_samples(request.job_id)[before:]
-    report["gpu_evidence"] = _gpu_evidence(report, samples)
+    report["gpu_evidence"] = _gpu_evidence(
+        report,
+        samples,
+        baseline=baseline,
+        target_pid=process.pid,
+    )
     if return_code != 0 or report.get("status") not in {"completed", "blocked"}:
         raise RuntimeError(str(report.get("error") or f"Blender exited with code {return_code}"))
     return report
