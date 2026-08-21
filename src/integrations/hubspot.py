@@ -1,6 +1,6 @@
 """HubSpot CRM adapter for approval-driven Sales Council synchronization.
 
-The adapter receives a verified private-app access token through the scoped
+The adapter receives a verified HubSpot service key through the scoped
 integration runtime. It never logs or returns the token. Contact upserts are
 keyed by email, and outreach notes contain a stable task marker so a worker
 retry can recover without creating duplicate timeline entries.
@@ -83,7 +83,7 @@ async def _request(
         raise HubSpotIntegrationError("HubSpot could not be reached") from exc
     if response.status_code >= 400:
         if response.status_code == 401:
-            message = "HubSpot rejected the private-app access token"
+            message = "HubSpot rejected the service key"
         elif response.status_code == 403:
             message = "HubSpot token does not have the required CRM permissions"
         elif response.status_code == 429:
@@ -101,44 +101,46 @@ async def _request(
 
 
 async def verify_connection() -> dict[str, Any]:
-    """Validate the token and ensure both read and write contact scopes exist."""
+    """Validate a service key against the CRM operations this adapter needs.
+
+    HubSpot's modern service keys are Bearer credentials, but unlike legacy
+    private-app tokens they do not expose their scope list through the old
+    private-app introspection endpoint.  A contact-list request proves read
+    access.  A PATCH against an impossible record ID proves that HubSpot lets
+    the request reach record lookup (404) without changing customer data;
+    missing write permission is rejected earlier with 403.
+    """
 
     token = _get_token()
     if not token:
         raise HubSpotIntegrationError("HubSpot credentials are not available")
+    payload = await _request(
+        "GET",
+        "/crm/v3/objects/contacts",
+        params={"limit": 1, "archived": "false"},
+    )
     try:
-        payload = await _request(
-            "POST",
-            "/oauth/v2/private-apps/get-access-token-info",
-            json={"tokenKey": token},
-            include_auth=False,
+        await _request(
+            "PATCH",
+            "/crm/v3/objects/contacts/9223372036854775807",
+            json={"properties": {}},
         )
     except HubSpotIntegrationError as exc:
+        if exc.status_code == 403:
+            raise HubSpotIntegrationError(
+                "HubSpot service key is missing crm.objects.contacts.write permission",
+                status_code=403,
+            ) from exc
         if exc.status_code != 404:
             raise
-        # HubSpot returns 404 from the legacy metadata endpoint for some
-        # invalid or unsupported token types. Probe the read-only Contacts API
-        # to distinguish a rejected token from unavailable scope metadata.
-        await _request(
-            "GET",
-            "/crm/v3/objects/contacts",
-            params={"limit": 1, "archived": "false"},
-        )
+    else:  # pragma: no cover - the deliberately absent record must not exist
         raise HubSpotIntegrationError(
-            "HubSpot accepted the token for contact reads but did not expose its "
-            "scope metadata. Use a Legacy private app token so contact write "
-            "permission can be verified safely."
-        ) from exc
-    scopes = {str(scope) for scope in payload.get("scopes", [])}
-    missing = sorted(REQUIRED_SCOPES - scopes)
-    if missing:
-        raise HubSpotIntegrationError(
-            "HubSpot private app is missing required scopes: " + ", ".join(missing)
+            "HubSpot write-permission probe returned an unexpected response"
         )
     return {
-        "hub_id": str(payload.get("hubId") or ""),
-        "app_id": str(payload.get("appId") or ""),
-        "scopes": sorted(scopes),
+        "authentication": "service_key",
+        "verified_permissions": sorted(REQUIRED_SCOPES),
+        "contacts_visible": len(payload.get("results") or []),
     }
 
 

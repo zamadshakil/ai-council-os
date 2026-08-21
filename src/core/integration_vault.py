@@ -103,11 +103,11 @@ PROVIDERS: dict[str, ProviderSpec] = {
         (
             CredentialField(
                 "access_token",
-                "Private app access token",
+                "Service key",
                 "HUBSPOT_ACCESS_TOKEN",
                 help_text=(
-                    "In HubSpot Development, create a Legacy private app with "
-                    "crm.objects.contacts.read and crm.objects.contacts.write scopes."
+                    "In HubSpot Development, open Keys > Service Keys and create one "
+                    "with crm.objects.contacts.read and crm.objects.contacts.write."
                 ),
             ),
         ),
