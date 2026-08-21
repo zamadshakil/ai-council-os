@@ -5,7 +5,11 @@ import pytest
 from src.core.jobs import JobService
 from src.core.models import WorkflowRunModel
 from src.integrations import runpod
-from src.scripts.blender_listener import TemplateJobRequest, _within_workspace
+from src.scripts.blender_listener import (
+    TemplateJobRequest,
+    _nvml_running_pids,
+    _within_workspace,
+)
 
 
 def test_blender_agent_rejects_traversal_and_arbitrary_output(monkeypatch, tmp_path):
@@ -32,6 +36,49 @@ def test_runpod_agent_url_is_derived_from_validated_pod_and_port(monkeypatch):
     monkeypatch.setenv("BLENDER_AGENT_PORT", "not-a-port")
     with pytest.raises(runpod.RunPodError, match="port is invalid"):
         runpod._agent_base_url("pod-safe_123")
+
+
+def test_nvml_process_evidence_combines_compute_and_graphics_contexts():
+    class Process:
+        def __init__(self, pid):
+            self.pid = pid
+
+    class NvmlError(Exception):
+        pass
+
+    class FakeNvml:
+        NVMLError = NvmlError
+
+        @staticmethod
+        def nvmlDeviceGetComputeRunningProcesses(_handle):
+            return [Process(101), Process(202)]
+
+        @staticmethod
+        def nvmlDeviceGetGraphicsRunningProcesses(_handle):
+            return [Process(202), Process(303)]
+
+    assert _nvml_running_pids(FakeNvml, object()) == [101, 202, 303]
+
+
+def test_nvml_process_evidence_survives_one_unsupported_context_class():
+    class Process:
+        pid = 404
+
+    class NvmlError(Exception):
+        pass
+
+    class FakeNvml:
+        NVMLError = NvmlError
+
+        @staticmethod
+        def nvmlDeviceGetComputeRunningProcesses(_handle):
+            raise NvmlError("not supported")
+
+        @staticmethod
+        def nvmlDeviceGetGraphicsRunningProcesses(_handle):
+            return [Process()]
+
+    assert _nvml_running_pids(FakeNvml, object()) == [404]
 
 
 @pytest.mark.asyncio

@@ -386,11 +386,7 @@ def _sample_gpu(target_pid: int | None = None) -> list[dict[str, Any]]:
                     power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0
                 except pynvml.NVMLError:
                     power = 0.0
-                try:
-                    processes = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-                except pynvml.NVMLError:
-                    processes = []
-                pids = [int(process.pid) for process in processes]
+                pids = _nvml_running_pids(pynvml, handle)
                 blender_pid = target_pid if target_pid in pids else next((pid for pid in pids if _is_blender_pid(pid)), None)
                 samples.append({
                     "sampled_at": _utcnow(), "gpu_index": index,
@@ -407,6 +403,34 @@ def _sample_gpu(target_pid: int | None = None) -> list[dict[str, Any]]:
             pynvml.nvmlShutdown()
     except Exception:
         return []
+
+
+def _nvml_running_pids(pynvml: Any, handle: Any) -> list[int]:
+    """Return every process using the device across NVML context classes.
+
+    OptiX/Cycles is reported as a compute process on some driver branches and
+    as a graphics process on others. Looking at only the compute list caused
+    real 99%-utilized A6000 renders to fail the PID-evidence gate. A process is
+    accepted only when NVML itself reports it in either allowlisted list.
+    """
+    pids: set[int] = set()
+    for getter_name in (
+        "nvmlDeviceGetComputeRunningProcesses",
+        "nvmlDeviceGetGraphicsRunningProcesses",
+    ):
+        getter = getattr(pynvml, getter_name, None)
+        if getter is None:
+            continue
+        try:
+            processes = getter(handle)
+        except pynvml.NVMLError:
+            continue
+        for process in processes or []:
+            try:
+                pids.add(int(process.pid))
+            except (AttributeError, TypeError, ValueError):
+                continue
+    return sorted(pids)
 
 
 def _is_blender_pid(pid: int) -> bool:
