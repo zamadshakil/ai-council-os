@@ -3,6 +3,19 @@ set -uo pipefail
 
 mkdir -p /workspace/logs /workspace/render_jobs /workspace/.council-blender/samples \
     /workspace/.council-flamenco
+
+# Kasm materializes the default profile before this hook runs. Some base-image
+# versions leave newly-created cache directories owned by root, which causes
+# Chrome and dconf to emit permission errors even though the desktop launches.
+# Repair only disposable per-user cache paths; never recursively change the
+# persistent /workspace ownership here.
+install -d -o 1000 -g 0 -m 0770 \
+    /home/kasm-user/.cache \
+    /home/kasm-user/.cache/google-chrome \
+    /home/kasm-user/.cache/dconf
+chown -R 1000:0 /home/kasm-user/.cache
+chmod -R g=u /home/kasm-user/.cache
+
 sample_target=/workspace/.council-blender/samples/Blender-282.blend
 if [[ ! -s "$sample_target" ]]; then
     cp /opt/council/samples/Blender-282.blend "$sample_target"

@@ -154,24 +154,34 @@ jobs:
           # no launch modal was left on the desktop.
           launch_and_wait() {
             launcher="$1"
-            process_pattern="$2"
+            process_name="$2"
             docker exec --env DISPLAY=:1 --env HOME=/home/kasm-user \
               "${container_id}" gio launch \
               "/home/kasm-user/Desktop/${launcher}"
             launched=0
             for _ in $(seq 1 30); do
-              if docker exec "${container_id}" pgrep --full "${process_pattern}" >/dev/null; then
+              # Assert the process that the launcher ultimately execs. Chrome's
+              # wrapper is /usr/bin/google-chrome, while its real process name
+              # is "chrome" under /opt/google/chrome. Matching the wrapper path
+              # made a successful launch look like a failure.
+              if docker exec "${container_id}" pgrep --exact "${process_name}" >/dev/null; then
                 launched=1
                 break
               fi
               sleep 1
             done
-            test "${launched}" -eq 1
+            if [[ "${launched}" -ne 1 ]]; then
+              echo "::error title=Desktop launcher failed::${launcher} did not create process ${process_name}"
+              docker exec "${container_id}" ps -eo pid,comm,args || true
+              docker exec "${container_id}" bash -lc \
+                'DISPLAY=:1 xwininfo -root -tree 2>/dev/null || true'
+              return 1
+            fi
           }
 
-          launch_and_wait google-chrome.desktop '/usr/bin/google-chrome-orig'
-          launch_and_wait Blender.desktop '/opt/blender/blender'
-          launch_and_wait Renders.desktop 'thunar /workspace/render_jobs'
+          launch_and_wait google-chrome.desktop chrome
+          launch_and_wait Blender.desktop blender
+          launch_and_wait Renders.desktop thunar
 
           docker exec "${container_id}" bash -lc \
             'mkdir -p /workspace/render_jobs && ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=blue:s=64x64 -frames:v 1 -y /workspace/render_jobs/desktop-smoke.png'
