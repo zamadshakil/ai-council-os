@@ -2,6 +2,7 @@ import {
   ApprovalActionInput,
   AuthResponse,
   BlenderPod,
+  BlenderPodState,
   BlenderPodAccess,
   BlenderArtifact,
   BlenderRenderFrame,
@@ -471,9 +472,18 @@ export async function actOnLearningSuggestion(id: string, action: 'approve' | 'r
   });
 }
 
-export async function fetchBlenderPods(): Promise<BlenderPod[]> {
-  const data = await apiFetch<{ pods: BlenderPod[] }>('/api/blender/pods');
-  return data.pods ?? [];
+export async function fetchBlenderPods(): Promise<BlenderPodState> {
+  const data = await apiFetch<BlenderPodState>('/api/blender/pods');
+  return {
+    pods: data.pods ?? [],
+    approved_runtime: data.approved_runtime ?? {
+      ready: false,
+      code: 'BLENDER_RUNTIME_STATUS_UNAVAILABLE',
+      message: 'The approved runtime release status is unavailable.',
+      image_name: '',
+      digest: '',
+    },
+  };
 }
 
 export async function provisionBlenderPod(): Promise<MutationEnvelope<BlenderPod>> {

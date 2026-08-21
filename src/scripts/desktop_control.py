@@ -7,6 +7,7 @@ make up the artist desktop.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -26,7 +27,9 @@ STATE_PATH = WORKSPACE / ".council-blender" / "desktop_status.json"
 LOG_PATH = WORKSPACE / "logs" / "desktop-watchdog.log"
 REQUIRED_COMPONENTS = ("xfce4-session", "xfwm4", "xfdesktop", "xfce4-panel")
 FATAL_WINDOW_TITLES = (
+    "attention",
     "failed to restart the panel",
+    "launch error",
     "untrusted application launcher",
 )
 DESKTOP_LAUNCHERS = (
@@ -71,7 +74,9 @@ def _processes() -> dict[str, list[int]]:
                 # turn its error dialog into a false-ready Kasm session.
                 if expected == "xfce4-panel" and "--restart" in command:
                     continue
-                if name == expected or re.search(rf"(^|/){re.escape(expected)}(?:\s|$)", command):
+                if name == expected or re.search(
+                    rf"(^|/){re.escape(expected)}(?:\s|$)", command
+                ):
                     found[expected].append(int(process.info["pid"]))
     except Exception:
         pass
@@ -80,7 +85,9 @@ def _processes() -> dict[str, list[int]]:
 
 def _fatal_windows() -> list[str]:
     """Return allowlisted desktop error dialogs that make a session unusable."""
-    code, output = _command(["xwininfo", "-display", DISPLAY, "-root", "-tree"], timeout=8)
+    code, output = _command(
+        ["xwininfo", "-display", DISPLAY, "-root", "-tree"], timeout=8
+    )
     if code != 0:
         return []
     lowered = output.casefold()
@@ -120,12 +127,32 @@ def analyse_frame(image: Image.Image) -> dict[str, float | bool]:
 def _framebuffer() -> dict[str, Any]:
     dimensions = _display_dimensions()
     if not dimensions:
-        return {"captured": False, "nonblack": False, "error": "X display dimensions unavailable"}
+        return {
+            "captured": False,
+            "nonblack": False,
+            "error": "X display dimensions unavailable",
+        }
     width, height = dimensions
     command = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "x11grab",
-        "-video_size", f"{width}x{height}", "-i", DISPLAY, "-frames:v", "1",
-        "-vf", "scale=320:180", "-f", "image2pipe", "-vcodec", "png", "pipe:1",
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "x11grab",
+        "-video_size",
+        f"{width}x{height}",
+        "-i",
+        DISPLAY,
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=320:180",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "png",
+        "pipe:1",
     ]
     try:
         result = subprocess.run(
@@ -137,12 +164,20 @@ def _framebuffer() -> dict[str, Any]:
         )
         if result.returncode != 0 or not result.stdout:
             error = result.stderr.decode("utf-8", errors="replace").strip()[-500:]
-            return {"captured": False, "nonblack": False, "error": error or "Frame capture failed"}
+            return {
+                "captured": False,
+                "nonblack": False,
+                "error": error or "Frame capture failed",
+            }
         with Image.open(io.BytesIO(result.stdout)) as image:
             evidence = analyse_frame(image)
         return {"captured": True, "width": width, "height": height, **evidence}
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        return {"captured": False, "nonblack": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "captured": False,
+            "nonblack": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def status() -> dict[str, Any]:
@@ -151,11 +186,15 @@ def status() -> dict[str, Any]:
     missing = [name for name, pids in processes.items() if not pids]
     fatal_windows = _fatal_windows() if x_code == 0 else []
     launchers = _launcher_status()
-    framebuffer = _framebuffer() if x_code == 0 else {
-        "captured": False,
-        "nonblack": False,
-        "error": x_output[-500:] or "X display is unavailable",
-    }
+    framebuffer = (
+        _framebuffer()
+        if x_code == 0
+        else {
+            "captured": False,
+            "nonblack": False,
+            "error": x_output[-500:] or "X display is unavailable",
+        }
+    )
     ready = (
         x_code == 0
         and not missing
@@ -243,12 +282,34 @@ def ensure_desktop_launchers() -> dict[str, Any]:
                 updated.append(str(path))
             except OSError:
                 continue
-            # XFCE/GLib can require both the executable bit and trusted
-            # metadata for launchers copied from a default Kasm profile.
-            # Failure is safe here: the executable bit remains enforced and
-            # the readiness gate still rejects any resulting trust dialog.
-            _command(["gio", "set", str(path), "metadata::trusted", "true"], timeout=5)
+            # Current XFCE trusts launchers by storing the file's SHA-256 in
+            # metadata::xfce-exe-checksum. `metadata::trusted` alone is not
+            # sufficient and caused the artist-facing "Untrusted application
+            # launcher" dialog. Keep both for older profile implementations.
+            checksum = hashlib.sha256(path.read_bytes()).hexdigest()
+            _command(
+                ["gio", "set", str(path), "metadata::xfce-exe-checksum", checksum],
+                timeout=5,
+            )
+            _command(
+                ["gio", "set", "-t", "string", str(path), "metadata::trusted", "yes"],
+                timeout=5,
+            )
     return {"updated": updated, "missing": missing}
+
+
+def _launcher_trusted(path: Path) -> bool:
+    if not path.is_file() or not os.access(path, os.X_OK):
+        return False
+    code, output = _command(
+        ["gio", "info", "-a", "metadata::xfce-exe-checksum", str(path)],
+        timeout=5,
+    )
+    if code != 0:
+        return False
+    expected = hashlib.sha256(path.read_bytes()).hexdigest()
+    normalized = output.casefold().replace(" ", "")
+    return f"metadata::xfce-exe-checksum:{expected}" in normalized
 
 
 def _launcher_status() -> dict[str, Any]:
@@ -260,10 +321,12 @@ def _launcher_status() -> dict[str, Any]:
         launchers[launcher_name] = {
             "present": path.is_file(),
             "executable": path.is_file() and os.access(path, os.X_OK),
+            "trusted": _launcher_trusted(path),
         }
     return {
         "ready": all(
-            item["present"] and item["executable"] for item in launchers.values()
+            item["present"] and item["executable"] and item["trusted"]
+            for item in launchers.values()
         ),
         "directory": str(desktop),
         "items": launchers,
@@ -274,7 +337,12 @@ def recover() -> dict[str, Any]:
     """Repair only the fixed XFCE desktop components on the fixed Kasm display."""
     before = status()
     if not before["x11_ready"]:
-        return {"recovered": False, "reason": "X11_NOT_READY", "before": before, "after": before}
+        return {
+            "recovered": False,
+            "reason": "X11_NOT_READY",
+            "before": before,
+            "after": before,
+        }
 
     missing = set(before["missing_components"])
     actions: list[str] = []
@@ -303,7 +371,12 @@ def recover() -> dict[str, Any]:
 
     time.sleep(5)
     after = status()
-    return {"recovered": bool(after["ready"]), "actions": actions, "before": before, "after": after}
+    return {
+        "recovered": bool(after["ready"]),
+        "actions": actions,
+        "before": before,
+        "after": after,
+    }
 
 
 def watchdog() -> None:
@@ -320,13 +393,17 @@ def watchdog() -> None:
             consecutive_failures += 1
             process_failure = bool(current["missing_components"])
             launcher_failure = not bool(current["launchers"]["ready"])
-            startup_black = time.monotonic() < startup_deadline and not current["framebuffer"].get("nonblack")
+            startup_black = time.monotonic() < startup_deadline and not current[
+                "framebuffer"
+            ].get("nonblack")
             if consecutive_failures >= 3 and (
                 process_failure or launcher_failure or startup_black
             ):
                 result = recover()
                 with LOG_PATH.open("a", encoding="utf-8") as log_file:
-                    log_file.write(json.dumps({"at": _utcnow(), "recovery": result}) + "\n")
+                    log_file.write(
+                        json.dumps({"at": _utcnow(), "recovery": result}) + "\n"
+                    )
                 consecutive_failures = 0
         time.sleep(10)
 

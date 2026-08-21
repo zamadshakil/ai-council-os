@@ -323,6 +323,19 @@ export interface BlenderPod {
   };
 }
 
+export interface BlenderRuntimeRelease {
+  ready: boolean;
+  code: string;
+  message: string;
+  image_name: string;
+  digest: string;
+}
+
+export interface BlenderPodState {
+  pods: BlenderPod[];
+  approved_runtime: BlenderRuntimeRelease;
+}
+
 export interface BlenderPodAccess {
   username: string;
   password: string;

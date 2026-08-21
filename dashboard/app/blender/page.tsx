@@ -14,7 +14,7 @@ import {
 } from '../lib/api';
 import {
   BlenderArtifact, BlenderPod, BlenderPodAccess, BlenderRenderFrame, BlenderRenderJob,
-  BlenderTelemetrySample,
+  BlenderRuntimeRelease, BlenderTelemetrySample,
 } from '../lib/types';
 
 const ACTIVE = new Set([
@@ -109,6 +109,7 @@ function TelemetryChart({ samples }: { samples: BlenderTelemetrySample[] }) {
 
 export default function BlenderManagerPage() {
   const [pods, setPods] = useState<BlenderPod[]>([]);
+  const [approvedRuntime, setApprovedRuntime] = useState<BlenderRuntimeRelease | null>(null);
   const [jobs, setJobs] = useState<BlenderRenderJob[]>([]);
   const [frames, setFrames] = useState<BlenderRenderFrame[]>([]);
   const [telemetry, setTelemetry] = useState<BlenderTelemetrySample[]>([]);
@@ -142,8 +143,9 @@ export default function BlenderManagerPage() {
     if (!quiet) setLoading(true);
     const [podResult, jobResult] = await Promise.allSettled([fetchBlenderPods(), fetchBlenderRenderJobs()]);
     if (podResult.status === 'fulfilled') {
-      setPods(podResult.value);
-      setPodId((current) => current || podResult.value[0]?.id || '');
+      setPods(podResult.value.pods);
+      setApprovedRuntime(podResult.value.approved_runtime);
+      setPodId((current) => current || podResult.value.pods[0]?.id || '');
     } else if (!quiet) setError(podResult.reason instanceof Error ? podResult.reason.message : 'RunPod status is unavailable.');
     if (jobResult.status === 'fulfilled') {
       setJobs(jobResult.value);
@@ -327,7 +329,8 @@ export default function BlenderManagerPage() {
         <div className="mt-5 rounded-2xl border border-cyan-300/20 bg-cyan-300/[0.055] p-4">
           <div className="flex items-start gap-3"><Cpu className="mt-0.5 h-5 w-5 text-cyan-300" /><div><p className="text-sm font-black text-white">Create the safe baseline</p><p className="mt-1 text-xs leading-5 text-slate-300">Exactly 1× RTX A6000 · Secure Cloud · on-demand · 64 GB minimum host RAM · 250 GB persistent /workspace.</p></div></div>
           <label className="mt-4 flex items-start gap-3 text-xs text-slate-200"><input type="checkbox" checked={billingConfirmed} onChange={(event) => setBillingConfirmed(event.target.checked)} className="mt-0.5 h-4 w-4 accent-cyan-300" /><span>I understand RunPod GPU and storage billing begins when this Pod is created.</span></label>
-          <button type="button" onClick={() => void provisionA6000()} disabled={!billingConfirmed || !!busy} className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-cyan-300 px-3 text-xs font-black text-[#04111b] disabled:cursor-not-allowed disabled:opacity-40">{busy === 'provision' ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Play className="h-4 w-4" />}{busy === 'provision' ? 'Creating A6000 workstation…' : 'Create 1-GPU Kasm workstation'}</button>
+          <button type="button" onClick={() => void provisionA6000()} disabled={!billingConfirmed || !!busy || approvedRuntime?.ready !== true} className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-cyan-300 px-3 text-xs font-black text-[#04111b] disabled:cursor-not-allowed disabled:opacity-40">{busy === 'provision' ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Play className="h-4 w-4" />}{busy === 'provision' ? 'Creating A6000 workstation…' : approvedRuntime?.ready === false ? 'Runtime release unavailable' : 'Create 1-GPU Kasm workstation'}</button>
+          {approvedRuntime && <div role={approvedRuntime.ready ? 'status' : 'alert'} className={`mt-3 rounded-xl border p-3 text-xs leading-5 ${approvedRuntime.ready ? 'border-emerald-300/25 bg-emerald-300/8 text-emerald-100' : 'border-amber-300/25 bg-amber-300/8 text-amber-100'}`}><strong>{approvedRuntime.ready ? 'Release gate passed: ' : 'Creation blocked safely: '}</strong>{approvedRuntime.message}</div>}
           {provisionFeedback && <div
             role={provisionFeedback.kind === 'error' ? 'alert' : 'status'}
             className={`mt-3 rounded-xl border p-3 text-xs leading-5 ${provisionFeedback.kind === 'error' ? 'border-rose-300/30 bg-rose-300/10 text-rose-100' : 'border-emerald-300/30 bg-emerald-300/10 text-emerald-100'}`}
@@ -352,7 +355,8 @@ export default function BlenderManagerPage() {
               title={pod.resume_status === 'capacity_unavailable' ? 'No free GPU remains on this pod’s physical machine. Refresh later or migrate it in RunPod.' : undefined}
               className="inline-flex h-10 items-center gap-2 rounded-xl bg-white/8 px-3 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-45"
             >{busy === `${pod.id}:${pod.desired_status === 'RUNNING' ? 'stop' : 'resume'}` ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : pod.desired_status === 'RUNNING' ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}{busy === `${pod.id}:resume` ? 'Resuming…' : busy === `${pod.id}:stop` ? 'Stopping…' : pod.desired_status === 'RUNNING' ? 'Stop billing' : 'Resume'}</button>
-            {pod.desired_status !== 'RUNNING' && <button onClick={() => void podAction(pod, 'prepare_runtime')} disabled={busy.startsWith(pod.id)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-emerald-300/25 px-3 text-xs font-bold text-emerald-100 disabled:opacity-45"><ShieldCheck className="h-4 w-4" />Install approved runtime</button>}
+            {pod.desired_status !== 'RUNNING' && approvedRuntime?.ready && pod.image_name.toLowerCase() !== approvedRuntime.image_name.toLowerCase() && <button onClick={() => void podAction(pod, 'prepare_runtime')} disabled={busy.startsWith(pod.id)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-emerald-300/25 px-3 text-xs font-bold text-emerald-100 disabled:opacity-45"><ShieldCheck className="h-4 w-4" />Install verified runtime</button>}
+            {approvedRuntime?.ready && pod.image_name.toLowerCase() === approvedRuntime.image_name.toLowerCase() && <span className="inline-flex h-10 items-center gap-2 rounded-xl border border-emerald-300/20 bg-emerald-300/8 px-3 text-xs font-bold text-emerald-100"><ShieldCheck className="h-4 w-4" />Verified runtime installed</span>}
             <button onClick={() => void podAction(pod, 'reveal_access')} disabled={busy.startsWith(pod.id)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/12 px-3 text-xs font-bold text-slate-200 disabled:opacity-45">Show Kasm login</button>
           </div>
           <p className="mt-3 text-xs text-slate-400">${pod.cost_per_hour.toFixed(3)}/hr · {duration(pod.uptime_seconds)}</p>

@@ -65,7 +65,24 @@ jobs:
           WORKER_PROXY_TOKEN: council-os-ci-worker-proxy-token-0123456789abcdef
         run: |
           set -euo pipefail
+          # Reproduce the older RunPod/runc compatibility boundary exactly:
+          # close_range is denied with EPERM. The image must still launch GUI
+          # applications through GLib's safe fd-walk fallback.
+          seccomp_profile="${RUNNER_TEMP}/runpod-close-range-eperm.json"
+          cat > "${seccomp_profile}" <<'JSON'
+          {
+            "defaultAction": "SCMP_ACT_ALLOW",
+            "syscalls": [
+              {
+                "names": ["close_range"],
+                "action": "SCMP_ACT_ERRNO",
+                "errnoRet": 1
+              }
+            ]
+          }
+          JSON
           container_id="$(docker run --detach --rm --shm-size=512m \
+            --security-opt "seccomp=${seccomp_profile}" \
             --env "VNC_PW=${VNC_PASSWORD}" \
             --env "BLENDER_AGENT_TOKEN=${AGENT_TOKEN}" \
             --env "FLAMENCO_WORKER_PROXY_TOKEN=${WORKER_PROXY_TOKEN}" \
@@ -130,6 +147,48 @@ jobs:
             bash -lc 'DISPLAY=:1 xwininfo -root -tree 2>/dev/null | grep -i "failed to restart the panel" || true')"
           test -z "$(docker exec "${container_id}" \
             bash -lc 'DISPLAY=:1 xwininfo -root -tree 2>/dev/null | grep -i "untrusted application launcher" || true')"
+
+          # Static executable bits are not an acceptance test. Launch every
+          # artist-facing application through GLib/GIO while close_range is
+          # returning EPERM, then prove the expected GUI process exists and
+          # no launch modal was left on the desktop.
+          launch_and_wait() {
+            launcher="$1"
+            process_pattern="$2"
+            docker exec --env DISPLAY=:1 --env HOME=/home/kasm-user \
+              "${container_id}" gio launch \
+              "/home/kasm-user/Desktop/${launcher}"
+            launched=0
+            for _ in $(seq 1 30); do
+              if docker exec "${container_id}" pgrep --full "${process_pattern}" >/dev/null; then
+                launched=1
+                break
+              fi
+              sleep 1
+            done
+            test "${launched}" -eq 1
+          }
+
+          launch_and_wait google-chrome.desktop '/usr/bin/google-chrome-orig'
+          launch_and_wait Blender.desktop '/opt/blender/blender'
+          launch_and_wait Renders.desktop 'thunar /workspace/render_jobs'
+
+          docker exec "${container_id}" bash -lc \
+            'mkdir -p /workspace/render_jobs && ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=blue:s=64x64 -frames:v 1 -y /workspace/render_jobs/desktop-smoke.png'
+          docker exec --env DISPLAY=:1 --env HOME=/home/kasm-user \
+            "${container_id}" gio open /workspace/render_jobs/desktop-smoke.png
+          viewer_ready=0
+          for _ in $(seq 1 20); do
+            if docker exec "${container_id}" pgrep --exact ristretto >/dev/null; then
+              viewer_ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "${viewer_ready}" -eq 1
+
+          test -z "$(docker exec "${container_id}" \
+            bash -lc 'DISPLAY=:1 xwininfo -root -tree 2>/dev/null | grep -iE "launch error|untrusted application launcher" || true')"
 
           curl --silent --show-error --fail \
             --header "Authorization: Bearer ${AGENT_TOKEN}" \

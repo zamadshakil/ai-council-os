@@ -74,7 +74,9 @@ async def api_client(session_factory, monkeypatch):
         await session.commit()
 
     transport = httpx.ASGITransport(app=server.app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
         yield client
 
 
@@ -116,7 +118,9 @@ async def test_cookie_login_session_and_logout(api_client):
 
 
 @pytest.mark.asyncio
-async def test_local_loopback_alias_is_allowed_but_foreign_origin_is_rejected(api_client):
+async def test_local_loopback_alias_is_allowed_but_foreign_origin_is_rejected(
+    api_client,
+):
     login = await api_client.post(
         "/api/auth/login",
         json={"username": "admin", "password": ADMIN_PASSWORD},
@@ -286,7 +290,9 @@ async def test_blender_manager_requires_verified_runpod_connection(api_client):
     assert response.json()["error"]["code"] == "INTEGRATION_NOT_VERIFIED"
 
     catalog = await api_client.get("/api/integrations/catalog")
-    runpod = next(item for item in catalog.json()["integrations"] if item["id"] == "runpod")
+    runpod = next(
+        item for item in catalog.json()["integrations"] if item["id"] == "runpod"
+    )
     assert runpod["configured"] is False
     # Pod-agent/Kasm credentials are generated and encrypted by Council OS.
     # The administrator only supplies the RunPod account API key.
@@ -305,20 +311,30 @@ async def test_blender_manager_reports_pod_local_gpu_state(api_client, monkeypat
     await integration_vault.mark_verification("runpod", True)
 
     async def fake_pods():
-        return [{
-            "id": "pod-safe-runtime", "desired_status": "RUNNING",
-            "gpu_utilization": [{"gpu_percent": 0, "memory_percent": 0}],
-        }]
+        return [
+            {
+                "id": "pod-safe-runtime",
+                "desired_status": "RUNNING",
+                "gpu_utilization": [{"gpu_percent": 0, "memory_percent": 0}],
+            }
+        ]
 
     async def fake_runtime(pod_id):
         assert pod_id == "pod-safe-runtime"
         return {
-            "gpu_samples": [{
-                "gpu_index": 0, "blender_pid": 4242, "gpu_utilization": 87,
-                "vram_used_mb": 2048, "vram_total_mb": 49140, "power_watts": 225,
-            }],
+            "gpu_samples": [
+                {
+                    "gpu_index": 0,
+                    "blender_pid": 4242,
+                    "gpu_utilization": 87,
+                    "vram_used_mb": 2048,
+                    "vram_total_mb": 49140,
+                    "power_watts": 225,
+                }
+            ],
             "gui_state": {
-                "backend": "OPTIX", "cycles_gpu_configured": True,
+                "backend": "OPTIX",
+                "cycles_gpu_configured": True,
             },
         }
 
@@ -361,6 +377,13 @@ async def test_existing_pod_update_requires_inventory_and_exact_smoke_sha(
 
     monkeypatch.setattr("src.integrations.runpod.list_pods", fake_pods)
     monkeypatch.setattr("src.integrations.runpod.update_pod_runtime", fake_update)
+
+    async def verified_manifest(image_name):
+        return {"image_name": image_name, "digest": f"sha256:{'1' * 64}"}
+
+    monkeypatch.setattr(
+        "src.integrations.runpod.verify_blender_image_manifest", verified_manifest
+    )
     sha = "a" * 40
     monkeypatch.setenv(
         "BLENDER_RUNPOD_IMAGE", f"ghcr.io/astrofood/ai-council-blender:{sha}"
@@ -441,11 +464,16 @@ async def test_new_a6000_pod_requires_explicit_billing_confirmation_and_is_audit
     await integration_vault.mark_verification("runpod", True)
     image = f"ghcr.io/astrofood/ai-council-blender:{'e' * 40}"
     monkeypatch.setenv("BLENDER_RUNPOD_IMAGE", image)
+    monkeypatch.setenv("BLENDER_RUNPOD_SMOKE_APPROVED_SHA", "e" * 40)
     calls: dict[str, object] = {}
 
     async def fake_template(*, image_name):
         calls["template_image"] = image_name
-        return {"id": "template-safe-1", "name": "Council OS Blender", "image_name": image_name}
+        return {
+            "id": "template-safe-1",
+            "name": "Council OS Blender",
+            "image_name": image_name,
+        }
 
     async def fake_create(**kwargs):
         calls["create"] = kwargs
@@ -461,8 +489,17 @@ async def test_new_a6000_pod_requires_explicit_billing_confirmation_and_is_audit
             "proxy_url": "https://pod-safe-a6000-6901.proxy.runpod.net",
         }
 
-    monkeypatch.setattr("src.integrations.runpod.ensure_blender_template", fake_template)
+    monkeypatch.setattr(
+        "src.integrations.runpod.ensure_blender_template", fake_template
+    )
     monkeypatch.setattr("src.integrations.runpod.create_a6000_pod", fake_create)
+
+    async def verified_manifest(image_name):
+        return {"image_name": image_name, "digest": f"sha256:{'2' * 64}"}
+
+    monkeypatch.setattr(
+        "src.integrations.runpod.verify_blender_image_manifest", verified_manifest
+    )
     headers = {"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token}
     rejected = await api_client.post(
         "/api/blender/pods",
@@ -555,13 +592,15 @@ async def test_production_render_creation_is_atomic_idempotent_and_versioned(
     await integration_vault.mark_verification("runpod", True)
 
     async def fake_pods():
-        return [{
-            "id": "pod-safe-123",
-            "name": "One A6000",
-            "desired_status": "EXITED",
-            "gpu_count": 1,
-            "cost_per_hour": 0.53,
-        }]
+        return [
+            {
+                "id": "pod-safe-123",
+                "name": "One A6000",
+                "desired_status": "EXITED",
+                "gpu_count": 1,
+                "cost_per_hour": 0.53,
+            }
+        ]
 
     monkeypatch.setattr("src.integrations.runpod.list_pods", fake_pods)
     body = {
@@ -598,12 +637,16 @@ async def test_production_render_creation_is_atomic_idempotent_and_versioned(
     async with server.async_session() as session:
         persisted = await session.get(RenderJobModel, resource["id"])
         queued = (
-            await session.execute(
-                server.select(WorkflowRunModel).where(
-                    WorkflowRunModel.job_type == "blender.render_stage"
+            (
+                await session.execute(
+                    server.select(WorkflowRunModel).where(
+                        WorkflowRunModel.job_type == "blender.render_stage"
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert persisted is not None
     assert persisted.render_mode == "kasm_gui"
     assert len(queued) == 1
@@ -626,7 +669,9 @@ async def test_production_render_creation_is_atomic_idempotent_and_versioned(
     assert stale.json()["error"]["code"] == "VERSION_CONFLICT"
 
     async with server.async_session() as session:
-        persisted = await session.get(RenderJobModel, resource["id"], with_for_update=True)
+        persisted = await session.get(
+            RenderJobModel, resource["id"], with_for_update=True
+        )
         assert persisted is not None
         persisted.render_mode = "headless"
         persisted.status = "awaiting_benchmark_approval"
@@ -656,14 +701,20 @@ async def test_production_render_creation_is_atomic_idempotent_and_versioned(
     assert approved.json()["resource"]["status"] == "rendering"
     async with server.async_session() as session:
         batches = (
-            await session.execute(
-                server.select(WorkflowRunModel).where(
-                    WorkflowRunModel.job_type == "blender.render_stage",
-                    WorkflowRunModel.payload["render_job_id"].as_string() == resource["id"],
-                    WorkflowRunModel.payload["stage"].as_string() == "render.frame_batch",
+            (
+                await session.execute(
+                    server.select(WorkflowRunModel).where(
+                        WorkflowRunModel.job_type == "blender.render_stage",
+                        WorkflowRunModel.payload["render_job_id"].as_string()
+                        == resource["id"],
+                        WorkflowRunModel.payload["stage"].as_string()
+                        == "render.frame_batch",
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert len(batches) == 1
     assert batches[0].payload["frames"] == list(range(1, 11))
 
@@ -682,13 +733,15 @@ async def test_flamenco_render_is_headless_only_and_approval_queues_prepared_cop
     await integration_vault.mark_verification("runpod", True)
 
     async def fake_pods():
-        return [{
-            "id": "pod-safe-123",
-            "name": "One A6000",
-            "desired_status": "EXITED",
-            "gpu_count": 1,
-            "cost_per_hour": 0.53,
-        }]
+        return [
+            {
+                "id": "pod-safe-123",
+                "name": "One A6000",
+                "desired_status": "EXITED",
+                "gpu_count": 1,
+                "cost_per_hour": 0.53,
+            }
+        ]
 
     monkeypatch.setattr("src.integrations.runpod.list_pods", fake_pods)
     body = {
@@ -711,20 +764,28 @@ async def test_flamenco_render_is_headless_only_and_approval_queues_prepared_cop
 
     incompatible = await api_client.post(
         "/api/blender/render-jobs",
-        json={**body, "render_mode": "kasm_gui", "idempotency_key": "flamenco-gui-reject-001"},
+        json={
+            **body,
+            "render_mode": "kasm_gui",
+            "idempotency_key": "flamenco-gui-reject-001",
+        },
         headers=headers,
     )
     assert incompatible.status_code == 422
     assert incompatible.json()["error"]["code"] == "FLAMENCO_HEADLESS_ONLY"
 
-    created = await api_client.post("/api/blender/render-jobs", json=body, headers=headers)
+    created = await api_client.post(
+        "/api/blender/render-jobs", json=body, headers=headers
+    )
     assert created.status_code == 200, created.text
     resource = created.json()["resource"]
     assert resource["scheduler"] == "flamenco"
     assert resource["coordinator_pod_id"] == "pod-safe-123"
 
     async with server.async_session() as session:
-        persisted = await session.get(RenderJobModel, resource["id"], with_for_update=True)
+        persisted = await session.get(
+            RenderJobModel, resource["id"], with_for_update=True
+        )
         assert persisted is not None
         persisted.status = "awaiting_benchmark_approval"
         persisted.stage = "render.benchmark"
@@ -749,39 +810,53 @@ async def test_flamenco_render_is_headless_only_and_approval_queues_prepared_cop
     assert approved.json()["resource"]["stage"] == "render.prepare_flamenco"
     async with server.async_session() as session:
         prepared = (
-            await session.execute(
-                server.select(WorkflowRunModel).where(
-                    WorkflowRunModel.job_type == "blender.render_stage",
-                    WorkflowRunModel.payload["render_job_id"].as_string() == resource["id"],
-                    WorkflowRunModel.payload["stage"].as_string() == "render.prepare_flamenco",
+            (
+                await session.execute(
+                    server.select(WorkflowRunModel).where(
+                        WorkflowRunModel.job_type == "blender.render_stage",
+                        WorkflowRunModel.payload["render_job_id"].as_string()
+                        == resource["id"],
+                        WorkflowRunModel.payload["stage"].as_string()
+                        == "render.prepare_flamenco",
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert len(prepared) == 1
 
 
 def test_meta_webhook_parser_extracts_only_supported_comment_fields():
     payload = {
         "object": "instagram",
-        "entry": [{"changes": [{
-            "field": "comments",
-            "value": {
-                "id": "comment-1",
-                "text": "Interested in this",
-                "from": {"username": "prospect", "private": "discarded"},
-                "media": {"id": "media-1", "extra": "discarded"},
-                "untrusted": {"nested": "discarded"},
-            },
-        }]}],
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "field": "comments",
+                        "value": {
+                            "id": "comment-1",
+                            "text": "Interested in this",
+                            "from": {"username": "prospect", "private": "discarded"},
+                            "media": {"id": "media-1", "extra": "discarded"},
+                            "untrusted": {"nested": "discarded"},
+                        },
+                    }
+                ]
+            }
+        ],
     }
-    assert server._instagram_webhook_comments(payload) == [{
-        "comment_id": "comment-1",
-        "comment_text": "Interested in this",
-        "username": "prospect",
-        "media_id": "media-1",
-        "caption": "",
-        "timestamp": "",
-    }]
+    assert server._instagram_webhook_comments(payload) == [
+        {
+            "comment_id": "comment-1",
+            "comment_text": "Interested in this",
+            "username": "prospect",
+            "media_id": "media-1",
+            "caption": "",
+            "timestamp": "",
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -45,6 +45,28 @@ RUN go version | grep --fixed-strings 'go1.26.6' \
     && mkdir -p /tmp/flamenco-release \
     && cp flamenco-manager flamenco-worker LICENSE README.md /tmp/flamenco-release/
 
+# Build a tiny, auditable compatibility library against the same Noble base
+# as the final image. Some RunPod hosts return EPERM for close_range(2), while
+# GLib only activates its safe fd-walk fallback for ENOSYS. Without this shim,
+# XFCE cannot launch any desktop application even though the application is
+# healthy. The shim preserves the denied syscall and only translates errno.
+FROM ${KASM_BASE_IMAGE} AS desktop-compat-build
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY docker/blender-runpod/close_range_compat.c /tmp/close_range_compat.c
+
+RUN gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
+        -Wl,-z,relro,-z,now \
+        -o /tmp/libcouncil-close-range-compat.so \
+        /tmp/close_range_compat.c \
+    && readelf -Ws /tmp/libcouncil-close-range-compat.so \
+        | grep --extended-regexp '[[:space:]]close_range$'
+
 FROM ${KASM_BASE_IMAGE}
 
 USER root
@@ -104,6 +126,8 @@ RUN curl --fail --location --retry 5 --retry-delay 3 \
 # authenticated agent. Workers use shared /workspace paths. The source/build
 # toolchain is discarded with the builder stage.
 COPY --from=flamenco-build /tmp/flamenco-release/ /opt/flamenco/
+COPY --from=desktop-compat-build /tmp/libcouncil-close-range-compat.so /opt/council/libcouncil-close-range-compat.so
+ENV LD_PRELOAD=/opt/council/libcouncil-close-range-compat.so
 RUN /opt/flamenco/flamenco-manager -version | grep --fixed-strings "${FLAMENCO_VERSION}" \
     && /opt/flamenco/flamenco-worker -version | grep --fixed-strings "${FLAMENCO_VERSION}"
 

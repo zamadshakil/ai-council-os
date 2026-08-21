@@ -22,43 +22,62 @@ def test_representative_frames_and_batches_are_deterministic_and_disjoint():
 
 
 def test_memory_gate_requires_real_totals_and_safe_growth():
-    safe, metrics = blender_listener._usage_within_limits({
-        "peak_vram_mb": 20_000,
-        "vram_total_mb": 48_000,
-        "peak_host_ram_mb": 40_000,
-        "host_ram_total_mb": 64_000,
-        "host_ram_growth_percent": 2.5,
-    })
+    safe, metrics = blender_listener._usage_within_limits(
+        {
+            "peak_vram_mb": 20_000,
+            "vram_total_mb": 48_000,
+            "peak_host_ram_mb": 40_000,
+            "host_ram_total_mb": 64_000,
+            "host_ram_growth_percent": 2.5,
+        }
+    )
     assert safe is True
     assert metrics["peak_vram_percent"] < 80
 
-    unsafe, _ = blender_listener._usage_within_limits({
-        "peak_vram_mb": 40_000,
-        "vram_total_mb": 48_000,
-        "peak_host_ram_mb": 40_000,
-        "host_ram_total_mb": 64_000,
-        "host_ram_growth_percent": 2.5,
-    })
+    unsafe, _ = blender_listener._usage_within_limits(
+        {
+            "peak_vram_mb": 40_000,
+            "vram_total_mb": 48_000,
+            "peak_host_ram_mb": 40_000,
+            "host_ram_total_mb": 64_000,
+            "host_ram_growth_percent": 2.5,
+        }
+    )
     assert unsafe is False
     assert blender_listener._usage_within_limits({})[0] is False
 
 
 def test_batch_size_falls_back_to_one_when_soak_memory_grows():
-    assert blender_listener._recommended_batch_size({
-        "host_ram_growth_percent": 1.1,
-        "peak_vram_percent": 45,
-        "peak_host_ram_percent": 50,
-    }) == 1
-    assert blender_listener._recommended_batch_size({
-        "host_ram_growth_percent": 0.2,
-        "peak_vram_percent": 72,
-        "peak_host_ram_percent": 50,
-    }) == 2
-    assert blender_listener._recommended_batch_size({
-        "host_ram_growth_percent": 0.2,
-        "peak_vram_percent": 45,
-        "peak_host_ram_percent": 50,
-    }) == 10
+    assert (
+        blender_listener._recommended_batch_size(
+            {
+                "host_ram_growth_percent": 1.1,
+                "peak_vram_percent": 45,
+                "peak_host_ram_percent": 50,
+            }
+        )
+        == 1
+    )
+    assert (
+        blender_listener._recommended_batch_size(
+            {
+                "host_ram_growth_percent": 0.2,
+                "peak_vram_percent": 72,
+                "peak_host_ram_percent": 50,
+            }
+        )
+        == 2
+    )
+    assert (
+        blender_listener._recommended_batch_size(
+            {
+                "host_ram_growth_percent": 0.2,
+                "peak_vram_percent": 45,
+                "peak_host_ram_percent": 50,
+            }
+        )
+        == 10
+    )
 
 
 def test_drive_error_codes_distinguish_quota_from_rate_limit():
@@ -79,7 +98,9 @@ async def test_agent_health_requires_the_generated_bearer_token(monkeypatch, tmp
     monkeypatch.setenv("BLENDER_AGENT_TOKEN", token)
     monkeypatch.setenv("BLENDER_WORKSPACE_ROOT", str(tmp_path))
     transport = httpx.ASGITransport(app=blender_listener.app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://agent") as client:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://agent"
+    ) as client:
         anonymous = await client.get("/healthz")
         assert anonymous.status_code == 401
         authorized = await client.get(
@@ -139,17 +160,56 @@ async def test_runtime_update_preserves_workspace_and_uses_immutable_image(monke
 
 
 @pytest.mark.asyncio
+async def test_registry_manifest_gate_proves_public_immutable_image():
+    image = f"ghcr.io/astrofood/ai-council-blender:{'d' * 40}"
+    digest = f"sha256:{'a' * 64}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"token": "anonymous-pull-token"})
+        assert request.method == "HEAD"
+        assert request.url.path.endswith(f"/manifests/{'d' * 40}")
+        assert request.headers["authorization"] == "Bearer anonymous-pull-token"
+        return httpx.Response(200, headers={"Docker-Content-Digest": digest})
+
+    runpod._manifest_cache.clear()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await runpod.verify_blender_image_manifest(image, client=client)
+    assert result["image_name"] == image
+    assert result["digest"] == digest
+
+
+@pytest.mark.asyncio
+async def test_registry_manifest_gate_rejects_unpublished_tag():
+    image = f"ghcr.io/astrofood/ai-council-blender:{'f' * 40}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"token": "anonymous-pull-token"})
+        return httpx.Response(404)
+
+    runpod._manifest_cache.clear()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(runpod.RunPodError) as captured:
+            await runpod.verify_blender_image_manifest(image, client=client)
+    assert captured.value.code == "BLENDER_IMAGE_MANIFEST_NOT_FOUND"
+    assert captured.value.http_status == 503
+
+
+@pytest.mark.asyncio
 async def test_pod_lifecycle_uses_current_rest_contract(monkeypatch):
     calls: list[tuple[str, str]] = []
 
     async def fake_rest(method, path, *, payload=None):
         calls.append((method, path))
         if method == "GET":
-            return [{
-                "id": "pod-safe-123",
-                "desiredStatus": "RUNNING" if len(calls) == 2 else "EXITED",
-                "gpu": {"count": 1},
-            }]
+            return [
+                {
+                    "id": "pod-safe-123",
+                    "desiredStatus": "RUNNING" if len(calls) == 2 else "EXITED",
+                    "gpu": {"count": 1},
+                }
+            ]
         return {
             "id": "pod-safe-123",
             "desiredStatus": "RUNNING" if path.endswith("/start") else "EXITED",
@@ -157,6 +217,7 @@ async def test_pod_lifecycle_uses_current_rest_contract(monkeypatch):
         }
 
     monkeypatch.setattr(runpod, "_rest", fake_rest)
+
     async def fake_readiness(_pod_id):
         return {"status": "ready", "gpu_available": 1}
 
@@ -175,7 +236,9 @@ async def test_pod_lifecycle_uses_current_rest_contract(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_resume_blocks_before_paid_start_when_original_machine_has_no_gpu(monkeypatch):
+async def test_resume_blocks_before_paid_start_when_original_machine_has_no_gpu(
+    monkeypatch,
+):
     calls: list[tuple[str, str]] = []
 
     async def fake_readiness(_pod_id):
@@ -218,22 +281,27 @@ async def test_list_pods_uses_current_rest_shape(monkeypatch):
 
     async def fake_rest(method, path, *, payload=None):
         calls.append((method, path))
-        return [{
-            "id": "pod-safe-123",
-            "name": "A6000 smoke",
-            "desiredStatus": "EXITED",
-            "image": "runpod/pytorch:current",
-            "gpu": {"count": 1},
-            "costPerHr": "0.53",
-            "ports": ["6901/http", "8001/http"],
-        }]
+        return [
+            {
+                "id": "pod-safe-123",
+                "name": "A6000 smoke",
+                "desiredStatus": "EXITED",
+                "image": "runpod/pytorch:current",
+                "gpu": {"count": 1},
+                "costPerHr": "0.53",
+                "ports": ["6901/http", "8001/http"],
+            }
+        ]
 
     monkeypatch.setattr(runpod, "_rest", fake_rest)
+
     async def fake_runtimes():
         return {
             "pod-safe-123": {
                 "uptimeInSeconds": 42,
-                "gpus": [{"id": "gpu-1", "gpuUtilPercent": 73, "memoryUtilPercent": 21}],
+                "gpus": [
+                    {"id": "gpu-1", "gpuUtilPercent": 73, "memoryUtilPercent": 21}
+                ],
                 "container": {"cpuPercent": 12, "memoryPercent": 8},
             }
         }
@@ -250,7 +318,9 @@ async def test_list_pods_uses_current_rest_shape(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_blender_template_is_immutable_reusable_and_contains_no_secrets(monkeypatch):
+async def test_blender_template_is_immutable_reusable_and_contains_no_secrets(
+    monkeypatch,
+):
     calls: list[tuple[str, str, dict | None]] = []
     image = f"ghcr.io/astrofood/ai-council-blender:{'c' * 40}"
 
@@ -328,7 +398,9 @@ async def test_a6000_provisioning_is_exactly_one_secure_on_demand_gpu(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_render_snapshots_are_idempotent_and_truthful(session_factory, monkeypatch):
+async def test_render_snapshots_are_idempotent_and_truthful(
+    session_factory, monkeypatch
+):
     monkeypatch.setattr(rendering.db, "async_session", session_factory)
     async with session_factory() as session:
         job = RenderJobModel(
@@ -349,24 +421,30 @@ async def test_render_snapshots_are_idempotent_and_truthful(session_factory, mon
         stage="render.frame_batch",
         agent_state={
             "status": "completed",
-            "telemetry": [{
-                "gpu_index": 0,
-                "blender_pid": 123,
-                "gpu_utilization": 91,
-                "vram_used_mb": 20_000,
-                "vram_total_mb": 48_000,
-                "power_watts": 260,
-                "host_ram_used_mb": 30_000,
-                "host_ram_total_mb": 64_000,
-            }],
-            "report": {"frames": [{
-                "frame_number": 1,
-                "status": "completed",
-                "output_path": "/workspace/render_jobs/job/frames/frame_000001.png",
-                "checksum": "f" * 64,
-                "size_bytes": 1024,
-                "render_seconds": 30.0,
-            }]},
+            "telemetry": [
+                {
+                    "gpu_index": 0,
+                    "blender_pid": 123,
+                    "gpu_utilization": 91,
+                    "vram_used_mb": 20_000,
+                    "vram_total_mb": 48_000,
+                    "power_watts": 260,
+                    "host_ram_used_mb": 30_000,
+                    "host_ram_total_mb": 64_000,
+                }
+            ],
+            "report": {
+                "frames": [
+                    {
+                        "frame_number": 1,
+                        "status": "completed",
+                        "output_path": "/workspace/render_jobs/job/frames/frame_000001.png",
+                        "checksum": "f" * 64,
+                        "size_bytes": 1024,
+                        "render_seconds": 30.0,
+                    }
+                ]
+            },
         },
     )
     counted = await rendering.refresh_frame_counts(job_id)
@@ -379,7 +457,9 @@ async def test_render_snapshots_are_idempotent_and_truthful(session_factory, mon
 
 
 @pytest.mark.asyncio
-async def test_preflight_snapshot_preserves_requested_frame_step(session_factory, monkeypatch):
+async def test_preflight_snapshot_preserves_requested_frame_step(
+    session_factory, monkeypatch
+):
     monkeypatch.setattr(rendering.db, "async_session", session_factory)
     async with session_factory() as session:
         job = RenderJobModel(

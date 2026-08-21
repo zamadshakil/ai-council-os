@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,6 +22,15 @@ _RUNPOD_KASM_VNC_OPTIONS = (
     "-PreferBandwidth -DynamicQualityMin=4 -DynamicQualityMax=7 "
     "-DLP_ClipDelay=0 -sslOnly 0"
 )
+_GHCR_MANIFEST_ACCEPT = ", ".join(
+    (
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    )
+)
+_manifest_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
 
 class RunPodError(RuntimeError):
@@ -83,7 +93,12 @@ def _provider_failure(status: int, data: object) -> RunPodError:
         )
     if status == 402 or any(
         marker in description
-        for marker in ("insufficient funds", "insufficient balance", "billing", "credit")
+        for marker in (
+            "insufficient funds",
+            "insufficient balance",
+            "billing",
+            "credit",
+        )
     ):
         return RunPodError(
             "RunPod could not start billing for this machine. Check the RunPod account balance and billing status.",
@@ -93,7 +108,13 @@ def _provider_failure(status: int, data: object) -> RunPodError:
         )
     if any(
         marker in description
-        for marker in ("no gpu", "gpu unavailable", "not available", "no capacity", "out of stock")
+        for marker in (
+            "no gpu",
+            "gpu unavailable",
+            "not available",
+            "no capacity",
+            "out of stock",
+        )
     ):
         return RunPodError(
             "The stopped pod's original RunPod machine has no free GPU right now. Your /workspace remains preserved; refresh later or migrate the pod in RunPod.",
@@ -252,12 +273,17 @@ async def _pod_resume_readiness(pod_id: str) -> dict[str, Any]:
     available = machine.get("gpuAvailable")
     return {
         "status": (
-            "running" if pod.get("desiredStatus") == "RUNNING"
-            else "capacity_unavailable" if available == 0
-            else "ready" if isinstance(available, (int, float)) and available > 0
+            "running"
+            if pod.get("desiredStatus") == "RUNNING"
+            else "capacity_unavailable"
+            if available == 0
+            else "ready"
+            if isinstance(available, (int, float)) and available > 0
             else "unknown"
         ),
-        "gpu_available": int(available) if isinstance(available, (int, float)) else None,
+        "gpu_available": int(available)
+        if isinstance(available, (int, float))
+        else None,
         "gpu_name": str(machine.get("gpuDisplayName") or "GPU"),
         "data_center": str(machine.get("dataCenterId") or ""),
     }
@@ -274,14 +300,107 @@ def validate_blender_image(value: str) -> str:
     """Accept only a public GHCR image pinned to a full Git commit SHA."""
     image_name = value.strip().lower()
     if not _IMMUTABLE_BLENDER_IMAGE.fullmatch(image_name):
-        raise ValueError("Blender image must be an immutable GHCR reference pinned to a full Git SHA")
+        raise ValueError(
+            "Blender image must be an immutable GHCR reference pinned to a full Git SHA"
+        )
     return image_name
+
+
+async def verify_blender_image_manifest(
+    value: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, str]:
+    """Prove that the immutable public GHCR tag is pullable before RunPod sees it.
+
+    A syntactically valid forty-character tag is not evidence that CI published
+    it. Positive results are safe to cache because the tag is immutable; short
+    negative caching prevents dashboard polling from hammering GHCR while a
+    workflow is still publishing.
+    """
+    image_name = validate_blender_image(value)
+    cached = _manifest_cache.get(image_name)
+    now = time.monotonic()
+    if cached and cached[0] > now:
+        return dict(cached[1])
+
+    repository, reference = image_name.removeprefix("ghcr.io/").rsplit(":", 1)
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(12, connect=6))
+    try:
+        token_response = await client.get(
+            "https://ghcr.io/token",
+            params={
+                "service": "ghcr.io",
+                "scope": f"repository:{repository}:pull",
+            },
+        )
+        if token_response.status_code != 200:
+            raise RunPodError(
+                "The approved Blender image is not publicly pullable from GHCR.",
+                code="BLENDER_IMAGE_REGISTRY_DENIED",
+                http_status=503,
+                provider_status=token_response.status_code,
+            )
+        token_payload = token_response.json()
+        token = token_payload.get("token") or token_payload.get("access_token")
+        if not isinstance(token, str) or not token:
+            raise RunPodError(
+                "GHCR did not issue an anonymous pull token for the approved Blender image.",
+                code="BLENDER_IMAGE_REGISTRY_DENIED",
+                http_status=503,
+            )
+        manifest_response = await client.head(
+            f"https://ghcr.io/v2/{repository}/manifests/{reference}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": _GHCR_MANIFEST_ACCEPT,
+            },
+        )
+        if manifest_response.status_code == 404:
+            raise RunPodError(
+                "The smoke-approved Blender image tag has not been published to GHCR.",
+                code="BLENDER_IMAGE_MANIFEST_NOT_FOUND",
+                http_status=503,
+                provider_status=404,
+            )
+        if manifest_response.status_code != 200:
+            raise RunPodError(
+                "GHCR could not verify the approved Blender image manifest.",
+                code="BLENDER_IMAGE_MANIFEST_UNAVAILABLE",
+                http_status=503,
+                provider_status=manifest_response.status_code,
+            )
+        digest = manifest_response.headers.get("Docker-Content-Digest", "").lower()
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+            raise RunPodError(
+                "GHCR returned the image without a verifiable content digest.",
+                code="BLENDER_IMAGE_DIGEST_MISSING",
+                http_status=503,
+            )
+        result = {"image_name": image_name, "digest": digest, "reference": reference}
+        _manifest_cache[image_name] = (now + 600, result)
+        return dict(result)
+    except RunPodError:
+        raise
+    except (httpx.HTTPError, ValueError) as exc:
+        raise RunPodError(
+            "The Blender image registry is temporarily unreachable; no pod was changed.",
+            code="BLENDER_IMAGE_REGISTRY_UNAVAILABLE",
+            http_status=503,
+        ) from exc
+    finally:
+        if owns_client:
+            await client.aclose()
 
 
 def _shape_pod(pod: dict[str, Any]) -> dict[str, Any]:
     runtime = pod.get("runtime") if isinstance(pod.get("runtime"), dict) else {}
     gpu = pod.get("gpu") if isinstance(pod.get("gpu"), dict) else {}
-    runtime_ports = runtime.get("ports") if isinstance(runtime.get("ports"), list) else []
+    runtime_ports = (
+        runtime.get("ports") if isinstance(runtime.get("ports"), list) else []
+    )
     configured_ports = pod.get("ports") if isinstance(pod.get("ports"), list) else []
     proxy_url = ""
     for port in [*runtime_ports, *configured_ports]:
@@ -307,16 +426,21 @@ def _shape_pod(pod: dict[str, Any]) -> dict[str, Any]:
                 )
             except ValueError:
                 pass
-    container = runtime.get("container") if isinstance(runtime.get("container"), dict) else {}
+    container = (
+        runtime.get("container") if isinstance(runtime.get("container"), dict) else {}
+    )
     metrics_observed = any(
         key in runtime for key in ("uptimeInSeconds", "gpus", "container")
     )
     available = runtime.get("_gpuAvailable")
     desired_status = str(pod.get("desiredStatus", "UNKNOWN"))
     resume_status = (
-        "running" if desired_status == "RUNNING"
-        else "capacity_unavailable" if available == 0
-        else "ready" if isinstance(available, (int, float)) and available > 0
+        "running"
+        if desired_status == "RUNNING"
+        else "capacity_unavailable"
+        if available == 0
+        else "ready"
+        if isinstance(available, (int, float)) and available > 0
         else "unknown"
     )
     return {
@@ -398,14 +522,18 @@ async def ensure_blender_template(
     """
     image_name = validate_blender_image(image_name)
     if not 50 <= container_disk_gb <= 200 or not 50 <= volume_gb <= 2000:
-        raise ValueError("Blender template storage is outside the approved safety range")
+        raise ValueError(
+            "Blender template storage is outside the approved safety range"
+        )
     image_sha = image_name.rsplit(":", 1)[-1]
     template_name = f"Council OS Blender 5.0.1 {image_sha[:12]}"
     templates = await list_templates()
     existing = next((item for item in templates if item["name"] == template_name), None)
     if existing:
         if existing["image_name"].lower() != image_name:
-            raise RunPodError("The immutable Blender template name is already in use by another image")
+            raise RunPodError(
+                "The immutable Blender template name is already in use by another image"
+            )
         return existing
     created = await _rest(
         "POST",
@@ -454,7 +582,11 @@ async def create_a6000_pod(
     image_name = validate_blender_image(image_name)
     if not _POD_ID.fullmatch(template_id.strip()):
         raise ValueError("Invalid RunPod template identifier")
-    if len(agent_token) < 32 or len(flamenco_proxy_token) < 32 or len(kasm_password) < 16:
+    if (
+        len(agent_token) < 32
+        or len(flamenco_proxy_token) < 32
+        or len(kasm_password) < 16
+    ):
         raise ValueError("Generated Blender runtime credentials are invalid")
     if not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", idempotency_key):
         raise ValueError("Invalid provisioning idempotency key")
@@ -466,7 +598,9 @@ async def create_a6000_pod(
     existing = next((item for item in pods if item["name"] == pod_name), None)
     if existing:
         if existing["image_name"].lower() != image_name or existing["gpu_count"] != 1:
-            raise RunPodError("The idempotent Blender Pod name is already used by a different runtime")
+            raise RunPodError(
+                "The idempotent Blender Pod name is already used by a different runtime"
+            )
         return existing
     created = await _rest(
         "POST",
@@ -527,7 +661,9 @@ async def resume_pod(pod_id: str) -> dict[str, Any]:
     pod_id = _pod_id(pod_id)
     readiness = await _pod_resume_readiness(pod_id)
     if readiness.get("status") == "capacity_unavailable":
-        location = f" in {readiness['data_center']}" if readiness.get("data_center") else ""
+        location = (
+            f" in {readiness['data_center']}" if readiness.get("data_center") else ""
+        )
         raise RunPodError(
             f"This pod's original RunPod machine{location} currently has no free {readiness.get('gpu_name') or 'GPU'}. Your /workspace is preserved; refresh later or migrate the pod in RunPod.",
             code="RUNPOD_GPU_CAPACITY_UNAVAILABLE",
@@ -554,7 +690,11 @@ async def update_pod_runtime(
     """Update a stopped pod without changing or deleting its /workspace volume."""
     pod_id = _pod_id(pod_id)
     image_name = validate_blender_image(image_name)
-    if len(agent_token) < 32 or len(flamenco_proxy_token) < 32 or len(kasm_password) < 16:
+    if (
+        len(agent_token) < 32
+        or len(flamenco_proxy_token) < 32
+        or len(kasm_password) < 16
+    ):
         raise ValueError("Generated Blender runtime credentials are invalid")
     updated = await _rest(
         "POST",
@@ -602,7 +742,9 @@ async def _agent_request(
                 method, f"{_agent_base_url(pod_id)}{path}", **request_options
             )
     except httpx.HTTPError as exc:
-        raise RunPodError("The Blender agent could not be reached on the selected pod") from exc
+        raise RunPodError(
+            "The Blender agent could not be reached on the selected pod"
+        ) from exc
     try:
         data = response.json()
     except ValueError as exc:
@@ -623,18 +765,27 @@ async def verify_blender_agent(pod_id: str) -> dict[str, Any]:
     if not data.get("blender_available"):
         raise RunPodError("Blender is not installed in the selected pod image")
     if not data.get("nvidia_smi_available") or not data.get("gpu_visible"):
-        raise RunPodError("The selected pod does not expose an NVIDIA GPU to the Blender image")
+        raise RunPodError(
+            "The selected pod does not expose an NVIDIA GPU to the Blender image"
+        )
     if not data.get("workspace_writable"):
         raise RunPodError(
             "The selected pod cannot write to its persistent workspace",
             code="BLENDER_WORKSPACE_NOT_WRITABLE",
             http_status=503,
         )
-    required_tools = data.get("required_tools") if isinstance(data.get("required_tools"), dict) else {}
-    missing_tools = [name for name, available in required_tools.items() if not available]
+    required_tools = (
+        data.get("required_tools")
+        if isinstance(data.get("required_tools"), dict)
+        else {}
+    )
+    missing_tools = [
+        name for name, available in required_tools.items() if not available
+    ]
     if missing_tools:
         raise RunPodError(
-            "The Blender runtime is missing required tools: " + ", ".join(missing_tools),
+            "The Blender runtime is missing required tools: "
+            + ", ".join(missing_tools),
             code="BLENDER_RUNTIME_INCOMPLETE",
             http_status=503,
         )
@@ -681,8 +832,14 @@ async def submit_render_stage(
 ) -> dict[str, Any]:
     """Submit one allowlisted stage to the authenticated pod agent."""
     if operation not in {
-        "preflight", "benchmark", "observe_gui", "frame_batch",
-        "prepare_flamenco", "validate", "encode", "deliver",
+        "preflight",
+        "benchmark",
+        "observe_gui",
+        "frame_batch",
+        "prepare_flamenco",
+        "validate",
+        "encode",
+        "deliver",
     }:
         raise ValueError("Unsupported Blender render operation")
     if backend not in {"AUTO", "OPTIX", "CUDA"}:
