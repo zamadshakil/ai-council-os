@@ -85,13 +85,13 @@ function GraphNodeShape({ node, selected, onSelect, reduceMotion }: {
       data-active={node.active}
       data-selected={selected}
     >
-      <rect x="-91" y="-34" width="182" height="68" rx="17" className="command-graph-node-panel" />
-      <circle cx="-66" cy="0" r="17" className="command-graph-node-icon" />
-      <text x="-66" y="4" textAnchor="middle" className="command-graph-node-glyph">{node.glyph}</text>
-      <text x="-40" y="-10" className="command-graph-node-label">{node.label}</text>
-      <text x="-40" y="8" className="command-graph-node-value">{node.value}</text>
-      <text x="-40" y="24" className="command-graph-node-status">{node.status}</text>
-      {node.active && <motion.circle cx="76" cy="-19" r="3.5" fill={node.color}
+      <rect x="-98" y="-37" width="196" height="74" rx="19" className="command-graph-node-panel" />
+      <circle cx="-70" cy="0" r="18" className="command-graph-node-icon" />
+      <text x="-70" y="4" textAnchor="middle" className="command-graph-node-glyph">{node.glyph}</text>
+      <text x="-43" y="-11" className="command-graph-node-label">{node.label}</text>
+      <text x="-43" y="9" className="command-graph-node-value">{node.value}</text>
+      <text x="-43" y="26" className="command-graph-node-status">{node.status}</text>
+      {node.active && <motion.circle cx="83" cy="-21" r="3.5" fill={node.color}
         animate={reduceMotion ? undefined : { opacity: [0.35, 1, 0.35], r: [3.2, 4.3, 3.2] }}
         transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }} />}
     </motion.g>

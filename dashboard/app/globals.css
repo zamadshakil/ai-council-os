@@ -33,7 +33,7 @@
   position: relative;
   isolation: isolate;
   background:
-    radial-gradient(circle at 43% 48%, rgba(16, 149, 186, 0.13), transparent 27rem),
+    radial-gradient(circle at 43% 48%, rgba(16, 149, 186, 0.16), transparent 27rem),
     linear-gradient(rgba(80, 145, 190, 0.06) 1px, transparent 1px),
     linear-gradient(90deg, rgba(80, 145, 190, 0.06) 1px, transparent 1px),
     linear-gradient(145deg, #081626, #030b15 72%);
@@ -132,7 +132,7 @@
 
 .command-graph-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 16.5rem;
+  grid-template-columns: minmax(0, 1fr) 18rem;
   min-height: 38rem;
 }
 
@@ -148,7 +148,7 @@
   inset: 0;
   content: "";
   pointer-events: none;
-  background: radial-gradient(circle at 50% 48%, transparent 0 12rem, rgba(0, 3, 10, 0.02) 21rem, rgba(0, 3, 10, 0.32) 100%);
+  background: radial-gradient(circle at 50% 48%, transparent 0 12rem, rgba(0, 3, 10, 0.01) 21rem, rgba(0, 3, 10, 0.24) 100%);
 }
 
 .command-graph-svg {
@@ -234,7 +234,7 @@
 }
 
 .command-graph-node-panel {
-  fill: rgba(8, 21, 36, 0.93);
+  fill: rgba(9, 23, 39, 0.95);
   stroke: rgba(171, 205, 231, 0.18);
   stroke-width: 1;
   filter: drop-shadow(0 12px 18px rgba(0, 3, 10, 0.32));
@@ -263,19 +263,19 @@
 
 .command-graph-node-label {
   fill: #eef6ff;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 850;
 }
 
 .command-graph-node-value {
   fill: #b7c9dc;
-  font-size: 9px;
+  font-size: 9.5px;
   font-weight: 700;
 }
 
 .command-graph-node-status {
-  fill: #617891;
-  font-size: 7.5px;
+  fill: #7890aa;
+  font-size: 8px;
   font-weight: 620;
 }
 
@@ -1162,15 +1162,19 @@ a {
 }
 
 .fabric-row {
-  min-height: 4.25rem;
-  border: 1px solid rgba(161, 197, 226, 0.1);
-  background: rgba(5, 15, 27, 0.64);
+  min-height: 7.25rem;
+  overflow: hidden;
+  border: 1px solid rgba(161, 197, 226, 0.13);
+  background:
+    linear-gradient(110deg, rgba(14, 34, 54, 0.76), rgba(5, 15, 27, 0.78)),
+    rgba(5, 15, 27, 0.72);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
   transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
 }
 
 .fabric-row[data-active="true"] {
-  border-color: rgba(72, 227, 162, 0.18);
-  background: linear-gradient(90deg, rgba(38, 133, 141, 0.055), rgba(5, 15, 27, 0.72));
+  border-color: rgba(72, 227, 162, 0.25);
+  background: linear-gradient(110deg, rgba(23, 92, 91, 0.16), rgba(7, 20, 34, 0.86));
 }
 
 .fabric-row:hover,
@@ -1184,24 +1188,32 @@ a {
 
 .fabric-row-name {
   position: absolute;
-  top: 0.45rem;
-  left: 1rem;
+  top: 0.75rem;
+  left: 1.25rem;
   display: flex;
-  max-width: calc(100% - 14rem);
+  max-width: calc(100% - 15rem);
   align-items: center;
   gap: 0.55rem;
   overflow: hidden;
-  color: #bed0e4;
-  font-size: 0.67rem;
-  font-weight: 800;
+  color: #dce9f7;
+  font-size: 0.72rem;
+  font-weight: 850;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.fabric-row-name small {
+.fabric-row-name strong {
   overflow: hidden;
-  color: #7890aa;
-  font-size: 0.59rem;
+  text-overflow: ellipsis;
+}
+
+.fabric-row-name small {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  overflow: hidden;
+  color: #8aa1ba;
+  font-size: 0.61rem;
   font-weight: 650;
   text-transform: capitalize;
   text-overflow: ellipsis;
@@ -1209,11 +1221,11 @@ a {
 
 .fabric-row-badges {
   position: absolute;
-  top: 0.42rem;
-  right: 0.75rem;
+  top: 0.68rem;
+  right: 1rem;
   display: flex;
   align-items: center;
-  gap: 0.55rem;
+  gap: 0.65rem;
   font-size: 0.58rem;
   font-weight: 850;
   letter-spacing: 0.06em;
@@ -1223,9 +1235,9 @@ a {
 .fabric-rail {
   position: absolute;
   z-index: 0;
-  top: 50%;
-  right: 7%;
-  left: 7%;
+  top: 4.7rem;
+  right: 8%;
+  left: 8%;
   height: 1px;
   background: linear-gradient(90deg, rgba(89, 225, 247, 0.32), rgba(167, 139, 250, 0.26), rgba(245, 201, 107, 0.26), rgba(72, 227, 162, 0.3));
 }
@@ -1254,7 +1266,7 @@ a {
 .fabric-packet {
   position: absolute;
   z-index: 1;
-  top: calc(50% - 0.25rem);
+  top: 4.45rem;
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 999px;
@@ -1262,22 +1274,44 @@ a {
   box-shadow: 0 0 14px rgba(89, 225, 247, 0.9);
 }
 
+.fabric-stages {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: center;
+  gap: clamp(1.25rem, 3vw, 3.5rem);
+}
+
 .fabric-stage {
   position: relative;
   z-index: 2;
   display: flex;
-  width: fit-content;
+  width: 100%;
   max-width: 100%;
   align-items: center;
   gap: 0.55rem;
   border: 1px solid rgba(180, 210, 234, 0.12);
-  border-radius: 0.75rem;
-  padding: 0.55rem 0.7rem;
+  border-radius: 0.9rem;
+  padding: 0.7rem 0.75rem;
   color: #c7d7e8;
-  background: #0b1726;
-  font-size: 0.7rem;
+  background: linear-gradient(145deg, rgba(17, 35, 56, 0.98), rgba(8, 20, 34, 0.98));
+  font-size: 0.72rem;
   font-weight: 750;
-  box-shadow: 0 6px 18px rgba(0, 4, 12, 0.25), inset 0 1px rgba(255, 255, 255, 0.04);
+  box-shadow: 0 8px 20px rgba(0, 4, 12, 0.3), inset 0 1px rgba(255, 255, 255, 0.055);
+}
+
+.fabric-stage b {
+  position: absolute;
+  top: -0.52rem;
+  left: 0.6rem;
+  border: 1px solid rgba(166, 209, 234, 0.12);
+  border-radius: 999px;
+  padding: 0.08rem 0.3rem;
+  color: #58728d;
+  background: #081523;
+  font-size: 0.48rem;
+  letter-spacing: 0.08em;
 }
 
 .fabric-stage i {
@@ -1444,9 +1478,13 @@ html[data-reduce-transparency] .liquid-nav-selection {
   }
 
   .fabric-row {
+    min-height: 0;
+    padding: 4.5rem 0.75rem 0.75rem;
+  }
+
+  .fabric-stages {
     grid-template-columns: 1fr 1fr;
-    gap: 0.55rem;
-    padding: 3.1rem 0.75rem 0.75rem;
+    gap: 0.7rem;
   }
 
   .fabric-stage {
@@ -1464,7 +1502,7 @@ html[data-reduce-transparency] .liquid-nav-selection {
   }
 
   .fabric-row-badges {
-    top: 1.75rem;
+    top: 2.35rem;
     right: auto;
     left: 0.75rem;
   }

@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { ArrowUpRight, Bot, CheckCircle2, Radio, Send, Sparkles } from 'lucide-react';
+import { ArrowUpRight, Bot, CheckCircle2, Clock3, Radio, Send, Sparkles } from 'lucide-react';
 import { WorkflowDefinition } from '../lib/types';
 
 const FLOW_META: Record<string, { source: string; council: string; destination: string }> = {
@@ -37,9 +37,9 @@ export function WorkflowFabric({ workflows }: { workflows: WorkflowDefinition[] 
         <span className="topology-legend"><span className={`status-dot ${online > 0 ? 'text-emerald-300' : 'text-cyan-300'}`} />{online}/{workflows.length} channels online</span>
       </header>
 
-      <div className="overflow-x-auto px-5 pb-5 pt-4 lg:px-6">
-        <div className="fabric-canvas min-w-[820px]">
-          <div className="fabric-headings grid grid-cols-[1.2fr_1fr_.9fr_1.2fr] gap-10 px-4 pb-3 text-[10px] font-black uppercase tracking-[.17em] text-slate-600">
+      <div className="overflow-x-auto px-4 pb-5 pt-4 lg:px-6">
+        <div className="fabric-canvas min-w-[760px]">
+          <div className="fabric-headings grid grid-cols-4 gap-5 px-5 pb-3 text-[10px] font-black uppercase tracking-[.17em] text-slate-500">
             <span className="flex items-center gap-2"><Radio className="h-3.5 w-3.5" />Signal</span>
             <span className="flex items-center gap-2"><Bot className="h-3.5 w-3.5" />AI council</span>
             <span className="flex items-center gap-2"><CheckCircle2 className="h-3.5 w-3.5" />Human gate</span>
@@ -55,10 +55,10 @@ export function WorkflowFabric({ workflows }: { workflows: WorkflowDefinition[] 
                   key={workflow.id}
                   href={`/workflows/${workflow.id}`}
                   aria-label={`Open ${workflow.display_name} configuration`}
-                  className="fabric-row group relative grid grid-cols-[1.2fr_1fr_.9fr_1.2fr] items-center gap-10 rounded-2xl px-4 pb-3 pt-9"
+                  className="fabric-row group relative block rounded-[20px] px-5 pb-4 pt-12"
                   data-active={isOnline}
                 >
-                  <span className="fabric-row-name">{workflow.display_name}<small>{scheduleLabel(workflow)}</small></span>
+                  <span className="fabric-row-name"><strong>{workflow.display_name}</strong><small><Clock3 className="h-3 w-3" />{scheduleLabel(workflow)}</small></span>
                   <span className="fabric-row-badges">
                     <span className={ready ? 'text-emerald-300' : 'text-amber-300'}>{ready ? 'Ready' : workflow.credential_status}</span>
                     <span className={isOnline ? 'text-emerald-300' : 'text-slate-500'}>{isOnline ? 'Live' : workflow.is_paused ? 'Paused' : 'Off'}</span>
@@ -74,10 +74,12 @@ export function WorkflowFabric({ workflows }: { workflows: WorkflowDefinition[] 
                       transition={{ duration: 3.2, repeat: Infinity, ease: 'linear', delay: (workflow.id.length % 5) * 0.22 }}
                     />
                   )}
-                  <span className="fabric-stage"><i />{meta.source}</span>
-                  <span className="fabric-stage"><i />{meta.council}</span>
-                  <span className="fabric-stage fabric-human"><i />Approve</span>
-                  <span className="fabric-stage"><i />{meta.destination}</span>
+                  <span className="fabric-stages">
+                    <span className="fabric-stage"><b>01</b><i />{meta.source}</span>
+                    <span className="fabric-stage"><b>02</b><i />{meta.council}</span>
+                    <span className="fabric-stage fabric-human"><b>03</b><i />Human approval</span>
+                    <span className="fabric-stage"><b>04</b><i />{meta.destination}</span>
+                  </span>
                 </Link>
               );
             })}
