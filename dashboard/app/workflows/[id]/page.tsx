@@ -131,6 +131,25 @@ export default function WorkflowDetailPage() {
     return () => { active = false; };
   }, [workflowId]);
 
+  useEffect(() => {
+    if (workflowId !== 'content_engine') return;
+    const raw = window.sessionStorage.getItem('council-os:content-engine-draft');
+    if (!raw) return;
+    try {
+      const draft = JSON.parse(raw) as { title?: string; transcript?: string; sourceId?: string };
+      window.sessionStorage.removeItem('council-os:content-engine-draft');
+      const timer = window.setTimeout(() => {
+        setVideoTitle(draft.title ?? '');
+        setTranscript(draft.transcript ?? '');
+        setVideoId(draft.sourceId ?? '');
+        setNotice('Your draft request was moved here. Review the source, then queue the six-destination automation.');
+      }, 0);
+      return () => window.clearTimeout(timer);
+    } catch {
+      window.sessionStorage.removeItem('council-os:content-engine-draft');
+    }
+  }, [workflowId]);
+
   const verified = useMemo(() => workflow?.credential_status === 'connected' || workflow?.credential_status === 'verified', [workflow]);
   const scheduleEditable = workflow?.id === 'youtube_comments' || workflow?.id === 'reddit_prospector' || workflow?.id === 'instagram_comments';
 
@@ -248,6 +267,9 @@ export default function WorkflowDetailPage() {
         <section className="surface-card rounded-2xl p-6">
           <h2 className="font-bold text-slate-100">Content source</h2>
           <p className="mt-1 text-sm text-slate-500">Each platform variant receives its own generator/critic validation and approval record.</p>
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+            {['LinkedIn', 'X', 'Instagram', 'Facebook', 'Reddit', 'Discord'].map((platform) => <div key={platform} className="rounded-xl border border-white/10 bg-white/[0.025] px-3 py-3 text-center text-xs font-bold text-slate-300"><span className="mb-1 block text-cyan-300">1 approval</span>{platform}</div>)}
+          </div>
           <input value={videoTitle} onChange={(event) => setVideoTitle(event.target.value)} placeholder="Video or source title" className="mt-4 h-11 w-full input-shell rounded-xl px-3 text-sm text-slate-100" />
           <input required value={videoId} onChange={(event) => setVideoId(event.target.value)} placeholder="Stable source ID or YouTube video ID" className="mt-3 h-11 w-full input-shell rounded-xl px-3 text-sm text-slate-100" />
           <input type="url" value={mediaUrl} onChange={(event) => setMediaUrl(event.target.value)} placeholder="Public image/video URL (required before Instagram approval)" className="mt-3 h-11 w-full input-shell rounded-xl px-3 text-sm text-slate-100" />

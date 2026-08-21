@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { BookOpen, Check, FileText, Lightbulb, Send, Target, Users } from 'lucide-react';
+import { ArrowRight, BookOpen, Check, FileText, Lightbulb, Send, Target, Users, Workflow } from 'lucide-react';
 import { fetchKnowledgeDocuments, runCouncil } from '../lib/api';
 import { CouncilName, KnowledgeDoc, MutationEnvelope, Priority, Task } from '../lib/types';
 
@@ -32,6 +32,20 @@ export default function CouncilsPage() {
   const [contactCompany, setContactCompany] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+
+  const mentionedPlatforms = ['linkedin', 'instagram', 'facebook', 'reddit', 'discord', 'youtube', ' x ', 'twitter']
+    .filter((platform) => ` ${taskDescription.toLowerCase()} `.includes(platform));
+  const isMultiPlatformAutomation = mentionedPlatforms.length >= 2
+    || /multi[- ]platform|separate (?:professional )?posts|all (?:social )?platforms/i.test(taskDescription);
+
+  function openContentAutomation() {
+    window.sessionStorage.setItem('council-os:content-engine-draft', JSON.stringify({
+      title: 'Multi-platform content request',
+      transcript: taskDescription,
+      sourceId: `manual-${Date.now()}`,
+    }));
+    router.push('/workflows/content_engine?from=council');
+  }
 
   useEffect(() => {
     void fetchKnowledgeDocuments().then(setDocuments).catch(() => setDocuments([]));
@@ -65,8 +79,8 @@ export default function CouncilsPage() {
   return (
     <div className="mx-auto max-w-5xl space-y-8 pb-16">
       <div>
-        <p className="eyebrow">Structured multi-model review</p><h1 className="mt-2 text-3xl font-black tracking-tight text-slate-50">Run a council</h1>
-        <p className="mt-2 text-sm text-slate-400">Every run is persisted, scored by a critic, and held for human approval.</p>
+        <p className="eyebrow">Draft and review workspace</p><h1 className="mt-2 text-3xl font-black tracking-tight text-slate-50">Run a council</h1>
+        <p className="mt-2 text-sm text-slate-400">Councils produce reviewed drafts. They do not publish to social accounts; use Workflows for destination automation.</p>
       </div>
 
       <form onSubmit={submit} className="space-y-8">
@@ -116,6 +130,16 @@ export default function CouncilsPage() {
             placeholder="Describe the exact output, audience, constraints, and source information."
             className="mt-4 min-h-56 w-full resize-y input-shell rounded-xl p-4 text-sm leading-6 text-slate-100 outline-none focus:border-cyan-300/40 focus:ring-2 focus:ring-cyan-300/10"
           />
+
+          {isMultiPlatformAutomation && (
+            <div role="alert" className="mt-4 flex flex-col gap-4 rounded-2xl border border-cyan-300/25 bg-cyan-300/8 p-5 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="flex items-center gap-2 font-bold text-cyan-100"><Workflow className="h-4 w-4" /> This request belongs in Content Engine</p>
+                <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-300">It will create one independently critiqued approval item per platform. Approved items publish only through verified linked integrations; Reddit stays manual.</p>
+              </div>
+              <button type="button" onClick={openContentAutomation} className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-cyan-300 px-5 text-sm font-black text-[#04111b]">Open automation <ArrowRight className="h-4 w-4" /></button>
+            </div>
+          )}
 
           {selected === 'grant' && (
             <div className="mt-5 border-t border-white/8 pt-5">
@@ -172,7 +196,7 @@ export default function CouncilsPage() {
 
           {error && <p role="alert" className="mt-4 rounded-lg border border-rose-300/20 bg-rose-400/8 p-3 text-sm text-rose-200">{error}</p>}
           <div className="mt-6 flex justify-end">
-            <button disabled={submitting || taskDescription.trim().length < 3} className="flex h-11 items-center gap-2 rounded-xl bg-cyan-300 px-6 text-sm font-black text-[#04111b] hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50">
+            <button disabled={submitting || taskDescription.trim().length < 3 || isMultiPlatformAutomation} className="flex h-11 items-center gap-2 rounded-xl bg-cyan-300 px-6 text-sm font-black text-[#04111b] hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50">
               {submitting ? 'Queueing…' : 'Run council'}
               {!submitting && <Send className="h-4 w-4" />}
             </button>

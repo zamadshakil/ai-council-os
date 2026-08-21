@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -238,6 +239,7 @@ class BaseCouncil(ABC):
         return {
             **state, "rag_context": rag_context, "warnings": warnings,
             "knowledge_snapshot": knowledge_snapshot, "selected_skills": skills,
+            "progress_stage": "knowledge_ready",
         }
 
     @staticmethod
@@ -296,7 +298,11 @@ class BaseCouncil(ABC):
             model_id=model_id,
             output_model=self.get_generator_output_model(state),
             temperature=0.65,
-            max_tokens=7000 if self.council_name == "grant" else 5000,
+            # A full EU proposal can legitimately exceed the old 7k-token cap.
+            # Truncating JSON produces an unterminated `content` string and a
+            # misleading schema-validation failure, so reserve enough output
+            # space for the complete structured document.
+            max_tokens=16000 if self.council_name == "grant" else 5000,
         )
         draft_text = self.draft_to_text(draft, state)
         structured = draft.model_dump(mode="json")
@@ -321,6 +327,7 @@ class BaseCouncil(ABC):
             "current_draft": draft_text,
             "current_structured_output": structured,
             "status": CouncilStatus.GENERATING.value,
+            "progress_stage": f"draft_{draft_number}_ready",
             "debate_history": history,
             "warnings": [
                 *state.get("warnings", []),
@@ -392,6 +399,7 @@ class BaseCouncil(ABC):
             **state,
             "confidence_score": confidence,
             "status": CouncilStatus.CRITIQUING.value,
+            "progress_stage": f"critique_{int(state.get('iteration', 0))}_ready",
             "debate_history": history,
             "last_critique": structured,
         }
@@ -411,6 +419,7 @@ class BaseCouncil(ABC):
             "final_output": state.get("current_draft", ""),
             "final_structured_output": state.get("current_structured_output", {}),
             "status": CouncilStatus.AWAITING_APPROVAL.value,
+            "progress_stage": "awaiting_approval",
             "error": "",
         }
 
@@ -420,6 +429,7 @@ class BaseCouncil(ABC):
             "final_output": state.get("current_draft", ""),
             "final_structured_output": state.get("current_structured_output", {}),
             "status": CouncilStatus.NEEDS_MANUAL_REVIEW.value,
+            "progress_stage": "needs_manual_review",
             "error": (
                 f"Quality threshold {self.confidence_threshold:.0f} was not reached after "
                 f"{self.max_iterations} drafts."
@@ -456,28 +466,33 @@ class BaseCouncil(ABC):
         context: dict[str, Any] | None = None,
         priority: str = "medium",
         task_id: str | None = None,
+        progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> CouncilRunResult:
         """Execute the stable council contract for the API or durable worker."""
         if not task_description.strip():
             raise ValueError("task_description must not be empty.")
-        final = await self.graph.ainvoke(
-            {
-                "task_id": task_id or str(uuid.uuid4()),
-                "council_name": self.council_name,
-                "task_description": task_description.strip(),
-                "context": context or {},
-                "priority": priority,
-                "iteration": 0,
-                "max_iterations": self.max_iterations,
-                "confidence_threshold": self.confidence_threshold,
-                "debate_history": [],
-                "total_cost_usd": 0.0,
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
-                "cost_metrics_complete": True,
-                "warnings": [],
-            }
-        )
+        initial = {
+            "task_id": task_id or str(uuid.uuid4()),
+            "council_name": self.council_name,
+            "task_description": task_description.strip(),
+            "context": context or {},
+            "priority": priority,
+            "iteration": 0,
+            "max_iterations": self.max_iterations,
+            "confidence_threshold": self.confidence_threshold,
+            "debate_history": [],
+            "total_cost_usd": 0.0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "cost_metrics_complete": True,
+            "warnings": [],
+            "progress_stage": "starting",
+        }
+        final = initial
+        async for snapshot in self.graph.astream(initial, stream_mode="values"):
+            final = snapshot
+            if progress_callback is not None:
+                await progress_callback(dict(snapshot))
         return CouncilRunResult(
             task_id=final["task_id"],
             council=self.council_name,

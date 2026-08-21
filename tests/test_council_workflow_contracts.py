@@ -175,6 +175,7 @@ class CouncilExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_threshold_met_uses_one_draft_and_real_weighted_score(self):
         calls = {"generator": 0, "critic": 0}
+        progress_snapshots = []
 
         async def fake_structured_call(**kwargs):
             if kwargs["output_model"] is CritiqueOutput:
@@ -195,11 +196,22 @@ class CouncilExecutionTests(unittest.IsolatedAsyncioTestCase):
             return TextDraftOutput(content="approved draft", assumptions=[], warnings=[]), metrics(kwargs["model_id"])
 
         with patch("src.core.council_base.call_llm_structured", fake_structured_call):
-            result = await create_council("sales").run("Draft outreach")
+            async def capture_progress(state):
+                progress_snapshots.append({
+                    "stage": state.get("progress_stage"),
+                    "steps": len(state.get("debate_history") or []),
+                })
+
+            result = await create_council("sales").run(
+                "Draft outreach", progress_callback=capture_progress
+            )
 
         self.assertEqual(calls, {"generator": 1, "critic": 1})
         self.assertEqual(result.status.value, "awaiting_approval")
         self.assertEqual(result.confidence_score, 86)
+        self.assertIn({"stage": "draft_1_ready", "steps": 1}, progress_snapshots)
+        self.assertIn({"stage": "critique_1_ready", "steps": 2}, progress_snapshots)
+        self.assertEqual(progress_snapshots[-1]["stage"], "awaiting_approval")
 
     async def test_missing_provider_cost_is_explicit_not_fabricated(self):
         async def fake_structured_call(**kwargs):

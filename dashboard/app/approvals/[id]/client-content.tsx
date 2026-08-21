@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, Download, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Download, RefreshCw, Workflow } from 'lucide-react';
 import { DebateTrace } from '../../components/debate-trace';
 import { fetchTask, getGrantExportUrl, submitApproval } from '../../lib/api';
 import { ApprovalAction, Task } from '../../lib/types';
@@ -85,6 +85,13 @@ export function TaskDetailContent({ id }: { id: string }) {
   const canDecide = !reconciliationRequired && task.approval_status === 'awaiting_approval' && (task.status === 'awaiting_approval' || task.status === 'needs_manual_review');
   const canRetry = !reconciliationRequired && task.approval_status !== 'approved' && (task.status === 'failed' || task.status === 'rejected' || task.status === 'cancelled');
   const canCancel = task.status === 'queued' || task.status === 'running';
+  const isDraftOnlyMultiPlatform = !task.context.workflow && (
+    /multi[- ]platform|separate (?:professional )?posts|linkedin.*(?:instagram|reddit|facebook|discord|\bx\b)/i.test(task.task_description)
+  );
+  const progress = task.context.progress && typeof task.context.progress === 'object' && !Array.isArray(task.context.progress)
+    ? task.context.progress as { stage?: string; step_count?: number; draft_count?: number; last_role?: string }
+    : null;
+  const progressStage = progress?.stage?.replaceAll('_', ' ') ?? (task.status === 'queued' ? 'waiting for worker' : task.status.replaceAll('_', ' '));
 
   return (
     <div className="mx-auto max-w-6xl space-y-7 pb-16">
@@ -107,6 +114,14 @@ export function TaskDetailContent({ id }: { id: string }) {
           <span>{task.cost_metrics_complete ? `Cost $${task.total_cost_usd.toFixed(4)}` : 'Cost unavailable/partial'}</span>
         </div>
         {(task.warning || task.error) && <p className="mt-4 rounded-xl border border-amber-300/15 bg-amber-300/8 p-3 text-sm text-amber-200">{task.warning || task.error}</p>}
+      </section>
+
+      {isDraftOnlyMultiPlatform && <section className="flex flex-col gap-4 rounded-2xl border border-amber-300/20 bg-amber-300/8 p-5 sm:flex-row sm:items-center sm:justify-between"><div><p className="flex items-center gap-2 font-bold text-amber-100"><Workflow className="h-4 w-4" /> Draft only — no publishing destinations are attached</p><p className="mt-1 text-sm leading-6 text-slate-300">This task was submitted directly to a Council. Use Content Engine to create six independent approvals and route them to verified integrations.</p></div><Link href="/workflows/content_engine" className="flex h-10 shrink-0 items-center justify-center rounded-xl bg-cyan-300 px-4 text-sm font-black text-[#04111b]">Open Content Engine</Link></section>}
+
+      <section className="surface-card rounded-2xl p-6" aria-live="polite">
+        <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="eyebrow">Live execution</p><h2 className="mt-1 text-lg font-bold capitalize text-slate-100">{progressStage}</h2></div>{ACTIVE_STATUSES.has(task.status) && <span className="flex items-center gap-2 rounded-full border border-cyan-300/20 bg-cyan-300/8 px-3 py-1.5 text-xs font-bold text-cyan-200"><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Updating every 4 seconds</span>}</div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-3"><div className="rounded-xl border border-white/8 bg-white/[0.025] p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Completed model steps</p><p className="mt-1 text-xl font-black text-slate-100">{progress?.step_count ?? task.debate_history.length}</p></div><div className="rounded-xl border border-white/8 bg-white/[0.025] p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Drafts generated</p><p className="mt-1 text-xl font-black text-slate-100">{progress?.draft_count ?? task.iterations}</p></div><div className="rounded-xl border border-white/8 bg-white/[0.025] p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Latest actor</p><p className="mt-1 text-sm font-bold capitalize text-slate-200">{progress?.last_role || (task.debate_history.length ? task.debate_history.at(-1)?.role : 'Not started')}</p></div></div>
+        <div className="mt-5"><DebateTrace messages={task.debate_history} /></div>
       </section>
 
       <div className="grid gap-7 xl:grid-cols-[1fr_22rem]">
@@ -155,10 +170,6 @@ export function TaskDetailContent({ id }: { id: string }) {
         </aside>
       </div>
 
-      <section>
-        <h2 className="mb-4 text-lg font-bold text-slate-100">Model trace</h2>
-        <DebateTrace messages={task.debate_history} />
-      </section>
     </div>
   );
 }

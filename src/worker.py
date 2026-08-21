@@ -534,6 +534,102 @@ class DurableWorker:
         suggestion = await create_learning_suggestion(task_id)
         return {"graph": graph, "learning": suggestion}
 
+    async def _persist_council_progress(
+        self, task_id: str, run_id: str, state: dict[str, Any]
+    ) -> None:
+        """Persist each completed generator/critic step while a run is active."""
+        history = list(state.get("debate_history") or [])
+        stage = str(state.get("progress_stage") or "running")
+        warnings = list(state.get("warnings") or [])
+        now = utcnow()
+        async with self.jobs.sessions() as session:
+            task = await session.get(TaskModel, task_id)
+            run = await session.get(CouncilRunModel, run_id)
+            if not task or not run or task.status == "cancelled":
+                return
+
+            current_context = dict(task.context or {})
+            previous_progress = current_context.get("progress") or {}
+            if (
+                len(task.debate_history or []) == len(history)
+                and previous_progress.get("stage") == stage
+            ):
+                return
+
+            last_role = str(history[-1].get("role") or "") if history else ""
+            current_context.update(
+                {
+                    "cost_metrics_complete": bool(
+                        state.get("cost_metrics_complete", False)
+                    ),
+                    "input_tokens": int(state.get("total_input_tokens") or 0),
+                    "output_tokens": int(state.get("total_output_tokens") or 0),
+                    "warnings": warnings,
+                    "progress": {
+                        "stage": stage,
+                        "step_count": len(history),
+                        "draft_count": int(state.get("iteration") or 0),
+                        "last_role": last_role,
+                        "updated_at": now.isoformat(),
+                    },
+                }
+            )
+            task.status = "running"
+            task.iterations = int(state.get("iteration") or 0)
+            if any(str(message.get("role") or "") == "critic" for message in history):
+                task.confidence_score = float(state.get("confidence_score") or 0)
+            task.total_cost_usd = float(state.get("total_cost_usd") or 0.0)
+            task.debate_history = history
+            task.context = current_context
+            task.version += 1
+            task.updated_at = now
+
+            run.status = "running"
+            run.total_input_tokens = int(state.get("total_input_tokens") or 0)
+            run.total_output_tokens = int(state.get("total_output_tokens") or 0)
+            run.total_cost_usd = float(state.get("total_cost_usd") or 0.0)
+            run.warning = "\n".join(warnings)
+            run.context = {
+                **(run.context or {}),
+                "progress": current_context["progress"],
+            }
+            run.version += 1
+            run.updated_at = now
+
+            existing_sequences = set(
+                (
+                    await session.execute(
+                        select(CouncilStepModel.sequence).where(
+                            CouncilStepModel.run_id == run_id
+                        )
+                    )
+                ).scalars()
+            )
+            for sequence, message in enumerate(history, start=1):
+                if sequence in existing_sequences:
+                    continue
+                structured = message.get("structured_output") or {}
+                session.add(
+                    CouncilStepModel(
+                        run_id=run_id,
+                        sequence=sequence,
+                        role=str(message.get("role", "")),
+                        model_id=str(message.get("model_used", "")),
+                        prompt=json.dumps(
+                            message.get("prompt_messages") or [], ensure_ascii=False
+                        ),
+                        output={
+                            "content": message.get("content", ""),
+                            "structured_output": structured,
+                        },
+                        score_breakdown=structured.get("category_scores") or {},
+                        input_tokens=int(message.get("input_tokens") or 0),
+                        output_tokens=int(message.get("output_tokens") or 0),
+                        cost_usd=float(message.get("cost_usd") or 0.0),
+                    )
+                )
+            await session.commit()
+
     async def _run_council(
         self, payload: dict[str, Any], claim: JobClaim
     ) -> dict[str, Any]:
@@ -574,6 +670,9 @@ class DurableWorker:
                 context=payload.get("context") or {},
                 priority=str(payload.get("priority") or "normal"),
                 task_id=task_id,
+                progress_callback=lambda state: self._persist_council_progress(
+                    task_id, run_id, state
+                ),
             )
         except Exception as exc:
             async with self.jobs.sessions() as session:
@@ -651,39 +750,38 @@ class DurableWorker:
             run.version += 1
             run.updated_at = utcnow()
 
-            existing_steps = (
+            existing_sequences = set(
                 (
                     await session.execute(
-                        select(CouncilStepModel).where(
+                        select(CouncilStepModel.sequence).where(
                             CouncilStepModel.run_id == run_id
                         )
                     )
-                )
-                .scalars()
-                .all()
+                ).scalars()
             )
-            if not existing_steps:
-                for sequence, message in enumerate(result.debate_history, start=1):
-                    structured = message.get("structured_output") or {}
-                    session.add(
-                        CouncilStepModel(
-                            run_id=run_id,
-                            sequence=sequence,
-                            role=str(message.get("role", "")),
-                            model_id=str(message.get("model_used", "")),
-                            prompt=json.dumps(
-                                message.get("prompt_messages") or [], ensure_ascii=False
-                            ),
-                            output={
-                                "content": message.get("content", ""),
-                                "structured_output": structured,
-                            },
-                            score_breakdown=structured.get("category_scores") or {},
-                            input_tokens=int(message.get("input_tokens") or 0),
-                            output_tokens=int(message.get("output_tokens") or 0),
-                            cost_usd=float(message.get("cost_usd") or 0.0),
-                        )
+            for sequence, message in enumerate(result.debate_history, start=1):
+                if sequence in existing_sequences:
+                    continue
+                structured = message.get("structured_output") or {}
+                session.add(
+                    CouncilStepModel(
+                        run_id=run_id,
+                        sequence=sequence,
+                        role=str(message.get("role", "")),
+                        model_id=str(message.get("model_used", "")),
+                        prompt=json.dumps(
+                            message.get("prompt_messages") or [], ensure_ascii=False
+                        ),
+                        output={
+                            "content": message.get("content", ""),
+                            "structured_output": structured,
+                        },
+                        score_breakdown=structured.get("category_scores") or {},
+                        input_tokens=int(message.get("input_tokens") or 0),
+                        output_tokens=int(message.get("output_tokens") or 0),
+                        cost_usd=float(message.get("cost_usd") or 0.0),
                     )
+                )
             existing_uses = int(
                 await session.scalar(
                     select(func.count(RunKnowledgeUseModel.id)).where(

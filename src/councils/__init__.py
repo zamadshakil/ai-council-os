@@ -7,6 +7,7 @@ Support are intentionally not constructible in the production build.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from src.core.council_base import BaseCouncil, CouncilRunResult
@@ -40,6 +41,7 @@ async def run_council(
     context: dict[str, Any] | None = None,
     priority: str = "medium",
     task_id: str | None = None,
+    progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> CouncilRunResult:
     """One-call execution interface for the API and durable worker."""
     return await create_council(name).run(
@@ -47,6 +49,7 @@ async def run_council(
         context=context,
         priority=priority,
         task_id=task_id,
+        progress_callback=progress_callback,
     )
 
 
