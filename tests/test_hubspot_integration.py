@@ -48,6 +48,20 @@ async def test_verify_connection_rejects_missing_write_scope(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_verify_connection_accepts_non_mutating_validation_rejection(monkeypatch):
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "service-key")
+    monkeypatch.setattr(hubspot, "_request", AsyncMock(side_effect=[
+        {"results": []},
+        hubspot.HubSpotIntegrationError("invalid empty update", status_code=400),
+    ]))
+
+    result = await hubspot.verify_connection()
+
+    assert result["authentication"] == "service_key"
+    assert result["verified_permissions"] == sorted(hubspot.REQUIRED_SCOPES)
+
+
+@pytest.mark.asyncio
 async def test_verify_connection_reports_rejected_service_key(monkeypatch):
     monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "invalid-service-key")
     request = AsyncMock(side_effect=hubspot.HubSpotIntegrationError(

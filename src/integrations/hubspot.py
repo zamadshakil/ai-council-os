@@ -107,8 +107,9 @@ async def verify_connection() -> dict[str, Any]:
     private-app tokens they do not expose their scope list through the old
     private-app introspection endpoint.  A contact-list request proves read
     access.  A PATCH against an impossible record ID proves that HubSpot lets
-    the request reach record lookup (404) without changing customer data;
-    missing write permission is rejected earlier with 403.
+    the request reach request validation/record lookup (400/404) without
+    changing customer data; missing write permission is rejected earlier with
+    403.
     """
 
     token = _get_token()
@@ -131,7 +132,7 @@ async def verify_connection() -> dict[str, Any]:
                 "HubSpot service key is missing crm.objects.contacts.write permission",
                 status_code=403,
             ) from exc
-        if exc.status_code != 404:
+        if exc.status_code not in {400, 404}:
             raise
     else:  # pragma: no cover - the deliberately absent record must not exist
         raise HubSpotIntegrationError(
