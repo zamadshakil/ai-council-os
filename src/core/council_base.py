@@ -49,6 +49,33 @@ class CritiqueOutput(BaseModel):
         return value
 
 
+def build_critique_response_schema(category_names: list[str]) -> dict[str, Any]:
+    """Build a provider schema that requires every council score category.
+
+    A ``dict[str, float]`` is necessarily open-ended in Pydantic's generated
+    JSON schema.  Strict-schema providers may therefore satisfy it with an
+    empty object even though the application validator requires scores.  The
+    council knows its exact categories, so expose those keys explicitly to the
+    provider and reject both omissions and unexpected categories there.
+    """
+    if not category_names:
+        raise ValueError("At least one critic category is required.")
+    if len(set(category_names)) != len(category_names):
+        raise ValueError("Critic category names must be unique.")
+    schema = CritiqueOutput.model_json_schema()
+    schema["properties"]["category_scores"] = {
+        "title": "Category Scores",
+        "type": "object",
+        "properties": {
+            name: {"type": "number", "minimum": 0, "maximum": 100}
+            for name in category_names
+        },
+        "required": category_names,
+        "additionalProperties": False,
+    }
+    return schema
+
+
 class CouncilRunResult(BaseModel):
     """Stable result contract consumed by API and durable worker layers."""
 
@@ -335,6 +362,9 @@ class BaseCouncil(ABC):
             messages=messages,
             model_id=model_id,
             output_model=CritiqueOutput,
+            response_schema=build_critique_response_schema(
+                list(self.critic_categories)
+            ),
             temperature=0.2,
             max_tokens=3500,
         )

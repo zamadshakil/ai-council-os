@@ -228,6 +228,7 @@ async def call_llm_structured(
     messages: list[dict[str, str]],
     model_id: str,
     output_model: type[OutputModelT],
+    response_schema: dict[str, Any] | None = None,
     temperature: float = 0.4,
     max_tokens: int = 4096,
 ) -> tuple[OutputModelT, dict[str, Any]]:
@@ -242,7 +243,7 @@ async def call_llm_structured(
             "json_schema": {
                 "name": output_model.__name__.lower(),
                 "strict": True,
-                "schema": output_model.model_json_schema(),
+                "schema": response_schema or output_model.model_json_schema(),
             },
         },
     )

@@ -6,7 +6,11 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from src.core.council_base import CritiqueOutput, TextDraftOutput
+from src.core.council_base import (
+    CritiqueOutput,
+    TextDraftOutput,
+    build_critique_response_schema,
+)
 from src.core.llm_router import (
     APPROVED_MODELS,
     COUNCIL_MODEL_PROFILES,
@@ -87,6 +91,15 @@ class CouncilPolicyTests(unittest.TestCase):
             create_council("strategy")
         with self.assertRaises(ValueError):
             create_council("support")
+
+    def test_critic_provider_schema_requires_every_score_category(self):
+        schema = build_critique_response_schema(list(SALES_CATEGORIES))
+        scores = schema["properties"]["category_scores"]
+        self.assertEqual(scores["required"], list(SALES_CATEGORIES))
+        self.assertEqual(set(scores["properties"]), set(SALES_CATEGORIES))
+        self.assertFalse(scores["additionalProperties"])
+        self.assertEqual(scores["properties"]["tone"]["minimum"], 0)
+        self.assertEqual(scores["properties"]["tone"]["maximum"], 100)
 
     def test_workflow_registry_has_current_approved_automations(self):
         self.assertEqual(
