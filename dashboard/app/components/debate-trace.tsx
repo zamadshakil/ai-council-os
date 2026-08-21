@@ -1,5 +1,6 @@
 import { Bot, CheckCircle2, MessageSquareWarning, Sparkles } from 'lucide-react';
 import { DebateMessage } from '../lib/types';
+import { StructuredMessageView } from './structured-output';
 
 export function DebateTrace({ messages }: { messages: DebateMessage[] }) {
   if (messages.length === 0) {
@@ -20,7 +21,7 @@ export function DebateTrace({ messages }: { messages: DebateMessage[] }) {
               </div>
               <span className="text-xs text-slate-600">{new Date(message.timestamp).toLocaleString()}</span>
             </div>
-            <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-300">{message.content}</p>
+            <StructuredMessageView message={message} />
             {message.score_breakdown && (
               <div className="mt-3 flex flex-wrap gap-2">
                 {Object.entries(message.score_breakdown).map(([name, score]) => (

@@ -332,6 +332,14 @@ class BaseCouncil(ABC):
             "warnings": [
                 *state.get("warnings", []),
                 *(
+                    [
+                        f"{model_id} returned a schema-invalid draft; a bounded repair "
+                        "pass corrected it before validation."
+                    ]
+                    if metrics.get("schema_repair_attempted")
+                    else []
+                ),
+                *(
                     structured.get("warnings", [])
                     if isinstance(structured.get("warnings", []), list)
                     else []
@@ -402,6 +410,17 @@ class BaseCouncil(ABC):
             "progress_stage": f"critique_{int(state.get('iteration', 0))}_ready",
             "debate_history": history,
             "last_critique": structured,
+            "warnings": [
+                *state.get("warnings", []),
+                *(
+                    [
+                        f"{model_id} returned a schema-invalid critique; a bounded repair "
+                        "pass corrected it before validation."
+                    ]
+                    if metrics.get("schema_repair_attempted")
+                    else []
+                ),
+            ],
         }
         output.update(self._append_metric_totals(state, metrics))
         return output

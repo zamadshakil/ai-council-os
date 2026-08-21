@@ -235,31 +235,89 @@ async def call_llm_structured(
     temperature: float = 0.4,
     max_tokens: int = 4096,
 ) -> tuple[OutputModelT, dict[str, Any]]:
-    """Call one approved model and validate its response against a JSON schema."""
+    """Call one approved model and validate its response against a JSON schema.
+
+    Providers occasionally return syntactically valid JSON that still misses a
+    length, key, or type constraint. One bounded repair call is allowed for
+    that specific case. It uses the same approved model, records the tokens and
+    cost of both calls, and never silently swaps providers or schemas.
+    """
+    schema = response_schema or output_model.model_json_schema()
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": output_model.__name__.lower(),
+            "strict": True,
+            "schema": schema,
+        },
+    }
     response = await _create_completion(
         messages=messages,
         model_id=model_id,
         temperature=temperature,
         max_tokens=max_tokens,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": output_model.__name__.lower(),
-                "strict": True,
-                "schema": response_schema or output_model.model_json_schema(),
-            },
-        },
+        response_format=response_format,
     )
     content = response.choices[0].message.content or ""
     if not content.strip():
         raise StructuredOutputError(f"Model {model_id} returned an empty response.")
+    first_metrics = _response_metrics(response, model_id)
     try:
         parsed = output_model.model_validate(json.loads(content))
     except (json.JSONDecodeError, ValidationError) as exc:
-        raise StructuredOutputError(
-            f"Model {model_id} returned output that failed {output_model.__name__} validation."
-        ) from exc
-    return parsed, {"content": content, **_response_metrics(response, model_id)}
+        repair_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Repair the candidate JSON so it exactly satisfies the supplied response schema. "
+                    "Preserve the intended meaning, enforce every required key and character limit, "
+                    "remove unexpected keys, and return only the repaired structured response."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"VALIDATION ERROR:\n{str(exc)[:4000]}\n\n"
+                    f"REQUIRED JSON SCHEMA:\n{json.dumps(schema, ensure_ascii=False)}\n\n"
+                    f"CANDIDATE JSON:\n{content}"
+                ),
+            },
+        ]
+        repair_response = await _create_completion(
+            messages=repair_messages,
+            model_id=model_id,
+            temperature=0.0,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+        repaired_content = repair_response.choices[0].message.content or ""
+        try:
+            parsed = output_model.model_validate(json.loads(repaired_content))
+        except (json.JSONDecodeError, ValidationError) as repair_exc:
+            raise StructuredOutputError(
+                f"Model {model_id} returned output that failed {output_model.__name__} "
+                "validation, including one bounded repair attempt."
+            ) from repair_exc
+
+        repair_metrics = _response_metrics(repair_response, model_id)
+        first_cost = first_metrics.get("cost_usd")
+        repair_cost = repair_metrics.get("cost_usd")
+        combined_cost = (
+            round(float(first_cost) + float(repair_cost), 8)
+            if first_cost is not None and repair_cost is not None
+            else None
+        )
+        return parsed, {
+            "content": repaired_content,
+            "model": repair_metrics["model"],
+            "input_tokens": first_metrics["input_tokens"] + repair_metrics["input_tokens"],
+            "output_tokens": first_metrics["output_tokens"] + repair_metrics["output_tokens"],
+            "cost_usd": combined_cost,
+            "cost_source": "provider_reported" if combined_cost is not None else "unavailable",
+            "provider_request_id": repair_metrics.get("provider_request_id"),
+            "schema_repair_attempted": True,
+        }
+    return parsed, {"content": content, **first_metrics, "schema_repair_attempted": False}
 
 
 _model_validation_cache: tuple[float, dict[str, Any]] | None = None

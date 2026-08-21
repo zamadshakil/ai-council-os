@@ -565,6 +565,12 @@ class DurableWorker:
                     "input_tokens": int(state.get("total_input_tokens") or 0),
                     "output_tokens": int(state.get("total_output_tokens") or 0),
                     "warnings": warnings,
+                    "latest_valid_draft": str(state.get("current_draft") or ""),
+                    "latest_valid_structured_output": (
+                        state.get("current_structured_output")
+                        if isinstance(state.get("current_structured_output"), dict)
+                        else {}
+                    ),
                     "progress": {
                         "stage": stage,
                         "step_count": len(history),
@@ -686,23 +692,99 @@ class DurableWorker:
                         )
                     )
                 ).scalar_one_or_none()
-                if task and task.status != "cancelled":
-                    task.status, task.error, task.version = (
-                        "failed",
-                        str(exc)[:8000],
-                        task.version + 1,
+                latest_draft = ""
+                latest_structured: dict[str, Any] = {}
+                if task:
+                    task_context = dict(task.context or {})
+                    latest_draft = str(task_context.get("latest_valid_draft") or "").strip()
+                    candidate = task_context.get("latest_valid_structured_output")
+                    if isinstance(candidate, dict):
+                        latest_structured = candidate
+                    if not latest_draft:
+                        for message in reversed(task.debate_history or []):
+                            if str(message.get("role") or "") != "generator":
+                                continue
+                            latest_draft = str(message.get("content") or "").strip()
+                            structured = message.get("structured_output")
+                            if isinstance(structured, dict):
+                                latest_structured = structured
+                            if latest_draft:
+                                break
+                recovered = bool(latest_draft and task and run)
+                if recovered and task and run:
+                    recovery_warning = (
+                        "A later model step failed validation. The last valid draft was "
+                        "recovered for manual review; nothing has been published."
                     )
-                if run and run.status != "cancelled":
-                    run.status, run.error, run.version = (
-                        "failed",
-                        str(exc)[:8000],
-                        run.version + 1,
+                    task_context = dict(task.context or {})
+                    task_context.update(
+                        {
+                            "structured_output": latest_structured,
+                            "generated_output": latest_draft,
+                            "recovered_after_validation_failure": True,
+                            "warnings": [
+                                *list(task_context.get("warnings") or []),
+                                recovery_warning,
+                            ],
+                        }
                     )
-                if approval and approval.status != "cancelled":
-                    approval.status = "failed"
-                    approval.action = ""
-                    approval.version += 1
+                    task.status = "needs_manual_review"
+                    task.final_output = latest_draft
+                    task.context = task_context
+                    task.error = recovery_warning
+                    task.version += 1
+                    task.updated_at = utcnow()
+                    run.status = "needs_manual_review"
+                    run.final_output = {
+                        "content": latest_draft,
+                        "structured_output": latest_structured,
+                    }
+                    run.warning = recovery_warning
+                    run.error = str(exc)[:8000]
+                    run.version += 1
+                    run.updated_at = utcnow()
+                    if approval is None:
+                        approval = ApprovalModel(
+                            resource_type="task",
+                            resource_id=task_id,
+                            status="awaiting_approval",
+                            version=1,
+                        )
+                        session.add(approval)
+                    elif approval.status != "cancelled":
+                        approval.status = "awaiting_approval"
+                        approval.action = ""
+                        approval.actor_user_id = None
+                        approval.notes = ""
+                        approval.edited_output = {}
+                        approval.decided_at = None
+                        approval.version += 1
+                        approval.updated_at = utcnow()
+                else:
+                    if task and task.status != "cancelled":
+                        task.status, task.error, task.version = (
+                            "failed",
+                            str(exc)[:8000],
+                            task.version + 1,
+                        )
+                    if run and run.status != "cancelled":
+                        run.status, run.error, run.version = (
+                            "failed",
+                            str(exc)[:8000],
+                            run.version + 1,
+                        )
+                    if approval and approval.status != "cancelled":
+                        approval.status = "failed"
+                        approval.action = ""
+                        approval.version += 1
                 await session.commit()
+                if recovered:
+                    return {
+                        "task_id": task_id,
+                        "run_id": run_id,
+                        "status": "needs_manual_review",
+                        "recovered_last_valid_draft": True,
+                    }
             raise
 
         async with self.jobs.sessions() as session:
