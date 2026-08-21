@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl ffmpeg jq libasound2t64 libegl1 libgl1 libglvnd0 \
         libice6 libsm6 libvulkan1 libx11-6 libxcursor1 libxext6 libxfixes3 \
         libxi6 libxinerama1 libxkbcommon0 libxkbcommon-x11-0 libxrandr2 libxrender1 libxxf86vm1 \
-        mesa-utils procps python3-venv rclone unzip util-linux xz-utils \
+        mesa-utils procps python3-venv rclone ristretto unzip util-linux xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # The Kasm core desktop ships an XFCE "Web Browser" launcher but no browser.
@@ -94,9 +94,11 @@ COPY docker/blender-runpod/blender-launcher.sh /usr/local/bin/blender
 COPY docker/blender-runpod/chrome-launcher.sh /usr/bin/google-chrome
 COPY docker/blender-runpod/custom_startup.sh /dockerstartup/custom_startup.sh
 COPY docker/blender-runpod/Blender.desktop /home/kasm-default-profile/Desktop/Blender.desktop
+COPY docker/blender-runpod/Renders.desktop /home/kasm-default-profile/Desktop/Renders.desktop
 
 RUN chmod 0755 /usr/local/bin/blender /usr/bin/google-chrome /dockerstartup/custom_startup.sh \
         /home/kasm-default-profile/Desktop/Blender.desktop \
+        /home/kasm-default-profile/Desktop/Renders.desktop \
     && chmod 0644 /opt/council/*.py \
     && cp /usr/share/applications/google-chrome.desktop \
         /home/kasm-default-profile/Desktop/google-chrome.desktop \
@@ -105,6 +107,11 @@ RUN chmod 0755 /usr/local/bin/blender /usr/bin/google-chrome /dockerstartup/cust
     && HOME=/home/kasm-default-profile xdg-mime default google-chrome.desktop text/html \
     && HOME=/home/kasm-default-profile xdg-mime default google-chrome.desktop x-scheme-handler/http \
     && HOME=/home/kasm-default-profile xdg-mime default google-chrome.desktop x-scheme-handler/https \
+    && viewer_desktop="$(find /usr/share/applications -maxdepth 1 -type f -iname '*ristretto*.desktop' -printf '%f\n' | head -n 1)" \
+    && test -n "$viewer_desktop" \
+    && HOME=/home/kasm-default-profile xdg-mime default "$viewer_desktop" image/png \
+    && HOME=/home/kasm-default-profile xdg-mime default "$viewer_desktop" image/jpeg \
+    && HOME=/home/kasm-default-profile xdg-mime default "$viewer_desktop" image/webp \
     && update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/google-chrome 250 \
     && update-alternatives --set x-www-browser /usr/bin/google-chrome \
     && ln -s /workspace /home/kasm-default-profile/Desktop/Workspace \

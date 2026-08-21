@@ -2300,12 +2300,24 @@ async def _provider_runtime(provider: str) -> dict[str, str]:
 @app.get("/api/blender/pods")
 async def get_blender_pods(_: RequestActor = Depends(require_admin)):
     """Return live RunPod state; never fabricate placeholder machines or costs."""
-    from src.integrations.runpod import RunPodError, list_pods
+    from src.integrations.runpod import RunPodError, get_blender_runtime, list_pods
 
     values = await _provider_runtime("runpod")
     try:
         with use_integration_configuration(values):
             pods = await list_pods()
+            for pod in pods:
+                pod["agent_status"] = "not_running"
+                pod["local_runtime"] = {}
+                if pod.get("desired_status") != "RUNNING":
+                    continue
+                try:
+                    pod["local_runtime"] = await asyncio.wait_for(
+                        get_blender_runtime(str(pod.get("id", ""))), timeout=6
+                    )
+                    pod["agent_status"] = "live"
+                except (TimeoutError, RunPodError):
+                    pod["agent_status"] = "unavailable"
     except RunPodError as exc:
         raise _api_error(502, "RUNPOD_UNAVAILABLE", str(exc)) from exc
     return {"pods": pods, "provider": "runpod", "status": "verified"}

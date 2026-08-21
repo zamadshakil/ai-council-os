@@ -166,13 +166,13 @@ export default function BlenderManagerPage() {
     return () => window.clearTimeout(timer);
   }, [selected?.id, loadDetails]);
   useEffect(() => {
-    if (!jobs.some((job) => ACTIVE.has(job.status))) return;
+    if (!jobs.some((job) => ACTIVE.has(job.status)) && !pods.some((pod) => pod.desired_status === 'RUNNING')) return;
     const timer = window.setInterval(() => {
       void load(true);
       if (selected?.id) void loadDetails(selected.id);
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [jobs, selected?.id, load, loadDetails]);
+  }, [jobs, pods, selected?.id, load, loadDetails]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -310,7 +310,16 @@ export default function BlenderManagerPage() {
             className={`mt-3 rounded-xl border p-3 text-xs leading-5 ${provisionFeedback.kind === 'error' ? 'border-rose-300/30 bg-rose-300/10 text-rose-100' : 'border-emerald-300/30 bg-emerald-300/10 text-emerald-100'}`}
           ><strong>{provisionFeedback.kind === 'error' ? 'Creation failed: ' : 'Created: '}</strong>{provisionFeedback.message}</div>}
         </div>
-        <div className="mt-5 space-y-3">{pods.map((pod) => <article key={pod.id} className="rounded-2xl border border-white/10 bg-white/[0.035] p-4">
+        <div className="mt-5 space-y-3">{pods.map((pod) => {
+          const localSample = pod.local_runtime?.gpu_samples?.[0];
+          const guiState = pod.local_runtime?.gui_state;
+          const gpuValue = localSample?.gpu_utilization ?? pod.gpu_utilization[0]?.gpu_percent ?? 0;
+          const vramValue = localSample?.vram_total_mb
+            ? (localSample.vram_used_mb / localSample.vram_total_mb) * 100
+            : pod.gpu_utilization[0]?.memory_percent ?? 0;
+          const blenderPid = localSample?.blender_pid ?? pod.local_runtime?.blender_processes?.[0]?.pid ?? null;
+          const gpuConfigured = guiState?.cycles_gpu_configured === true;
+          return <article key={pod.id} className="rounded-2xl border border-white/10 bg-white/[0.035] p-4">
           <div className="flex items-start justify-between gap-3"><div><h3 className="font-bold text-white">{pod.name}</h3><p className="mt-1 break-all text-xs text-slate-400">{pod.image_name || 'Image not reported'}</p></div><span className={`rounded-full border px-2 py-1 text-[10px] font-black ${pod.desired_status === 'RUNNING' ? statusTone('ready') : statusTone('paused')}`}>{pod.desired_status}</span></div>
           <div className="mt-4 flex flex-wrap gap-2">
             {pod.proxy_url && <a href={pod.proxy_url} target="_blank" rel="noreferrer" className="inline-flex h-10 items-center gap-2 rounded-xl border border-cyan-300/25 px-3 text-xs font-bold text-cyan-100"><ExternalLink className="h-4 w-4" />Open Kasm</a>}
@@ -320,12 +329,19 @@ export default function BlenderManagerPage() {
           </div>
           <p className="mt-3 text-xs text-slate-400">${pod.cost_per_hour.toFixed(3)}/hr · {duration(pod.uptime_seconds)}</p>
           {pod.telemetry_status === 'live' ? <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-slate-300 sm:grid-cols-4">
-            <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">GPU <strong className="text-cyan-200">{(pod.gpu_utilization[0]?.gpu_percent ?? 0).toFixed(0)}%</strong></span>
-            <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">VRAM <strong className="text-fuchsia-200">{(pod.gpu_utilization[0]?.memory_percent ?? 0).toFixed(0)}%</strong></span>
+            <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">GPU <strong className="text-cyan-200">{gpuValue.toFixed(0)}%</strong></span>
+            <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">VRAM <strong className="text-fuchsia-200">{vramValue.toFixed(0)}%</strong></span>
             <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">CPU <strong className="text-emerald-200">{pod.cpu_percent.toFixed(0)}%</strong></span>
             <span className="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">RAM <strong className="text-amber-200">{pod.memory_percent.toFixed(0)}%</strong></span>
           </div> : <p className="mt-3 text-[11px] font-bold text-amber-200">Live provider telemetry unavailable</p>}
-        </article>)}</div>
+          {pod.agent_status === 'live' && <div className="mt-3 flex flex-wrap gap-2 text-[10px] font-bold">
+            <span className={`rounded-full border px-2.5 py-1 ${gpuConfigured ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100' : 'border-amber-300/25 bg-amber-300/10 text-amber-100'}`}>Cycles {gpuConfigured ? `${guiState?.backend || 'GPU'} configured` : 'waiting for a Cycles scene'}</span>
+            <span className={`rounded-full border px-2.5 py-1 ${blenderPid ? 'border-cyan-300/25 bg-cyan-300/10 text-cyan-100' : 'border-white/10 bg-white/[0.035] text-slate-400'}`}>Blender {blenderPid ? `PID ${blenderPid}` : 'not open'}</span>
+            <span className="rounded-full border border-white/10 bg-white/[0.035] px-2.5 py-1 text-slate-300">{gpuValue > 0 ? 'GPU active now' : 'GPU idle now'}</span>
+          </div>}
+          {pod.agent_status === 'live' && gpuValue === 0 && <p className="mt-2 text-[11px] leading-5 text-slate-400">0% means no GPU kernel was active at this instant; it does not mean the A6000 is unavailable.</p>}
+          {guiState?.error && <p className="mt-2 text-[11px] font-bold text-rose-200">{guiState.error}</p>}
+        </article>})}</div>
         {runtimeAccess && <div className="mt-4 rounded-2xl border border-amber-300/25 bg-amber-300/8 p-4" role="status"><p className="text-xs font-black uppercase tracking-wider text-amber-100">Private Kasm login</p><dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs"><dt className="text-slate-400">Username</dt><dd className="select-all font-mono text-white">{runtimeAccess.username}</dd><dt className="text-slate-400">Password</dt><dd className="select-all break-all font-mono text-white">{runtimeAccess.password}</dd></dl><a href={runtimeAccess.url} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-2 text-xs font-bold text-cyan-200"><ExternalLink className="h-4 w-4" />Open secured Kasm</a></div>}
         {!pods.length && !loading && <div className="mt-5 rounded-2xl border border-dashed border-white/15 p-6 text-center"><Box className="mx-auto h-7 w-7 text-slate-500" /><p className="mt-2 text-sm text-slate-400">No verified RunPod machine found.</p></div>}
       </aside>

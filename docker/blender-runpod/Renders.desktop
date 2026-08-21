@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Rendered Frames
+Comment=Open validated Blender image sequences stored on the persistent workspace
+Exec=thunar /workspace/render_jobs
+Icon=folder-pictures
+Terminal=false
+Categories=Graphics;

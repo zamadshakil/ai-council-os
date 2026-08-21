@@ -294,6 +294,45 @@ async def test_blender_manager_requires_verified_runpod_connection(api_client):
 
 
 @pytest.mark.asyncio
+async def test_blender_manager_reports_pod_local_gpu_state(api_client, monkeypatch):
+    csrf_token = await _login(api_client)
+    saved = await api_client.put(
+        "/api/integrations/runpod/credentials",
+        json={"credentials": {"api_key": "rotated-runpod-runtime-key"}},
+        headers={"Origin": APP_ORIGIN, "X-CSRF-Token": csrf_token},
+    )
+    assert saved.status_code == 200, saved.text
+    await integration_vault.mark_verification("runpod", True)
+
+    async def fake_pods():
+        return [{
+            "id": "pod-safe-runtime", "desired_status": "RUNNING",
+            "gpu_utilization": [{"gpu_percent": 0, "memory_percent": 0}],
+        }]
+
+    async def fake_runtime(pod_id):
+        assert pod_id == "pod-safe-runtime"
+        return {
+            "gpu_samples": [{
+                "gpu_index": 0, "blender_pid": 4242, "gpu_utilization": 87,
+                "vram_used_mb": 2048, "vram_total_mb": 49140, "power_watts": 225,
+            }],
+            "gui_state": {
+                "backend": "OPTIX", "cycles_gpu_configured": True,
+            },
+        }
+
+    monkeypatch.setattr("src.integrations.runpod.list_pods", fake_pods)
+    monkeypatch.setattr("src.integrations.runpod.get_blender_runtime", fake_runtime)
+    response = await api_client.get("/api/blender/pods")
+    assert response.status_code == 200, response.text
+    pod = response.json()["pods"][0]
+    assert pod["agent_status"] == "live"
+    assert pod["local_runtime"]["gpu_samples"][0]["gpu_utilization"] == 87
+    assert pod["local_runtime"]["gui_state"]["backend"] == "OPTIX"
+
+
+@pytest.mark.asyncio
 async def test_existing_pod_update_requires_inventory_and_exact_smoke_sha(
     api_client, monkeypatch
 ):

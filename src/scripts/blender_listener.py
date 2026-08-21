@@ -292,6 +292,29 @@ def _runtime_health() -> dict[str, Any]:
     }
 
 
+def _runtime_snapshot() -> dict[str, Any]:
+    samples = _sample_gpu()
+    blender_processes: list[dict[str, Any]] = []
+    try:
+        import psutil
+
+        for process in psutil.process_iter(["pid", "name"]):
+            name = str(process.info.get("name") or "")
+            if "blender" in name.lower():
+                blender_processes.append({"pid": int(process.info["pid"]), "name": name})
+    except Exception:
+        blender_processes = []
+    root = _workspace() / ".council-blender"
+    return {
+        "status": "ok",
+        "sampled_at": _utcnow(),
+        "gpu_samples": samples,
+        "blender_processes": blender_processes,
+        "gui_state": _read_json(root / "gui_state.json"),
+        "managed_render": _read_json(root / "active_render.json"),
+    }
+
+
 def _sample_gpu(target_pid: int | None = None) -> list[dict[str, Any]]:
     try:
         import psutil
@@ -996,6 +1019,12 @@ app = FastAPI(title="Council OS Blender Production Agent", lifespan=lifespan)
 @app.get("/healthz", dependencies=[Depends(_authorize)])
 async def health() -> dict[str, Any]:
     return _runtime_health()
+
+
+@app.get("/v1/runtime", dependencies=[Depends(_authorize)])
+async def runtime() -> dict[str, Any]:
+    """Return instantaneous pod-local GPU evidence without exposing commands."""
+    return await asyncio.to_thread(_runtime_snapshot)
 
 
 @app.post("/v1/jobs", dependencies=[Depends(_authorize)])

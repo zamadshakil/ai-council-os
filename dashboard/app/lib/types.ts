@@ -295,6 +295,28 @@ export interface BlenderPod {
   memory_percent: number;
   telemetry_status: 'live' | 'unavailable';
   proxy_url: string;
+  agent_status: 'live' | 'unavailable' | 'not_running';
+  local_runtime: {
+    sampled_at?: string;
+    gpu_samples?: Array<{
+      gpu_index: number;
+      blender_pid: number | null;
+      gpu_utilization: number;
+      vram_used_mb: number;
+      vram_total_mb: number;
+      power_watts: number;
+    }>;
+    blender_processes?: Array<{ pid: number; name: string }>;
+    gui_state?: {
+      status?: string;
+      backend?: string;
+      mode?: string;
+      cycles_gpu_configured?: boolean;
+      render_engine?: string;
+      error?: string;
+      updated_at?: string;
+    };
+  };
 }
 
 export interface BlenderPodAccess {

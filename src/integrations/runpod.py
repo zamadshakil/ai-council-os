@@ -460,6 +460,12 @@ async def verify_blender_agent(pod_id: str) -> dict[str, Any]:
     return data
 
 
+async def get_blender_runtime(pod_id: str) -> dict[str, Any]:
+    """Read the agent's instantaneous GPU/GUI state for a verified pod."""
+    pod_id = _pod_id(pod_id)
+    return await _agent_request(pod_id, "GET", "/v1/runtime")
+
+
 async def submit_render_stage(
     pod_id: str,
     *,

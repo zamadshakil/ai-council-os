@@ -109,6 +109,12 @@ jobs:
             | grep --fixed-strings 'google-chrome.desktop'
           docker exec "${container_id}" test -s \
             /opt/council/samples/BMW27_GPU.blend
+          docker exec "${container_id}" command -v ristretto
+          docker exec "${container_id}" test -x \
+            /home/kasm-default-profile/Desktop/Renders.desktop
+          docker exec --env HOME=/home/kasm-user "${container_id}" \
+            xdg-mime query default image/png \
+            | grep --extended-regexp 'ristretto\.desktop$'
       - name: Scan immutable image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
