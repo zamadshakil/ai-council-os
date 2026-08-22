@@ -1497,6 +1497,14 @@ class DurableWorker:
         if render_job is None:
             raise RuntimeError("The production render job no longer exists")
         if render_job.status in {"cancelled", "paused", "completed"}:
+            if render_job.status in {"cancelled", "paused"}:
+                try:
+                    await cancel_blender_job(render_job.pod_id, claim.id)
+                except Exception:
+                    logger.warning(
+                        "Could not confirm Blender stage %s was cancelled before skipping it",
+                        claim.id,
+                    )
             return {
                 "stage": render_job.status,
                 "render_job_id": render_job_id,

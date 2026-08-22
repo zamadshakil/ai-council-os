@@ -41,6 +41,85 @@ _tasks: set[asyncio.Task[Any]] = set()
 _operation_lock = asyncio.Lock()
 
 
+class JobCancelledError(RuntimeError):
+    """Raised when the administrator cancels an allowlisted pod operation."""
+
+
+def _raise_if_cancelled(job_id: str) -> None:
+    event = _cancel_events.get(job_id)
+    if event is not None and event.is_set():
+        raise JobCancelledError("Cancelled by administrator")
+
+
+async def _wait_process_or_cancel(
+    job_id: str,
+    process: asyncio.subprocess.Process,
+) -> int:
+    """Wait for a child process while making cancellation authoritative."""
+    event = _cancel_events.get(job_id)
+    if event is None:
+        return await process.wait()
+    _raise_if_cancelled(job_id)
+    process_wait = asyncio.create_task(process.wait())
+    cancel_wait = asyncio.create_task(event.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {process_wait, cancel_wait}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if cancel_wait in done and cancel_wait.result():
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(asyncio.shield(process_wait), timeout=20)
+                except TimeoutError:
+                    process.kill()
+                    await process_wait
+            raise JobCancelledError("Cancelled by administrator")
+        return_code = await process_wait
+        _raise_if_cancelled(job_id)
+        return return_code
+    finally:
+        for task in (process_wait, cancel_wait):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(process_wait, cancel_wait, return_exceptions=True)
+
+
+async def _communicate_or_cancel(
+    job_id: str,
+    process: asyncio.subprocess.Process,
+    input_data: bytes | None = None,
+) -> tuple[bytes, bytes]:
+    """Communicate with a child process without losing cancellation."""
+    event = _cancel_events.get(job_id)
+    if event is None:
+        return await process.communicate(input_data)
+    _raise_if_cancelled(job_id)
+    communicate = asyncio.create_task(process.communicate(input_data))
+    cancel_wait = asyncio.create_task(event.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {communicate, cancel_wait}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if cancel_wait in done and cancel_wait.result():
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(asyncio.shield(communicate), timeout=20)
+                except TimeoutError:
+                    process.kill()
+                    await communicate
+            raise JobCancelledError("Cancelled by administrator")
+        output = await communicate
+        _raise_if_cancelled(job_id)
+        return output
+    finally:
+        for task in (communicate, cancel_wait):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(communicate, cancel_wait, return_exceptions=True)
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -613,12 +692,20 @@ def _classify_rclone(message: str) -> str:
     return "delivery_failed"
 
 
-async def _drive_preflight(render_job_id: str, require_drive: bool) -> dict[str, Any]:
+async def _drive_preflight(
+    render_job_id: str,
+    require_drive: bool,
+    operation_job_id: str | None = None,
+) -> dict[str, Any]:
     if not shutil.which("rclone"):
         return {"status": "blocked" if require_drive else "unconfigured", "error_code": "rclone_unavailable"}
     remote = _drive_remote()
     process = await asyncio.create_subprocess_exec("rclone", "about", remote, "--json", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    stdout, stderr = await process.communicate()
+    if operation_job_id:
+        _processes[operation_job_id] = process
+        stdout, stderr = await _communicate_or_cancel(operation_job_id, process)
+    else:
+        stdout, stderr = await process.communicate()
     if process.returncode != 0:
         message = stderr.decode(errors="replace")[-1000:]
         return {"status": "blocked" if require_drive else "unavailable", "error_code": _classify_rclone(message), "message": message}
@@ -628,14 +715,30 @@ async def _drive_preflight(render_job_id: str, require_drive: bool) -> dict[str,
         quota = {}
     probe = f"{remote.rstrip(':')}:Council OS Renders/.probe/{render_job_id}.txt"
     writer = await asyncio.create_subprocess_exec("rclone", "rcat", probe, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    _, write_error = await writer.communicate(b"Council OS storage probe\n")
+    if operation_job_id:
+        _processes[operation_job_id] = writer
+        _, write_error = await _communicate_or_cancel(
+            operation_job_id, writer, b"Council OS storage probe\n"
+        )
+    else:
+        _, write_error = await writer.communicate(b"Council OS storage probe\n")
     if writer.returncode != 0:
         message = write_error.decode(errors="replace")[-1000:]
         return {"status": "blocked", "error_code": _classify_rclone(message), "quota": quota, "message": message}
     reader = await asyncio.create_subprocess_exec("rclone", "cat", probe, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    read_value, read_error = await reader.communicate()
+    if operation_job_id:
+        _processes[operation_job_id] = reader
+        read_value, read_error = await _communicate_or_cancel(
+            operation_job_id, reader
+        )
+    else:
+        read_value, read_error = await reader.communicate()
     remover = await asyncio.create_subprocess_exec("rclone", "deletefile", probe, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    await remover.communicate()
+    if operation_job_id:
+        _processes[operation_job_id] = remover
+        await _communicate_or_cancel(operation_job_id, remover)
+    else:
+        await remover.communicate()
     if reader.returncode != 0 or read_value != b"Council OS storage probe\n":
         return {"status": "blocked", "error_code": "drive_probe_read_failed", "quota": quota, "message": read_error.decode(errors="replace")[-1000:]}
     return {"status": "ready", "quota": quota, "write_probe": "passed"}
@@ -670,12 +773,14 @@ async def _run_blender_pass(
     profile: Literal["delivery", "compositing"],
 ) -> dict[str, Any]:
     """Run one trusted Blender process and bind NVML samples to that PID."""
+    _raise_if_cancelled(request.job_id)
     report_path = job_dir / f"report-{pass_name}.json"
     log_path = job_dir / "operation.log"
     output_directory.mkdir(parents=True, exist_ok=True)
     before = len(_telemetry_samples(request.job_id))
     baseline: list[dict[str, Any]] = []
     for sample_index in range(3):
+        _raise_if_cancelled(request.job_id)
         baseline.extend(await asyncio.to_thread(_sample_gpu))
         if sample_index < 2:
             await asyncio.sleep(0.25)
@@ -702,9 +807,12 @@ async def _run_blender_pass(
         state.update({"status": "running", "stage": f"benchmark_{pass_name}" if request.operation == "benchmark" else request.operation, "pid": process.pid})
         _write_state(request.job_id, state)
         monitor = asyncio.create_task(_monitor(request.job_id, done, process.pid))
-        return_code = await process.wait()
-        done.set()
-        await monitor
+        try:
+            return_code = await _wait_process_or_cancel(request.job_id, process)
+        finally:
+            done.set()
+            await monitor
+    _raise_if_cancelled(request.job_id)
     report = _read_json(report_path)
     samples = _telemetry_samples(request.job_id)[before:]
     report["gpu_evidence"] = _gpu_evidence(
@@ -793,6 +901,7 @@ async def _run_benchmark(
     compare_reports: dict[str, dict[str, Any]] = {}
     failures: dict[str, str] = {}
     for backend in ("OPTIX", "CUDA"):
+        _raise_if_cancelled(request.job_id)
         try:
             compare_reports[backend] = await _run_blender_pass(
                 request,
@@ -808,6 +917,8 @@ async def _run_benchmark(
             )
             if compare_reports[backend].get("status") != "completed":
                 raise RuntimeError("backend pass was blocked")
+        except JobCancelledError:
+            raise
         except Exception as exc:
             failures[backend] = f"{type(exc).__name__}: {exc}"
     if not compare_reports:
@@ -828,6 +939,7 @@ async def _run_benchmark(
     )
     persistence: dict[str, dict[str, Any]] = {}
     for label, enabled in (("off", False), ("on", True)):
+        _raise_if_cancelled(request.job_id)
         persistence[label] = await _run_blender_pass(
             request,
             source,
@@ -853,6 +965,7 @@ async def _run_benchmark(
     soak_frames = _continuous_frames(
         request.frame_start, request.frame_end, request.frame_step, 50
     )
+    _raise_if_cancelled(request.job_id)
     soak = await _run_blender_pass(
         request,
         source,
@@ -958,7 +1071,10 @@ async def _run_blender(request: RenderStageRequest, source: Path, render_root: P
     )
     if request.operation == "preflight":
         report["runtime"] = await asyncio.to_thread(_runtime_health)
-        report["drive"] = await _drive_preflight(request.render_job_id, request.require_drive)
+        _raise_if_cancelled(request.job_id)
+        report["drive"] = await _drive_preflight(
+            request.render_job_id, request.require_drive, request.job_id
+        )
         if report["drive"].get("status") == "blocked":
             report["status"] = "blocked"
             report.setdefault("warnings", []).append("Google Drive delivery preflight failed")
@@ -1021,7 +1137,7 @@ async def _observe_gui(request: RenderStageRequest, source: Path, render_root: P
             await asyncio.sleep(5)
         else:
             if cancel.is_set():
-                raise RuntimeError("Kasm render observation was cancelled")
+                raise JobCancelledError("Cancelled by administrator")
             raise RuntimeError("Kasm render did not finish before the safety timeout")
     finally:
         done.set()
@@ -1032,10 +1148,17 @@ async def _observe_gui(request: RenderStageRequest, source: Path, render_root: P
     return await asyncio.to_thread(_validate_frames, request, render_root, False)
 
 
-def _validate_frames(request: RenderStageRequest, render_root: Path, checksums: bool = True) -> dict[str, Any]:
+def _validate_frames(
+    request: RenderStageRequest,
+    render_root: Path,
+    checksums: bool = True,
+    job_id: str | None = None,
+) -> dict[str, Any]:
     frames = []
     missing = []
     for number in _expected_frames(request):
+        if job_id:
+            _raise_if_cancelled(job_id)
         path = _frame_path(render_root, number, request.output_profile)
         if not path.exists() or path.stat().st_size <= 0:
             missing.append(number)
@@ -1075,6 +1198,7 @@ def _validate_frames(request: RenderStageRequest, render_root: Path, checksums: 
 
 
 async def _encode(request: RenderStageRequest, source: Path, render_root: Path, job_dir: Path) -> dict[str, Any]:
+    _raise_if_cancelled(request.job_id)
     if request.output_profile != "delivery":
         return {"status": "completed", "warnings": ["Compositing profile retains EXR frames; MP4 encoding was skipped"], "artifacts": []}
     frames = _expected_frames(request)
@@ -1094,7 +1218,7 @@ async def _encode(request: RenderStageRequest, source: Path, render_root: Path, 
                 stderr=asyncio.subprocess.STDOUT,
             )
             _processes[request.job_id] = mixdown
-            mixdown_code = await mixdown.wait()
+            mixdown_code = await _wait_process_or_cancel(request.job_id, mixdown)
         if mixdown_code != 0 or not audio.exists():
             raise RuntimeError("Blender audio mixdown failed")
         audio_arguments = ["-i", str(audio)]
@@ -1102,6 +1226,7 @@ async def _encode(request: RenderStageRequest, source: Path, render_root: Path, 
     await asyncio.to_thread(shutil.rmtree, encode_frames, True)
     encode_frames.mkdir(parents=True, exist_ok=True)
     for index, frame in enumerate(frames, start=1):
+        _raise_if_cancelled(request.job_id)
         frame_path = _frame_path(render_root, frame, request.output_profile)
         if not frame_path.exists() or frame_path.stat().st_size <= 0:
             raise RuntimeError(f"Frame {frame} is missing before MP4 assembly")
@@ -1123,7 +1248,8 @@ async def _encode(request: RenderStageRequest, source: Path, render_root: Path, 
     with log.open("ab") as log_file:
         process = await asyncio.create_subprocess_exec(*command, stdout=log_file, stderr=asyncio.subprocess.STDOUT)
         _processes[request.job_id] = process
-        code = await process.wait()
+        code = await _wait_process_or_cancel(request.job_id, process)
+    _raise_if_cancelled(request.job_id)
     await asyncio.to_thread(shutil.rmtree, encode_frames, True)
     if code != 0 or not output.exists() or output.stat().st_size <= 0:
         raise RuntimeError("FFmpeg did not create the final MP4")
@@ -1131,6 +1257,7 @@ async def _encode(request: RenderStageRequest, source: Path, render_root: Path, 
 
 
 async def _deliver(request: RenderStageRequest, render_root: Path, job_dir: Path) -> dict[str, Any]:
+    _raise_if_cancelled(request.job_id)
     destination = f"{_drive_remote().rstrip(':')}:{request.drive_path}/{request.render_job_id}"
     source = render_root / ("delivery" if request.output_profile == "delivery" else "frames")
     log = job_dir / "operation.log"
@@ -1142,7 +1269,7 @@ async def _deliver(request: RenderStageRequest, render_root: Path, job_dir: Path
     with log.open("ab") as log_file:
         process = await asyncio.create_subprocess_exec(*command, stdout=log_file, stderr=asyncio.subprocess.STDOUT)
         _processes[request.job_id] = process
-        code = await process.wait()
+        code = await _wait_process_or_cancel(request.job_id, process)
     if code != 0:
         tail = "\n".join(_log_tail(request.job_id, 40))
         error_code = _classify_rclone(tail)
@@ -1152,7 +1279,8 @@ async def _deliver(request: RenderStageRequest, render_root: Path, job_dir: Path
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    check_stdout, check_stderr = await check.communicate()
+    _processes[request.job_id] = check
+    check_stdout, check_stderr = await _communicate_or_cancel(request.job_id, check)
     if check.returncode != 0:
         check_message = (check_stderr or check_stdout).decode(errors="replace")[-1000:]
         error_code = _classify_rclone(check_message)
@@ -1171,18 +1299,51 @@ async def _execute_operation(request: RenderStageRequest, source: Path, render_r
             report = await _observe_gui(request, source, render_root, job_dir)
             report["gpu_evidence"] = _gpu_evidence(report, _telemetry_tail(request.job_id, 1000))
         elif request.operation == "validate":
-            report = await asyncio.to_thread(_validate_frames, request, render_root)
+            report = await asyncio.to_thread(
+                _validate_frames, request, render_root, True, request.job_id
+            )
         elif request.operation == "encode":
             report = await _encode(request, source, render_root, job_dir)
         else:
             report = await _deliver(request, render_root, job_dir)
+        _raise_if_cancelled(request.job_id)
         state.update({"status": "completed", "stage": request.operation, "report": report, "error": ""})
+    except JobCancelledError:
+        state.update(
+            {
+                "status": "cancelled",
+                "stage": "cancelled",
+                "error": "Cancelled by administrator",
+            }
+        )
     except Exception as exc:
-        state.update({"status": "failed", "stage": request.operation, "error": f"{type(exc).__name__}: {exc}"})
+        event = _cancel_events.get(request.job_id)
+        if event is not None and event.is_set():
+            state.update(
+                {
+                    "status": "cancelled",
+                    "stage": "cancelled",
+                    "error": "Cancelled by administrator",
+                }
+            )
+        else:
+            state.update({"status": "failed", "stage": request.operation, "error": f"{type(exc).__name__}: {exc}"})
     finally:
         _processes.pop(request.job_id, None)
+        latest = _read_state(request.job_id) or {}
+        event = _cancel_events.get(request.job_id)
+        if latest.get("status") == "cancelled" or (event is not None and event.is_set()):
+            latest.update(
+                {
+                    "status": "cancelled",
+                    "stage": "cancelled",
+                    "error": "Cancelled by administrator",
+                }
+            )
+        else:
+            latest.update(state)
+        _write_state(request.job_id, latest)
         _cancel_events.pop(request.job_id, None)
-        _write_state(request.job_id, state)
 
 
 async def _execute(request: RenderStageRequest, source: Path, render_root: Path, job_dir: Path) -> None:
@@ -1405,6 +1566,8 @@ async def cancel_job(job_id: str) -> dict[str, Any]:
     state = _read_state(job_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Blender job not found")
+    if state.get("status") in {"completed", "failed", "cancelled", "interrupted"}:
+        return _public_state(job_id)
     event = _cancel_events.get(job_id)
     if event:
         event.set()

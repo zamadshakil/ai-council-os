@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -90,6 +92,83 @@ def test_drive_error_codes_distinguish_quota_from_rate_limit():
     assert blender_listener._classify_rclone("HTTP 429 retry later") == (
         "delivery_rate_limited"
     )
+
+
+@pytest.mark.asyncio
+async def test_benchmark_cancellation_stops_before_the_next_gpu_pass(
+    monkeypatch, tmp_path
+):
+    request = blender_listener.RenderStageRequest(
+        job_id="cancel-pass-123",
+        render_job_id="render-pass-123",
+        operation="benchmark",
+        source_path="/workspace/scene.blend",
+        frames=[1],
+        frame_start=1,
+        frame_end=1,
+        samples=1,
+        resolution_percent=1,
+        require_drive=False,
+    )
+    calls: list[str] = []
+    cancel_event = asyncio.Event()
+    blender_listener._cancel_events[request.job_id] = cancel_event
+
+    async def fake_blender_pass(*_args, pass_name, **_kwargs):
+        calls.append(pass_name)
+        cancel_event.set()
+        return {"status": "completed", "frames": []}
+
+    monkeypatch.setattr(blender_listener, "_run_blender_pass", fake_blender_pass)
+    try:
+        with pytest.raises(blender_listener.JobCancelledError):
+            await blender_listener._run_benchmark(
+                request,
+                tmp_path / "scene.blend",
+                tmp_path / "render",
+                tmp_path / "job",
+            )
+    finally:
+        blender_listener._cancel_events.pop(request.job_id, None)
+
+    assert calls == ["backend-optix"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_agent_operation_cannot_be_overwritten_as_failed(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("BLENDER_WORKSPACE_ROOT", str(tmp_path))
+    request = blender_listener.RenderStageRequest(
+        job_id="cancel-state-123",
+        render_job_id="render-state-123",
+        operation="preflight",
+        source_path=str(tmp_path / "scene.blend"),
+        require_drive=False,
+    )
+    source = tmp_path / "scene.blend"
+    source.write_bytes(b"test")
+    job_dir = blender_listener._state_path(request.job_id).parent
+    blender_listener._write_state(
+        request.job_id,
+        {"job_id": request.job_id, "status": "queued", "stage": "preflight"},
+    )
+    cancel_event = asyncio.Event()
+    blender_listener._cancel_events[request.job_id] = cancel_event
+
+    async def fake_run_blender(*_args, **_kwargs):
+        cancel_event.set()
+        raise RuntimeError("child process ended during cancellation")
+
+    monkeypatch.setattr(blender_listener, "_run_blender", fake_run_blender)
+    await blender_listener._execute_operation(
+        request, source, tmp_path / "render", job_dir
+    )
+
+    state = blender_listener._read_state(request.job_id)
+    assert state["status"] == "cancelled"
+    assert state["stage"] == "cancelled"
+    assert "child process" not in state["error"]
 
 
 @pytest.mark.asyncio
