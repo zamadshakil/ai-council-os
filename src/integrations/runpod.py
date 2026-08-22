@@ -157,6 +157,47 @@ def _agent_base_url(pod_id: str) -> str:
     return f"https://{pod_id}-{int(raw_port)}.proxy.runpod.net"
 
 
+def _kasm_base_url(pod_id: str) -> str:
+    return f"https://{_pod_id(pod_id)}-6901.proxy.runpod.net"
+
+
+async def _verify_kasm_proxy(pod_id: str) -> None:
+    """Prove that the public RunPod proxy serves the authenticated Kasm UI.
+
+    A healthy Xfce/VNC process inside the container is insufficient: an
+    incompatible TLS option can still leave artists with a 502 at the public
+    proxy. This probe exercises the same external URL and HTTP Basic Auth flow
+    used by the dashboard's Open Kasm action without returning the password.
+    """
+    password = integration_value("VNC_PW", "").strip()
+    if len(password) < 16:
+        raise RunPodError(
+            "The Kasm access password is not configured",
+            code="BLENDER_KASM_CREDENTIALS_MISSING",
+            http_status=503,
+        )
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(20, read=30), follow_redirects=True
+        ) as client:
+            response = await client.get(
+                _kasm_base_url(pod_id), auth=("kasm_user", password)
+            )
+    except httpx.HTTPError as exc:
+        raise RunPodError(
+            "The public Kasm workstation URL could not be reached",
+            code="BLENDER_KASM_PROXY_UNREACHABLE",
+            http_status=503,
+        ) from exc
+    if response.status_code != 200 or "KasmVNC" not in response.text:
+        raise RunPodError(
+            "The Kasm desktop is running, but RunPod's public workstation proxy is not ready",
+            code="BLENDER_KASM_PROXY_NOT_READY",
+            http_status=503,
+            provider_status=response.status_code,
+        )
+
+
 async def _rest(
     method: str,
     path: str,
@@ -804,6 +845,8 @@ async def verify_blender_agent(pod_id: str) -> dict[str, Any]:
             code="BLENDER_INTERACTIVE_GPU_NOT_READY",
             http_status=503,
         )
+    await _verify_kasm_proxy(pod_id)
+    data["kasm_proxy_reachable"] = True
     return data
 
 

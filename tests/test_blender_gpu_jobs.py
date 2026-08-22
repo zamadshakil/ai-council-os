@@ -274,6 +274,7 @@ async def test_agent_verification_rejects_software_only_interactive_3d(monkeypat
         }
 
     monkeypatch.setattr(runpod, "_agent_request", software_only)
+    monkeypatch.setattr(runpod, "_verify_kasm_proxy", lambda *_args: None)
     with pytest.raises(runpod.RunPodError) as error:
         await runpod.verify_blender_agent("pod-safe-123")
     assert error.value.code == "BLENDER_INTERACTIVE_GPU_NOT_READY"
@@ -294,8 +295,13 @@ async def test_agent_verification_accepts_virtualgl_nvidia_path(monkeypatch):
         }
 
     monkeypatch.setattr(runpod, "_agent_request", accelerated)
+    async def kasm_ready(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runpod, "_verify_kasm_proxy", kasm_ready)
     result = await runpod.verify_blender_agent("pod-safe-123")
     assert result["interactive_3d_acceleration_ready"] is True
+    assert result["kasm_proxy_reachable"] is True
 
 
 @pytest.mark.asyncio

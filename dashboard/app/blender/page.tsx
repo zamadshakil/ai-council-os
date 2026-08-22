@@ -10,7 +10,8 @@ import {
 import {
   actOnBlenderPod, actOnBlenderRenderJob, ApiError, createBlenderRenderJob,
   fetchBlenderPods, fetchBlenderRenderArtifacts, fetchBlenderRenderFrames,
-  fetchBlenderRenderJobs, fetchBlenderRenderTelemetry, provisionBlenderPod,
+  fetchBlenderRenderJob, fetchBlenderRenderJobs, fetchBlenderRenderTelemetry,
+  provisionBlenderPod,
 } from '../lib/api';
 import {
   BlenderArtifact, BlenderPod, BlenderPodAccess, BlenderRenderFrame, BlenderRenderJob,
@@ -204,12 +205,24 @@ export default function BlenderManagerPage() {
     if (action === 'cancel' && !window.confirm('Cancel this production render? Completed frames will remain on the pod.')) return;
     setBusy(action); setError(''); setNotice('');
     try {
-      const response = await actOnBlenderRenderJob(selected.id, action, selected.version);
+      let actionJob = selected;
+      let response;
+      try {
+        response = await actOnBlenderRenderJob(actionJob.id, action, actionJob.version);
+      } catch (cause) {
+        if (!(cause instanceof ApiError) || cause.code !== 'VERSION_CONFLICT') throw cause;
+        // Render stages can advance between the five-second poll and an
+        // operator click. Refresh the optimistic version and retry once so a
+        // normal Pause/Cancel click does not surface a technical conflict.
+        actionJob = await fetchBlenderRenderJob(actionJob.id);
+        setJobs((current) => current.map((job) => job.id === actionJob.id ? actionJob : job));
+        response = await actOnBlenderRenderJob(actionJob.id, action, actionJob.version);
+      }
       setJobs((current) => current.map((job) => job.id === selected.id ? response.resource : job));
       setNotice(action === 'approve_benchmark'
-        ? selected.render_mode === 'kasm_gui'
+        ? actionJob.render_mode === 'kasm_gui'
           ? 'Kasm render is armed. Open Blender and choose Render → Render Animation.'
-          : selected.scheduler === 'flamenco'
+          : actionJob.scheduler === 'flamenco'
             ? 'Approved. Flamenco is preparing the isolated scene and will schedule restartable frame tasks.'
             : 'Approved. Durable headless frame batches are now queued on the one-GPU baseline.'
         : `${human(action)} accepted.`);
